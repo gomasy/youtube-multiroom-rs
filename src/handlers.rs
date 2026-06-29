@@ -89,6 +89,18 @@ pub async fn list_tracks(State(state): State<Arc<AppState>>) -> Json<Value> {
     Json(json!(tracks))
 }
 
+/// DELETE /api/tracks/:id
+pub async fn delete_track(
+    State(state): State<Arc<AppState>>,
+    Path(track_id): Path<String>,
+) -> AppResult<Json<Value>> {
+    state
+        .remove_track(&track_id)
+        .await
+        .ok_or_else(|| AppError::not_found("Track not found"))?;
+    Ok(Json(json!({ "status": "ok" })))
+}
+
 // ════════════════════════════════════════
 // デバイス & 再生制御 API
 // ════════════════════════════════════════
@@ -162,6 +174,19 @@ pub async fn stop_device(
         .await;
     state.broadcast_devices().await;
     Json(json!({ "status": "ok" }))
+}
+
+/// DELETE /api/devices/:id
+pub async fn delete_device(
+    State(state): State<Arc<AppState>>,
+    Path(device_id): Path<String>,
+) -> AppResult<Json<Value>> {
+    state
+        .remove_device(&device_id)
+        .await
+        .ok_or_else(|| AppError::not_found("Device not found"))?;
+    state.broadcast_devices().await;
+    Ok(Json(json!({ "status": "ok" })))
 }
 
 // ════════════════════════════════════════

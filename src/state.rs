@@ -52,12 +52,6 @@ pub struct PlayRequest {
     pub device_ids: Vec<String>,
 }
 
-#[derive(Deserialize)]
-pub struct RenameRequest {
-    pub device_id: String,
-    pub name: String,
-}
-
 // ════════════════════════════════════════
 // DeviceUpdate ビルダー
 // ════════════════════════════════════════
@@ -149,11 +143,11 @@ impl AppState {
             .map_err(|e| format!("yt-dlp 実行エラー: {e}"))?;
 
         if !meta_out.status.success() {
-            let err = String::from_utf8_lossy(&meta_out.stderr);
-            return Err(format!(
-                "メタデータ取得に失敗: {}",
-                &err[..err.len().min(300)]
-            ));
+            let err: String = String::from_utf8_lossy(&meta_out.stderr)
+                .chars()
+                .take(300)
+                .collect();
+            return Err(format!("メタデータ取得に失敗: {err}"));
         }
 
         let meta: Value = serde_json::from_slice(&meta_out.stdout)
@@ -181,11 +175,11 @@ impl AppState {
             .map_err(|e| format!("ダウンロードエラー: {e}"))?;
 
         if !dl_out.status.success() {
-            let err = String::from_utf8_lossy(&dl_out.stderr);
-            return Err(format!(
-                "音声ダウンロードに失敗: {}",
-                &err[..err.len().min(300)]
-            ));
+            let err: String = String::from_utf8_lossy(&dl_out.stderr)
+                .chars()
+                .take(300)
+                .collect();
+            return Err(format!("音声ダウンロードに失敗: {err}"));
         }
 
         let track = AudioTrack {
@@ -208,6 +202,13 @@ impl AppState {
 
     pub async fn get_track(&self, id: &str) -> Option<AudioTrack> {
         self.tracks.read().await.get(id).cloned()
+    }
+
+    pub async fn remove_track(&self, id: &str) -> Option<AudioTrack> {
+        let track = self.tracks.write().await.remove(id)?;
+        let _ = tokio::fs::remove_file(&track.file_path).await;
+        self.pending.write().await.retain(|_, cmd| cmd.track.id != id);
+        Some(track)
     }
 
     pub async fn list_tracks(&self) -> Vec<AudioTrack> {
@@ -263,6 +264,12 @@ impl AppState {
         }
     }
 
+    pub async fn remove_device(&self, device_id: &str) -> Option<DeviceState> {
+        let device = self.devices.write().await.remove(device_id)?;
+        self.pending.write().await.remove(device_id);
+        Some(device)
+    }
+
     pub async fn devices_json(&self) -> Value {
         let devices = self.devices.read().await;
         let map: HashMap<String, Value> = devices
@@ -310,16 +317,23 @@ impl AppState {
 // ════════════════════════════════════════
 
 fn extract_video_id(url: &str) -> Option<String> {
-    let patterns = [
-        r"(?:youtube\.com/watch\?.*v=|youtu\.be/)([a-zA-Z0-9_-]{11})",
-        r"youtube\.com/embed/([a-zA-Z0-9_-]{11})",
-        r"youtube\.com/shorts/([a-zA-Z0-9_-]{11})",
-    ];
-    for pat in &patterns {
-        if let Ok(re) = Regex::new(pat) {
-            if let Some(caps) = re.captures(url) {
-                return caps.get(1).map(|m| m.as_str().to_string());
-            }
+    use std::sync::OnceLock;
+
+    static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+    let patterns = PATTERNS.get_or_init(|| {
+        [
+            r"(?:youtube\.com/watch\?.*v=|youtu\.be/)([a-zA-Z0-9_-]{11})",
+            r"youtube\.com/embed/([a-zA-Z0-9_-]{11})",
+            r"youtube\.com/shorts/([a-zA-Z0-9_-]{11})",
+        ]
+        .iter()
+        .filter_map(|p| Regex::new(p).ok())
+        .collect()
+    });
+
+    for re in patterns {
+        if let Some(caps) = re.captures(url) {
+            return caps.get(1).map(|m| m.as_str().to_string());
         }
     }
     None

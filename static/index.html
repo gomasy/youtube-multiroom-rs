@@ -247,6 +247,19 @@
     margin-top: 2px;
   }
 
+  .delete-btn {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 4px;
+    line-height: 1;
+    flex-shrink: 0;
+    transition: color 0.15s, background 0.15s;
+  }
+  .delete-btn:hover { color: #e53935; background: rgba(229, 57, 53, 0.1); }
+
   /* ── Empty states ── */
   .empty-state {
     text-align: center;
@@ -461,6 +474,7 @@
 // State
 // ────────────────────────────────────────
 let apiToken = localStorage.getItem("api_token");
+let keepAliveInterval = null;
 
 const state = {
   ws: null,
@@ -576,8 +590,8 @@ function connectWS() {
     handleWSMessage(data);
   };
 
-  // Keep-alive
-  setInterval(() => {
+  if (keepAliveInterval) clearInterval(keepAliveInterval);
+  keepAliveInterval = setInterval(() => {
     if (state.ws && state.ws.readyState === WebSocket.OPEN) {
       state.ws.send(JSON.stringify({ type: "ping" }));
     }
@@ -742,7 +756,16 @@ function renderDevices() {
         </div>
         ${trackName ? `<div class="device-track-name">♪ ${escapeHtml(trackName)}</div>` : ""}
       </div>
+      <button class="delete-btn" title="デバイスを削除">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6h14"/>
+        </svg>
+      </button>
     `;
+    card.querySelector(".delete-btn").onclick = (e) => {
+      e.stopPropagation();
+      deleteDevice(dev.device_id);
+    };
     list.appendChild(card);
   });
 
@@ -781,7 +804,16 @@ function renderHistory() {
         <div class="history-title">${escapeHtml(t.title)}</div>
         <div class="history-meta">${t.channel ? escapeHtml(t.channel) + " · " : ""}${formatDuration(t.duration)}</div>
       </div>
+      <button class="delete-btn" title="トラックを削除">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6h14"/>
+        </svg>
+      </button>
     `;
+    item.querySelector(".delete-btn").onclick = (e) => {
+      e.stopPropagation();
+      deleteTrack(t.id);
+    };
     list.appendChild(item);
   });
 }
@@ -806,6 +838,36 @@ function selectAllDevices() {
     allIds.forEach((id) => state.selectedDevices.add(id));
   }
   renderDevices();
+}
+
+async function deleteDevice(deviceId) {
+  try {
+    const res = await authFetch(`/api/devices/${encodeURIComponent(deviceId)}`, { method: "DELETE" });
+    if (!res.ok) throw new Error("削除に失敗しました");
+    state.selectedDevices.delete(deviceId);
+    delete state.devices[deviceId];
+    renderDevices();
+    showToast("デバイスを削除しました");
+  } catch (e) {
+    showToast(`エラー: ${e.message}`);
+  }
+}
+
+async function deleteTrack(trackId) {
+  try {
+    const res = await authFetch(`/api/tracks/${encodeURIComponent(trackId)}`, { method: "DELETE" });
+    if (!res.ok) throw new Error("削除に失敗しました");
+    delete state.tracks[trackId];
+    if (state.currentTrack && state.currentTrack.id === trackId) {
+      state.currentTrack = null;
+      renderNowPlaying();
+    }
+    renderHistory();
+    updatePlayButton();
+    showToast("トラックを削除しました");
+  } catch (e) {
+    showToast(`エラー: ${e.message}`);
+  }
 }
 
 function updatePlayButton() {

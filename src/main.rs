@@ -4,7 +4,7 @@ mod handlers;
 mod state;
 
 use axum::middleware;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::Router;
 use state::AppState;
 use std::net::SocketAddr;
@@ -12,7 +12,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_target(false)
         .with_level(true)
@@ -28,7 +28,9 @@ async fn main() {
         .route("/api/audio/extract", post(handlers::extract_audio))
         .route("/api/audio/:audio_id/stream", get(handlers::stream_audio))
         .route("/api/tracks", get(handlers::list_tracks))
+        .route("/api/tracks/:track_id", delete(handlers::delete_track))
         .route("/api/devices", get(handlers::get_devices))
+        .route("/api/devices/:device_id", delete(handlers::delete_device))
         .route("/api/play", post(handlers::play_on_devices))
         .route("/api/play-all", post(handlers::play_on_all))
         .route("/api/devices/:device_id/stop", post(handlers::stop_device))
@@ -56,7 +58,9 @@ async fn main() {
     }
     println!("══════════════════════════════════════════");
 
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("Listening on {}", addr);
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app).await?;
+
+    Ok(())
 }
