@@ -1,0 +1,50 @@
+{
+  "interactionModel": {
+    "languageModel": {
+      "invocationName": "youtube プレーヤー",
+      "intents": [
+        {
+          "name": "PlayFromWebIntent",
+          "slots": [],
+          "samples": [
+            "再生して",
+            "曲を再生して",
+            "再生を開始して",
+            "音楽を再生",
+            "プレイして",
+            "かけて",
+            "流して"
+          ]
+        },
+        {
+          "name": "AMAZON.PauseIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.ResumeIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.StopIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.CancelIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.HelpIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.FallbackIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.NavigateHomeIntent",
+          "samples": []
+        }
+      ]
+    }
+  }
+}
