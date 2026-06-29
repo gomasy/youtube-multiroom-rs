@@ -150,7 +150,9 @@ sudo systemctl enable --now yt-multiroom
 | POST | `/api/audio/extract` | Yes | Extract audio from a YouTube URL |
 | GET | `/api/audio/:id/stream` | No | Stream MP3 audio |
 | GET | `/api/tracks` | Yes | List extracted tracks |
+| DELETE | `/api/tracks/:id` | Yes | Delete a track and its cached file |
 | GET | `/api/devices` | Yes | List connected devices |
+| DELETE | `/api/devices/:id` | Yes | Delete a device |
 | POST | `/api/play` | Yes | Queue playback on selected devices |
 | POST | `/api/play-all` | Yes | Queue playback on all devices |
 | POST | `/api/devices/:id/stop` | Yes | Stop a device |
