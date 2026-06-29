@@ -17,6 +17,11 @@ pub async fn require_token(
         return next.run(request).await;
     };
 
+    let path = request.uri().path();
+    if path == "/alexa" || (path.starts_with("/api/audio/") && path.ends_with("/stream")) {
+        return next.run(request).await;
+    }
+
     let header_ok = request
         .headers()
         .get("authorization")

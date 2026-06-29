@@ -24,25 +24,20 @@ async fn main() {
 
     let state = AppState::new(base_url.clone(), api_token.clone());
 
-    // トークン認証が必要なルート
-    let protected = Router::new()
+    let app = Router::new()
         .route("/api/audio/extract", post(handlers::extract_audio))
+        .route("/api/audio/:audio_id/stream", get(handlers::stream_audio))
         .route("/api/tracks", get(handlers::list_tracks))
         .route("/api/devices", get(handlers::get_devices))
         .route("/api/play", post(handlers::play_on_devices))
         .route("/api/play-all", post(handlers::play_on_all))
-        .route("/api/devices/{device_id}/stop", post(handlers::stop_device))
+        .route("/api/devices/:device_id/stop", post(handlers::stop_device))
+        .route("/alexa", post(handlers::alexa_webhook))
         .route("/ws", get(handlers::ws_upgrade))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_token,
-        ));
-
-    let app = Router::new()
-        .merge(protected)
-        // Alexa と音声ストリームは認証不要（Alexa が直接アクセスする）
-        .route("/api/audio/{audio_id}/stream", get(handlers::stream_audio))
-        .route("/alexa", post(handlers::alexa_webhook))
+        ))
         .fallback_service(ServeDir::new("static"))
         .layer(CorsLayer::permissive())
         .with_state(state);
