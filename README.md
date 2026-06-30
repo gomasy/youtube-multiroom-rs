@@ -43,6 +43,7 @@ youtube-multiroom-rs/
 
 - Rust 1.75+
 - Node.js 18+
+- Redis
 - yt-dlp
 - ffmpeg
 - A tunnel to expose the server (e.g. ngrok, Cloudflare Tunnel, Tailscale Funnel)
@@ -57,6 +58,13 @@ cd front && npm install && npm run build && cd ..
 cargo build --release
 ```
 
+### Environment Variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `REDIS_URL` | Yes | Redis connection URL (e.g. `redis://127.0.0.1/`) |
+| `API_TOKEN` | No | Bearer token for API authentication |
+
 ### Run
 
 ```bash
@@ -64,7 +72,7 @@ cargo build --release
 ngrok http 8888
 
 # Start the server
-BASE_URL=https://xxxx.ngrok-free.app ./target/release/youtube-multiroom
+REDIS_URL=redis://127.0.0.1/ ./target/release/youtube-multiroom
 ```
 
 Access the Web UI at `http://localhost:8888`.
@@ -81,7 +89,7 @@ npm run dev   # Runs both cargo run and parcel watch via concurrently
 You can protect the API with a Bearer token by setting the `API_TOKEN` environment variable:
 
 ```bash
-API_TOKEN=your-secret-token BASE_URL=https://xxxx.ngrok-free.app ./target/release/youtube-multiroom
+REDIS_URL=redis://127.0.0.1/ API_TOKEN=your-secret-token ./target/release/youtube-multiroom
 ```
 
 When enabled:
@@ -122,7 +130,7 @@ The binary, `front/dist/`, `yt-dlp`, and `ffmpeg` are needed on the Pi.
 
 ```
     AppState (Arc)
-    ├── tracks:  RwLock<HashMap>    # extracted audio cache
+    ├── redis:   ConnectionManager  # track metadata (Redis hash)
     ├── devices: RwLock<HashMap>    # connected Echo devices
     ├── pending: RwLock<HashMap>    # queued play commands
     └── tx: broadcast::Sender      # real-time sync
@@ -161,7 +169,7 @@ After=network.target
 Type=simple
 User=pi
 WorkingDirectory=/home/pi/youtube-multiroom
-Environment=BASE_URL=https://your-tunnel-url
+Environment=REDIS_URL=redis://127.0.0.1/
 Environment=API_TOKEN=your-secret-token
 ExecStart=/home/pi/youtube-multiroom/youtube-multiroom
 Restart=always
