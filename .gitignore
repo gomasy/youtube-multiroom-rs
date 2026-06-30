@@ -1,2 +1,5 @@
 /target
 /audio_cache
+/front/dist
+/front/.parcel-cache
+/front/node_modules

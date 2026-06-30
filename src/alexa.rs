@@ -3,23 +3,24 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 /// Alexa スキルリクエストを処理し、レスポンス JSON を返す
-pub async fn handle_alexa(state: &Arc<AppState>, body: Value) -> Value {
+pub async fn handle_alexa(state: &Arc<AppState>, body: Value, host_base_url: Option<&str>) -> Value {
     let req = &body["request"];
     let req_type = req["type"].as_str().unwrap_or("");
+
+    let base_url = host_base_url.unwrap_or(&state.base_url);
 
     let device_id = body["context"]["System"]["device"]["deviceId"]
         .as_str()
         .unwrap_or("unknown-device")
         .to_string();
 
-    // デバイスを自動登録
-    let short_id = &device_id[device_id.len().saturating_sub(6)..];
+    let short_id = tail_chars(&device_id, 6);
     let name = format!("Echo-{short_id}");
     state.register_device(&device_id, &name).await;
 
     let resp = match req_type {
-        "LaunchRequest" => on_launch(state, &device_id).await,
-        "IntentRequest" => on_intent(state, &body, &device_id).await,
+        "LaunchRequest" => on_launch(state, &device_id, base_url).await,
+        "IntentRequest" => on_intent(state, &body, &device_id, base_url).await,
         "SessionEndedRequest" => speech("セッション終了", true),
         t if t.starts_with("AudioPlayer.") => {
             on_audio_event(state, t, &body, &device_id).await
@@ -33,12 +34,12 @@ pub async fn handle_alexa(state: &Arc<AppState>, body: Value) -> Value {
 
 // ── Launch ──
 
-async fn on_launch(state: &Arc<AppState>, device_id: &str) -> Value {
+async fn on_launch(state: &Arc<AppState>, device_id: &str, base_url: &str) -> Value {
     // 保留中コマンドがあれば即再生
     if let Some(cmd) = state.take_pending(device_id).await {
         if cmd.action == "play" {
-            tracing::info!("Auto-playing queued track on {}", &device_id[device_id.len().saturating_sub(8)..]);
-            return play_directive(state, &cmd.track, device_id, 0);
+            tracing::info!("Auto-playing queued track on {}", tail_chars(device_id, 8));
+            return play_directive(state, &cmd.track, device_id, 0, base_url).await;
         }
     }
 
@@ -54,7 +55,7 @@ async fn on_launch(state: &Arc<AppState>, device_id: &str) -> Value {
 
 // ── Intents ──
 
-async fn on_intent(state: &Arc<AppState>, body: &Value, device_id: &str) -> Value {
+async fn on_intent(state: &Arc<AppState>, body: &Value, device_id: &str, base_url: &str) -> Value {
     let intent = body["request"]["intent"]["name"]
         .as_str()
         .unwrap_or("");
@@ -62,7 +63,7 @@ async fn on_intent(state: &Arc<AppState>, body: &Value, device_id: &str) -> Valu
     match intent {
         "PlayFromWebIntent" => {
             if let Some(cmd) = state.take_pending(device_id).await {
-                return play_directive(state, &cmd.track, device_id, 0);
+                return play_directive(state, &cmd.track, device_id, 0, base_url).await;
             }
             speech(
                 "再生する曲がキューされていません。Web 画面で曲を選んでください。",
@@ -103,7 +104,7 @@ async fn on_intent(state: &Arc<AppState>, body: &Value, device_id: &str) -> Valu
                     let track = track.clone();
                     let pos = dev.position_ms;
                     drop(devices);
-                    return play_directive(state, &track, device_id, pos);
+                    return play_directive(state, &track, device_id, pos, base_url).await;
                 }
             }
             speech("再生する曲がありません。", true)
@@ -135,10 +136,7 @@ async fn on_audio_event(
 
     match event_type {
         "AudioPlayer.PlaybackStarted" => {
-            tracing::info!(
-                "Playback started: {}",
-                &device_id[device_id.len().saturating_sub(8)..]
-            );
+            tracing::info!("Playback started: {}", tail_chars(device_id, 8));
             state
                 .update_device(device_id, DeviceUpdate::new().status("playing"))
                 .await;
@@ -161,11 +159,7 @@ async fn on_audio_event(
         }
         "AudioPlayer.PlaybackFailed" => {
             let err = &body["request"]["error"];
-            tracing::error!(
-                "Playback failed on {}: {:?}",
-                &device_id[device_id.len().saturating_sub(8)..],
-                err
-            );
+            tracing::error!("Playback failed on {}: {:?}", tail_chars(device_id, 8), err);
             state
                 .update_device(device_id, DeviceUpdate::new().status("error"))
                 .await;
@@ -178,29 +172,24 @@ async fn on_audio_event(
 
 // ── ヘルパー ──
 
-fn play_directive(
+async fn play_directive(
     state: &Arc<AppState>,
     track: &AudioTrack,
     device_id: &str,
     offset_ms: u64,
+    base_url: &str,
 ) -> Value {
-    let stream_url = format!("{}/api/audio/{}/stream", state.base_url, track.id);
+    let stream_url = format!("{}/api/audio/{}/stream", base_url, track.id);
 
-    // 状態更新は fire-and-forget (呼び出し元で broadcast する)
-    let state = state.clone();
-    let did = device_id.to_string();
-    let t = track.clone();
-    tokio::spawn(async move {
-        state
-            .update_device(
-                &did,
-                DeviceUpdate::new()
-                    .status("playing")
-                    .track(t)
-                    .position(offset_ms),
-            )
-            .await;
-    });
+    state
+        .update_device(
+            device_id,
+            DeviceUpdate::new()
+                .status("playing")
+                .track(track.clone())
+                .position(offset_ms),
+        )
+        .await;
 
     json!({
         "version": "1.0",
@@ -227,6 +216,12 @@ fn play_directive(
             "shouldEndSession": true
         }
     })
+}
+
+fn tail_chars(s: &str, n: usize) -> &str {
+    let skip = s.chars().count().saturating_sub(n);
+    let offset = s.char_indices().nth(skip).map_or(s.len(), |(i, _)| i);
+    &s[offset..]
 }
 
 fn speech(text: &str, end_session: bool) -> Value {

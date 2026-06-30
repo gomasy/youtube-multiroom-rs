@@ -2,7 +2,7 @@ use crate::alexa::handle_alexa;
 use crate::state::{AppState, DeviceUpdate, ExtractRequest, PlayRequest};
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path, State, WebSocketUpgrade};
-use axum::http::StatusCode;
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -54,6 +54,7 @@ pub async fn extract_audio(
         .extract_audio(&req.url)
         .await
         .map_err(AppError::bad_request)?;
+    state.broadcast_tracks().await;
     Ok(Json(json!(track)))
 }
 
@@ -61,6 +62,7 @@ pub async fn extract_audio(
 pub async fn stream_audio(
     State(state): State<Arc<AppState>>,
     Path(audio_id): Path<String>,
+    headers: HeaderMap,
 ) -> AppResult<Response> {
     let track = state
         .get_track(&audio_id)
@@ -71,16 +73,70 @@ pub async fn stream_audio(
         .await
         .map_err(|e| AppError::not_found(format!("ファイル読み取りエラー: {e}")))?;
 
+    let total = bytes.len();
+
+    if let Some(range) = headers.get(header::RANGE).and_then(|v| v.to_str().ok()) {
+        if let Some(range) = parse_byte_range(range, total) {
+            let body = bytes[range.0..=range.1].to_vec();
+            return Ok((
+                StatusCode::PARTIAL_CONTENT,
+                [
+                    (header::CONTENT_TYPE, "audio/mpeg".to_string()),
+                    (header::ACCEPT_RANGES, "bytes".to_string()),
+                    (
+                        header::CONTENT_RANGE,
+                        format!("bytes {}-{}/{}", range.0, range.1, total),
+                    ),
+                    (header::CONTENT_LENGTH, body.len().to_string()),
+                    (
+                        header::CACHE_CONTROL,
+                        "public, max-age=3600".to_string(),
+                    ),
+                ],
+                body,
+            )
+                .into_response());
+        }
+    }
+
     Ok((
         StatusCode::OK,
         [
-            ("content-type", "audio/mpeg"),
-            ("accept-ranges", "bytes"),
-            ("cache-control", "public, max-age=3600"),
+            (header::CONTENT_TYPE, "audio/mpeg".to_string()),
+            (header::ACCEPT_RANGES, "bytes".to_string()),
+            (header::CONTENT_LENGTH, total.to_string()),
+            (
+                header::CACHE_CONTROL,
+                "public, max-age=3600".to_string(),
+            ),
         ],
         bytes,
     )
         .into_response())
+}
+
+fn parse_byte_range(header: &str, total: usize) -> Option<(usize, usize)> {
+    if total == 0 {
+        return None;
+    }
+    let range = header.strip_prefix("bytes=")?;
+    let (start_str, end_str) = range.split_once('-')?;
+    let start = if start_str.is_empty() {
+        let suffix_len: usize = end_str.parse().ok()?;
+        total.saturating_sub(suffix_len)
+    } else {
+        start_str.parse().ok()?
+    };
+    let end = if end_str.is_empty() {
+        total - 1
+    } else {
+        end_str.parse::<usize>().ok()?.min(total - 1)
+    };
+    if start <= end && start < total {
+        Some((start, end))
+    } else {
+        None
+    }
 }
 
 /// GET /api/tracks
@@ -98,6 +154,8 @@ pub async fn delete_track(
         .remove_track(&track_id)
         .await
         .ok_or_else(|| AppError::not_found("Track not found"))?;
+    state.broadcast_tracks().await;
+    state.broadcast_devices().await;
     Ok(Json(json!({ "status": "ok" })))
 }
 
@@ -196,11 +254,18 @@ pub async fn delete_device(
 /// POST /alexa
 pub async fn alexa_webhook(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Json<Value> {
     let req_type = body["request"]["type"].as_str().unwrap_or("unknown");
     tracing::info!("Alexa request: {}", req_type);
-    Json(handle_alexa(&state, body).await)
+
+    let base_url = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(|host| format!("https://{host}"));
+
+    Json(handle_alexa(&state, body, base_url.as_deref()).await)
 }
 
 // ════════════════════════════════════════

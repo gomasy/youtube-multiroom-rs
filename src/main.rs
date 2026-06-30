@@ -40,7 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             state.clone(),
             auth::require_token,
         ))
-        .fallback_service(ServeDir::new("static"))
+        .fallback_service(ServeDir::new("front/dist"))
         .layer(CorsLayer::permissive())
         .with_state(state);
 

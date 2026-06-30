@@ -100,7 +100,9 @@ pub struct AppState {
 impl AppState {
     pub fn new(base_url: String, api_token: Option<String>) -> Arc<Self> {
         let (tx, _) = broadcast::channel::<String>(256);
-        let cache_dir = PathBuf::from("./audio_cache");
+        let cache_dir = std::env::current_dir()
+            .unwrap_or_default()
+            .join("audio_cache");
         std::fs::create_dir_all(&cache_dir).ok();
 
         Arc::new(Self {
@@ -208,6 +210,16 @@ impl AppState {
         let track = self.tracks.write().await.remove(id)?;
         let _ = tokio::fs::remove_file(&track.file_path).await;
         self.pending.write().await.retain(|_, cmd| cmd.track.id != id);
+
+        let mut devices = self.devices.write().await;
+        for dev in devices.values_mut() {
+            if dev.current_track.as_ref().is_some_and(|t| t.id == id) {
+                dev.current_track = None;
+                dev.status = "idle".to_string();
+            }
+        }
+        drop(devices);
+
         Some(track)
     }
 
@@ -282,10 +294,17 @@ impl AppState {
     // ── ブロードキャスト ──
 
     pub async fn broadcast_devices(&self) {
-        let states = self.devices_json().await;
         let msg = json!({
             "type": "device_update",
-            "devices": states,
+            "devices": self.devices_json().await,
+        });
+        let _ = self.tx.send(msg.to_string());
+    }
+
+    pub async fn broadcast_tracks(&self) {
+        let msg = json!({
+            "type": "tracks_update",
+            "tracks": self.tracks_json().await,
         });
         let _ = self.tx.send(msg.to_string());
     }

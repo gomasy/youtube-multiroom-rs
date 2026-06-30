@@ -1,0 +1,21 @@
+{
+  "name": "youtube-multiroom-frontend",
+  "private": true,
+  "source": "src/index.html",
+  "scripts": {
+    "clean": "rm -rf dist .parcel-cache",
+    "dev": "concurrently -n rust,parcel -c cyan,yellow \"cd .. && cargo run\" \"npm run clean && parcel watch\"",
+    "build": "npm run clean && parcel build"
+  },
+  "dependencies": {
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "concurrently": "^10.0.3",
+    "parcel": "^2.15.2",
+    "typescript": "^5.8.3"
+  }
+}
