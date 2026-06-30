@@ -1,7 +1,7 @@
 # YouTube MultiRoom
 
 A Spotify Connect-style system for simultaneously playing YouTube audio on multiple Amazon Echo Dot devices.
-Built with axum + tokio.
+Built with axum + tokio (backend) and React + TypeScript (frontend).
 
 ## Project Structure
 
@@ -14,8 +14,25 @@ youtube-multiroom-rs/
 │   ├── handlers.rs    # HTTP / WebSocket handlers
 │   ├── auth.rs        # Bearer token authentication middleware
 │   └── alexa.rs       # Alexa skill handler
-├── static/
-│   └── index.html     # Web UI
+├── front/
+│   ├── package.json
+│   ├── tsconfig.json
+│   └── src/
+│       ├── index.html
+│       ├── index.tsx
+│       ├── App.tsx
+│       ├── api.ts         # Auth-aware fetch wrapper
+│       ├── hooks.ts       # WebSocket hook
+│       ├── types.ts       # Shared type definitions
+│       ├── styles.css
+│       └── components/
+│           ├── AuthModal.tsx
+│           ├── DeviceList.tsx
+│           ├── Header.tsx
+│           ├── History.tsx
+│           ├── NowPlaying.tsx
+│           ├── Toast.tsx
+│           └── UrlInput.tsx
 ├── alexa_interaction_model.json
 └── README.md
 ```
@@ -25,6 +42,7 @@ youtube-multiroom-rs/
 ### Prerequisites
 
 - Rust 1.75+
+- Node.js 18+
 - yt-dlp
 - ffmpeg
 - A tunnel to expose the server (e.g. ngrok, Cloudflare Tunnel, Tailscale Funnel)
@@ -32,6 +50,10 @@ youtube-multiroom-rs/
 ### Build
 
 ```bash
+# Frontend
+cd front && npm install && npm run build && cd ..
+
+# Backend
 cargo build --release
 ```
 
@@ -46,6 +68,13 @@ BASE_URL=https://xxxx.ngrok-free.app ./target/release/youtube-multiroom
 ```
 
 Access the Web UI at `http://localhost:8888`.
+
+### Development
+
+```bash
+cd front
+npm run dev   # Runs both cargo run and parcel watch via concurrently
+```
 
 ### Authentication
 
@@ -70,7 +99,7 @@ cargo build --release --target aarch64-unknown-linux-gnu
 scp target/aarch64-unknown-linux-gnu/release/youtube-multiroom pi@raspberrypi:~/
 ```
 
-Only the single binary + `static/` folder + `yt-dlp` + `ffmpeg` are needed on the Pi.
+The binary, `front/dist/`, `yt-dlp`, and `ffmpeg` are needed on the Pi.
 
 ## Alexa Skill Setup
 
@@ -96,26 +125,29 @@ Only the single binary + `static/` folder + `yt-dlp` + `ffmpeg` are needed on th
     ├── tracks:  RwLock<HashMap>    # extracted audio cache
     ├── devices: RwLock<HashMap>    # connected Echo devices
     ├── pending: RwLock<HashMap>    # queued play commands
-    └── tx: broadcast::Sender      # real-time device sync
+    └── tx: broadcast::Sender      # real-time sync
          │
-    ┌────┴─────────────────────────────────────────────┐
-    │  axum Router                                     │
-    ├──────────────────────────────────────────────────┤
-    │  POST /api/audio/extract        yt-dlp extract   │
-    │  GET  /api/audio/:id/stream     MP3 streaming    │
-    │  GET  /api/tracks               track list       │
-    │  GET  /api/devices              device list      │
-    │  POST /api/play                 queue to devices  │
-    │  POST /api/play-all             queue to all      │
-    │  POST /api/devices/:id/stop     stop device      │
-    │  POST /alexa                    Alexa webhook    │
-    │  WS   /ws                       real-time sync   │
-    │  GET  /*                        static files     │
-    └──────────────────────────────────────────────────┘
+    ┌────┴─────────────────────────────────────────────────┐
+    │  axum Router                                         │
+    ├──────────────────────────────────────────────────────┤
+    │  POST   /api/audio/extract      yt-dlp extract       │
+    │  GET    /api/audio/:id/stream   MP3 streaming        │
+    │  GET    /api/tracks             track list            │
+    │  DELETE /api/tracks/:id         delete track          │
+    │  GET    /api/devices            device list           │
+    │  DELETE /api/devices/:id        delete device         │
+    │  POST   /api/play              queue to devices       │
+    │  POST   /api/play-all          queue to all           │
+    │  POST   /api/devices/:id/stop  stop device            │
+    │  POST   /alexa                 Alexa webhook          │
+    │  WS     /ws                    real-time sync         │
+    │  GET    /*                     front/dist static      │
+    └──────────────────────────────────────────────────────┘
 ```
 
-Device state changes are broadcast via `tokio::sync::broadcast` channel.
-All WebSocket clients receive updates through a `select!` loop.
+State changes are broadcast to all WebSocket clients via `tokio::sync::broadcast`:
+- `device_update` — device status, track assignment, connection changes
+- `tracks_update` — track extraction, deletion
 
 ## systemd Service
 
@@ -148,7 +180,7 @@ sudo systemctl enable --now yt-multiroom
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | POST | `/api/audio/extract` | Yes | Extract audio from a YouTube URL |
-| GET | `/api/audio/:id/stream` | No | Stream MP3 audio |
+| GET | `/api/audio/:id/stream` | No | Stream MP3 audio (supports Range requests) |
 | GET | `/api/tracks` | Yes | List extracted tracks |
 | DELETE | `/api/tracks/:id` | Yes | Delete a track and its cached file |
 | GET | `/api/devices` | Yes | List connected devices |
@@ -157,7 +189,7 @@ sudo systemctl enable --now yt-multiroom
 | POST | `/api/play-all` | Yes | Queue playback on all devices |
 | POST | `/api/devices/:id/stop` | Yes | Stop a device |
 | POST | `/alexa` | No | Alexa skill webhook |
-| WS | `/ws` | Yes | Real-time device state sync |
+| WS | `/ws` | Yes | Real-time device & track sync |
 
 ## License
 
