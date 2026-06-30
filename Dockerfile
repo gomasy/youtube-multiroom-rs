@@ -14,9 +14,10 @@ RUN touch src/main.rs && cargo build --release
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates ffmpeg python3 pipx \
+        ca-certificates curl ffmpeg python3 pipx unzip \
+    && curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh \
     && pipx install yt-dlp \
-    && apt-get purge -y pipx \
+    && apt-get purge -y curl pipx unzip \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 ENV PATH="/root/.local/bin:${PATH}"
