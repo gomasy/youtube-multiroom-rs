@@ -291,7 +291,7 @@ body {
   bottom: 24px;
   left: 50%;
   transform: translateX(-50%);
-  z-index: 100;
+  z-index: 200;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -338,7 +338,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 200;
+  z-index: 100;
 }
 .auth-box {
   background: var(--surface);
