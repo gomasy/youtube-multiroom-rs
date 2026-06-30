@@ -8,6 +8,7 @@ use axum::routing::{delete, get, post};
 use axum::Router;
 use state::AppState;
 use std::net::SocketAddr;
+use std::process;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
@@ -18,11 +19,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_level(true)
         .init();
 
-    let base_url = std::env::var("BASE_URL")
-        .unwrap_or_else(|_| "https://your-tunnel-url.ngrok-free.app".to_string());
     let api_token = std::env::var("API_TOKEN").ok().filter(|s| !s.is_empty());
+    let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| {
+        eprintln!("Error: REDIS_URL must be set");
+        process::exit(1);
+    });
 
-    let state = AppState::new(base_url.clone(), api_token.clone());
+    let state = match AppState::new(api_token.clone(), &redis_url).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            process::exit(1);
+        }
+    };
 
     let app = Router::new()
         .route("/api/audio/extract", post(handlers::extract_audio))
@@ -48,9 +57,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("══════════════════════════════════════════");
     println!("  YouTube MultiRoom Server (Rust)");
-    println!("  BASE_URL = {base_url}");
+    println!("  Redis    = {redis_url}");
     println!("  Web UI   → http://localhost:8888");
-    println!("  Alexa    → POST {{BASE_URL}}/alexa");
+    println!("  Alexa    → POST /alexa");
     if api_token.is_some() {
         println!("  Auth     → API_TOKEN is set");
     } else {

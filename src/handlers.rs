@@ -71,7 +71,7 @@ pub async fn stream_audio(
 
     let bytes = fs::read(&track.file_path)
         .await
-        .map_err(|e| AppError::not_found(format!("ファイル読み取りエラー: {e}")))?;
+        .map_err(|e| AppError::not_found(format!("Failed to read file: {e}")))?;
 
     let total = bytes.len();
 
@@ -187,7 +187,7 @@ pub async fn play_on_devices(
     Ok(Json(json!({
         "status": "queued",
         "devices": req.device_ids,
-        "message": "各 Echo で「アレクサ、YouTube プレーヤーを開いて」と言ってください"
+        "message": "Say 'Alexa, open YouTube Player' on each Echo device"
     })))
 }
 
@@ -218,7 +218,7 @@ pub async fn play_on_all(
     Ok(Json(json!({
         "status": "queued",
         "devices": device_ids,
-        "message": "各 Echo で「アレクサ、YouTube プレーヤーを開いて」と言ってください"
+        "message": "Say 'Alexa, open YouTube Player' on each Echo device"
     })))
 }
 
@@ -256,16 +256,17 @@ pub async fn alexa_webhook(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(body): Json<Value>,
-) -> Json<Value> {
+) -> AppResult<Json<Value>> {
     let req_type = body["request"]["type"].as_str().unwrap_or("unknown");
     tracing::info!("Alexa request: {}", req_type);
 
     let base_url = headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
-        .map(|host| format!("https://{host}"));
+        .map(|host| format!("https://{host}"))
+        .ok_or_else(|| AppError::bad_request("Host header is required"))?;
 
-    Json(handle_alexa(&state, body, base_url.as_deref()).await)
+    Ok(Json(handle_alexa(&state, body, &base_url).await))
 }
 
 // ════════════════════════════════════════

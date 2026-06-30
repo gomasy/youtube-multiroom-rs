@@ -1,3 +1,5 @@
+use redis::aio::ConnectionManager;
+use redis::AsyncCommands;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -7,6 +9,9 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
 use tokio::sync::{broadcast, RwLock};
+use tokio::time;
+
+const REDIS_KEY_TRACKS: &str = "youtube:tracks";
 
 // ════════════════════════════════════════
 // データモデル
@@ -21,6 +26,32 @@ pub struct AudioTrack {
     pub channel: String,
     #[serde(skip)]
     pub file_path: String,
+}
+
+impl AudioTrack {
+    fn to_redis_json(&self) -> String {
+        json!({
+            "id": self.id,
+            "title": self.title,
+            "thumbnail": self.thumbnail,
+            "duration": self.duration,
+            "channel": self.channel,
+            "file_path": self.file_path,
+        })
+        .to_string()
+    }
+
+    fn from_redis_json(s: &str) -> Option<Self> {
+        let v: Value = serde_json::from_str(s).ok()?;
+        Some(Self {
+            id: v["id"].as_str()?.to_string(),
+            title: v["title"].as_str()?.to_string(),
+            thumbnail: v["thumbnail"].as_str().unwrap_or("").to_string(),
+            duration: v["duration"].as_u64().unwrap_or(0),
+            channel: v["channel"].as_str().unwrap_or("").to_string(),
+            file_path: v["file_path"].as_str()?.to_string(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,48 +119,54 @@ impl DeviceUpdate {
 // ════════════════════════════════════════
 
 pub struct AppState {
-    pub tracks: RwLock<HashMap<String, AudioTrack>>,
+    redis: ConnectionManager,
     pub devices: RwLock<HashMap<String, DeviceState>>,
     pub pending: RwLock<HashMap<String, PendingCommand>>,
     pub tx: broadcast::Sender<String>,
-    pub base_url: String,
     pub cache_dir: PathBuf,
     pub api_token: Option<String>,
 }
 
 impl AppState {
-    pub fn new(base_url: String, api_token: Option<String>) -> Arc<Self> {
+    pub async fn new(
+        api_token: Option<String>,
+        redis_url: &str,
+    ) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
         let (tx, _) = broadcast::channel::<String>(256);
         let cache_dir = std::env::current_dir()
             .unwrap_or_default()
             .join("audio_cache");
         std::fs::create_dir_all(&cache_dir).ok();
 
-        Arc::new(Self {
-            tracks: RwLock::new(HashMap::new()),
+        let client = redis::Client::open(redis_url)?;
+        let redis = time::timeout(
+            time::Duration::from_secs(5),
+            ConnectionManager::new(client),
+        )
+        .await
+        .map_err(|_| format!("Redis connection timed out ({redis_url})"))??;
+
+        Ok(Arc::new(Self {
+            redis,
             devices: RwLock::new(HashMap::new()),
             pending: RwLock::new(HashMap::new()),
             tx,
-            base_url,
             cache_dir,
             api_token,
-        })
+        }))
     }
 
     // ── 音声取得 ──
 
     pub async fn extract_audio(&self, url: &str) -> Result<AudioTrack, String> {
         let video_id =
-            extract_video_id(url).ok_or("YouTube の URL を認識できませんでした")?;
+            extract_video_id(url).ok_or("Could not recognize YouTube URL")?;
 
-        // キャッシュ確認
-        {
-            let tracks = self.tracks.read().await;
-            if let Some(track) = tracks.get(&video_id) {
-                if Path::new(&track.file_path).exists() {
-                    tracing::info!("Cache hit: {}", video_id);
-                    return Ok(track.clone());
-                }
+        // Redis キャッシュ確認
+        if let Some(track) = self.get_track(&video_id).await {
+            if Path::new(&track.file_path).exists() {
+                tracing::info!("Cache hit: {}", video_id);
+                return Ok(track);
             }
         }
 
@@ -142,18 +179,18 @@ impl AppState {
             .args(["--dump-json", "--no-download", url])
             .output()
             .await
-            .map_err(|e| format!("yt-dlp 実行エラー: {e}"))?;
+            .map_err(|e| format!("Failed to run yt-dlp: {e}"))?;
 
         if !meta_out.status.success() {
             let err: String = String::from_utf8_lossy(&meta_out.stderr)
                 .chars()
                 .take(300)
                 .collect();
-            return Err(format!("メタデータ取得に失敗: {err}"));
+            return Err(format!("Failed to fetch metadata: {err}"));
         }
 
         let meta: Value = serde_json::from_slice(&meta_out.stdout)
-            .map_err(|e| format!("メタデータ解析エラー: {e}"))?;
+            .map_err(|e| format!("Failed to parse metadata: {e}"))?;
 
         // 音声ダウンロード
         let title = meta["title"].as_str().unwrap_or("Unknown");
@@ -174,14 +211,14 @@ impl AppState {
             ])
             .output()
             .await
-            .map_err(|e| format!("ダウンロードエラー: {e}"))?;
+            .map_err(|e| format!("Download error: {e}"))?;
 
         if !dl_out.status.success() {
             let err: String = String::from_utf8_lossy(&dl_out.stderr)
                 .chars()
                 .take(300)
                 .collect();
-            return Err(format!("音声ダウンロードに失敗: {err}"));
+            return Err(format!("Failed to download audio: {err}"));
         }
 
         let track = AudioTrack {
@@ -197,17 +234,27 @@ impl AppState {
             file_path: output_str,
         };
 
-        self.tracks.write().await.insert(video_id, track.clone());
+        let mut conn = self.redis.clone();
+        let _: Result<(), _> = conn
+            .hset(REDIS_KEY_TRACKS, &video_id, track.to_redis_json())
+            .await;
+
         tracing::info!("Ready: {} ({}s)", track.title, track.duration);
         Ok(track)
     }
 
     pub async fn get_track(&self, id: &str) -> Option<AudioTrack> {
-        self.tracks.read().await.get(id).cloned()
+        let mut conn = self.redis.clone();
+        let json_str: String = conn.hget(REDIS_KEY_TRACKS, id).await.ok()?;
+        AudioTrack::from_redis_json(&json_str)
     }
 
     pub async fn remove_track(&self, id: &str) -> Option<AudioTrack> {
-        let track = self.tracks.write().await.remove(id)?;
+        let track = self.get_track(id).await?;
+
+        let mut conn = self.redis.clone();
+        let _: Result<(), _> = conn.hdel(REDIS_KEY_TRACKS, id).await;
+
         let _ = tokio::fs::remove_file(&track.file_path).await;
         self.pending.write().await.retain(|_, cmd| cmd.track.id != id);
 
@@ -218,20 +265,26 @@ impl AppState {
                 dev.status = "idle".to_string();
             }
         }
-        drop(devices);
 
         Some(track)
     }
 
     pub async fn list_tracks(&self) -> Vec<AudioTrack> {
-        self.tracks.read().await.values().cloned().collect()
+        let mut conn = self.redis.clone();
+        let all: HashMap<String, String> = conn
+            .hgetall(REDIS_KEY_TRACKS)
+            .await
+            .unwrap_or_default();
+        all.values()
+            .filter_map(|s| AudioTrack::from_redis_json(s))
+            .collect()
     }
 
     pub async fn tracks_json(&self) -> Value {
-        let tracks = self.tracks.read().await;
+        let tracks = self.list_tracks().await;
         let map: HashMap<String, Value> = tracks
-            .iter()
-            .map(|(k, v)| (k.clone(), json!(v)))
+            .into_iter()
+            .map(|t| (t.id.clone(), json!(t)))
             .collect();
         json!(map)
     }

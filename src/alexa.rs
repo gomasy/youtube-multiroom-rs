@@ -3,11 +3,9 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 /// Alexa スキルリクエストを処理し、レスポンス JSON を返す
-pub async fn handle_alexa(state: &Arc<AppState>, body: Value, host_base_url: Option<&str>) -> Value {
+pub async fn handle_alexa(state: &Arc<AppState>, body: Value, base_url: &str) -> Value {
     let req = &body["request"];
     let req_type = req["type"].as_str().unwrap_or("");
-
-    let base_url = host_base_url.unwrap_or(&state.base_url);
 
     let device_id = body["context"]["System"]["device"]["deviceId"]
         .as_str()
