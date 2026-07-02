@@ -19,6 +19,7 @@ export function App() {
   const [currentTrack, setCurrentTrack] = useState<Track | null>(null);
   const { toasts, showToast } = useToast();
 
+  const [extracting, setExtracting] = useState(false);
   const onUnauthorized = useCallback(() => setShowAuth(true), []);
 
   useEffect(() => {
@@ -31,8 +32,23 @@ export function App() {
     });
   }, []);
 
-  useWebSocket(wsActive, {
-    onConnectedChange: setConnected,
+  const handleExtractResult = useCallback((track: Track) => {
+    setExtracting(false);
+    setCurrentTrack(track);
+    setTracks((prev) => ({ ...prev, [track.id]: track }));
+    showToast(`「${track.title}」を取得しました`);
+  }, [showToast]);
+
+  const handleExtractError = useCallback((error: string) => {
+    setExtracting(false);
+    showToast(`エラー: ${error}`);
+  }, [showToast]);
+
+  const { sendMessage } = useWebSocket(wsActive, {
+    onConnectedChange: (c) => {
+      setConnected(c);
+      if (!c) setExtracting(false);
+    },
     onInit: (devs, trks) => {
       setDevices(devs);
       setTracks(trks);
@@ -42,12 +58,9 @@ export function App() {
       setTracks(trks);
       setCurrentTrack((prev) => (prev && !(prev.id in trks) ? null : prev));
     },
+    onExtractResult: handleExtractResult,
+    onExtractError: handleExtractError,
   });
-
-  function handleTrackExtracted(track: Track) {
-    setCurrentTrack(track);
-    setTracks((prev) => ({ ...prev, [track.id]: track }));
-  }
 
   function handleTrackDeleted(trackId: string) {
     setTracks((prev) => {
@@ -76,8 +89,14 @@ export function App() {
       <div className="app">
         <Header connected={connected} />
         <UrlInput
-          onTrackExtracted={handleTrackExtracted}
-          onUnauthorized={onUnauthorized}
+          extracting={extracting}
+          onExtract={(url) => {
+            if (sendMessage({ type: "extract_audio", url })) {
+              setExtracting(true);
+            } else {
+              showToast("サーバーに接続されていません");
+            }
+          }}
           showToast={showToast}
         />
         <NowPlaying track={currentTrack} />

@@ -6,6 +6,8 @@ interface WSCallbacks {
   onInit: (devices: Record<string, Device>, tracks: Record<string, Track>) => void;
   onDeviceUpdate: (devices: Record<string, Device>) => void;
   onTracksUpdate: (tracks: Record<string, Track>) => void;
+  onExtractResult: (track: Track) => void;
+  onExtractError: (error: string) => void;
   onConnectedChange: (connected: boolean) => void;
 }
 
@@ -46,6 +48,10 @@ export function useWebSocket(active: boolean, callbacks: WSCallbacks) {
         cbRef.current.onDeviceUpdate(data.devices || {});
       } else if (data.type === "tracks_update") {
         cbRef.current.onTracksUpdate(data.tracks || {});
+      } else if (data.type === "extract_audio_result") {
+        cbRef.current.onExtractResult(data.track);
+      } else if (data.type === "extract_audio_error") {
+        cbRef.current.onExtractError(data.error);
       }
     };
 
@@ -55,6 +61,14 @@ export function useWebSocket(active: boolean, callbacks: WSCallbacks) {
         ws.send(JSON.stringify({ type: "ping" }));
       }
     }, 30000);
+  }, []);
+
+  const sendMessage = useCallback((msg: Record<string, unknown>): boolean => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify(msg));
+      return true;
+    }
+    return false;
   }, []);
 
   useEffect(() => {
@@ -69,4 +83,6 @@ export function useWebSocket(active: boolean, callbacks: WSCallbacks) {
       }
     };
   }, [active, connect]);
+
+  return { sendMessage };
 }

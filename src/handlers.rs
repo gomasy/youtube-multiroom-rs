@@ -1,5 +1,5 @@
 use crate::alexa::handle_alexa;
-use crate::state::{AppState, DeviceUpdate, ExtractRequest, PlayRequest};
+use crate::state::{AppState, DeviceUpdate, PlayRequest};
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path, State, WebSocketUpgrade};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -44,19 +44,6 @@ impl IntoResponse for AppError {
 // ════════════════════════════════════════
 // 音声 API
 // ════════════════════════════════════════
-
-/// POST /api/audio/extract
-pub async fn extract_audio(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<ExtractRequest>,
-) -> AppResult<Json<Value>> {
-    let track = state
-        .extract_audio(&req.url)
-        .await
-        .map_err(AppError::bad_request)?;
-    state.broadcast_tracks().await;
-    Ok(Json(json!(track)))
-}
 
 /// GET /api/audio/:id/stream
 pub async fn stream_audio(
@@ -301,10 +288,21 @@ async fn ws_handler(mut socket: WebSocket, state: Arc<AppState>) {
     // broadcast チャンネルを購読
     let mut rx = state.tx.subscribe();
 
+    // クライアント固有メッセージ用チャンネル (extract 結果など)
+    let (client_tx, mut client_rx) =
+        tokio::sync::mpsc::unbounded_channel::<String>();
+
     loop {
         tokio::select! {
             // サーバー → クライアント (broadcast)
             Ok(msg) = rx.recv() => {
+                if socket.send(Message::Text(msg)).await.is_err() {
+                    break;
+                }
+            }
+
+            // サーバー → クライアント (個別応答)
+            Some(msg) = client_rx.recv() => {
                 if socket.send(Message::Text(msg)).await.is_err() {
                     break;
                 }
@@ -321,6 +319,39 @@ async fn ws_handler(mut socket: WebSocket, state: Arc<AppState>) {
                                     let pong = json!({ "type": "pong" }).to_string();
                                     if socket.send(Message::Text(pong)).await.is_err() {
                                         break;
+                                    }
+                                }
+                                "extract_audio" => {
+                                    if let Some(url) = data["url"].as_str() {
+                                        let state = state.clone();
+                                        let tx = client_tx.clone();
+                                        let url = url.to_string();
+                                        tokio::spawn(async move {
+                                            let result = match state.extract_audio(&url).await {
+                                                Ok(track) => {
+                                                    state.broadcast_tracks().await;
+                                                    json!({
+                                                        "type": "extract_audio_result",
+                                                        "track": track,
+                                                    })
+                                                }
+                                                Err(e) => {
+                                                    json!({
+                                                        "type": "extract_audio_error",
+                                                        "error": e,
+                                                    })
+                                                }
+                                            };
+                                            let _ = tx.send(result.to_string());
+                                        });
+                                    } else {
+                                        let msg = json!({
+                                            "type": "extract_audio_error",
+                                            "error": "Missing 'url' field",
+                                        });
+                                        if socket.send(Message::Text(msg.to_string())).await.is_err() {
+                                            break;
+                                        }
                                     }
                                 }
                                 "rename_device" => {

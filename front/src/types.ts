@@ -29,4 +29,19 @@ export interface WSTracksUpdateMessage {
   tracks: Record<string, Track>;
 }
 
-export type WSMessage = WSInitMessage | WSDeviceUpdateMessage | WSTracksUpdateMessage;
+export interface WSExtractAudioResultMessage {
+  type: "extract_audio_result";
+  track: Track;
+}
+
+export interface WSExtractAudioErrorMessage {
+  type: "extract_audio_error";
+  error: string;
+}
+
+export type WSMessage =
+  | WSInitMessage
+  | WSDeviceUpdateMessage
+  | WSTracksUpdateMessage
+  | WSExtractAudioResultMessage
+  | WSExtractAudioErrorMessage;

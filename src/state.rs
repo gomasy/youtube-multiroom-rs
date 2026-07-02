@@ -73,11 +73,6 @@ pub struct PendingCommand {
 
 // API リクエスト
 #[derive(Deserialize)]
-pub struct ExtractRequest {
-    pub url: String,
-}
-
-#[derive(Deserialize)]
 pub struct PlayRequest {
     pub track_id: String,
     pub device_ids: Vec<String>,

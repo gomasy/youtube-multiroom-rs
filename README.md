@@ -138,7 +138,6 @@ The binary, `front/dist/`, `yt-dlp`, and `ffmpeg` are needed on the Pi.
     ┌────┴─────────────────────────────────────────────────┐
     │  axum Router                                         │
     ├──────────────────────────────────────────────────────┤
-    │  POST   /api/audio/extract      yt-dlp extract       │
     │  GET    /api/audio/:id/stream   MP3 streaming        │
     │  GET    /api/tracks             track list            │
     │  DELETE /api/tracks/:id         delete track          │
@@ -152,6 +151,9 @@ The binary, `front/dist/`, `yt-dlp`, and `ffmpeg` are needed on the Pi.
     │  GET    /*                     front/dist static      │
     └──────────────────────────────────────────────────────┘
 ```
+
+Audio extraction is handled via WebSocket to avoid reverse proxy read timeouts.
+The client sends `{ "type": "extract_audio", "url": "..." }` and receives `extract_audio_result` or `extract_audio_error`.
 
 State changes are broadcast to all WebSocket clients via `tokio::sync::broadcast`:
 - `device_update` — device status, track assignment, connection changes
@@ -187,7 +189,6 @@ sudo systemctl enable --now yt-multiroom
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| POST | `/api/audio/extract` | Yes | Extract audio from a YouTube URL |
 | GET | `/api/audio/:id/stream` | No | Stream MP3 audio (supports Range requests) |
 | GET | `/api/tracks` | Yes | List extracted tracks |
 | DELETE | `/api/tracks/:id` | Yes | Delete a track and its cached file |
@@ -197,7 +198,7 @@ sudo systemctl enable --now yt-multiroom
 | POST | `/api/play-all` | Yes | Queue playback on all devices |
 | POST | `/api/devices/:id/stop` | Yes | Stop a device |
 | POST | `/alexa` | No | Alexa skill webhook |
-| WS | `/ws` | Yes | Real-time device & track sync |
+| WS | `/ws` | Yes | Real-time sync & audio extraction |
 
 ## License
 
