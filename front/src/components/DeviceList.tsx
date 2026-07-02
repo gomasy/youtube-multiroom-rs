@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { authFetch } from "../api";
+import { ScrollingText } from "./ScrollingText";
 import type { Device, Track } from "../types";
 
 const STATUS_LABELS: Record<string, string> = {
@@ -129,7 +130,10 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
                     {STATUS_LABELS[dev.status] || dev.status}
                   </div>
                   {dev.current_track && (
-                    <div className="device-track-name">♪ {dev.current_track.title}</div>
+                    <ScrollingText
+                      className="device-track-name"
+                      text={`♪ ${dev.current_track.title}`}
+                    />
                   )}
                 </div>
                 <button

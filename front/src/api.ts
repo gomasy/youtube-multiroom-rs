@@ -1,3 +1,5 @@
+import type { TracksPage } from "./types";
+
 let apiToken = localStorage.getItem("api_token");
 
 export function getToken(): string | null {
@@ -27,6 +29,20 @@ export async function authFetch(
     throw new Error("認証が必要です");
   }
   return res;
+}
+
+export async function fetchTracks(
+  page: number,
+  perPage: number,
+  onUnauthorized?: () => void,
+): Promise<TracksPage> {
+  const res = await authFetch(
+    `/api/tracks?page=${page}&per_page=${perPage}`,
+    {},
+    onUnauthorized,
+  );
+  if (!res.ok) throw new Error("トラック一覧の取得に失敗しました");
+  return res.json();
 }
 
 export async function checkAuth(): Promise<boolean> {

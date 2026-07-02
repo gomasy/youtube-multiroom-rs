@@ -24,6 +24,8 @@ pub struct AudioTrack {
     pub thumbnail: String,
     pub duration: u64,
     pub channel: String,
+    #[serde(default)]
+    pub created_at: f64,
     #[serde(skip)]
     pub file_path: String,
 }
@@ -36,6 +38,7 @@ impl AudioTrack {
             "thumbnail": self.thumbnail,
             "duration": self.duration,
             "channel": self.channel,
+            "created_at": self.created_at,
             "file_path": self.file_path,
         })
         .to_string()
@@ -49,6 +52,7 @@ impl AudioTrack {
             thumbnail: v["thumbnail"].as_str().unwrap_or("").to_string(),
             duration: v["duration"].as_u64().unwrap_or(0),
             channel: v["channel"].as_str().unwrap_or("").to_string(),
+            created_at: v["created_at"].as_f64().unwrap_or(0.0),
             file_path: v["file_path"].as_str()?.to_string(),
         })
     }
@@ -226,6 +230,7 @@ impl AppState {
                 .or(meta["uploader"].as_str())
                 .unwrap_or("")
                 .to_string(),
+            created_at: now_f64(),
             file_path: output_str,
         };
 
@@ -264,24 +269,37 @@ impl AppState {
         Some(track)
     }
 
+    /// 全トラックを新しい順で返す
     pub async fn list_tracks(&self) -> Vec<AudioTrack> {
         let mut conn = self.redis.clone();
         let all: HashMap<String, String> = conn
             .hgetall(REDIS_KEY_TRACKS)
             .await
             .unwrap_or_default();
-        all.values()
+        let mut tracks: Vec<AudioTrack> = all
+            .values()
             .filter_map(|s| AudioTrack::from_redis_json(s))
-            .collect()
+            .collect();
+        tracks.sort_by(|a, b| {
+            b.created_at
+                .partial_cmp(&a.created_at)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        tracks
     }
 
-    pub async fn tracks_json(&self) -> Value {
+    /// 指定ページのトラックと総件数を返す (page は 1 始まり)
+    pub async fn list_tracks_page(
+        &self,
+        page: usize,
+        per_page: usize,
+    ) -> (Vec<AudioTrack>, usize) {
         let tracks = self.list_tracks().await;
-        let map: HashMap<String, Value> = tracks
-            .into_iter()
-            .map(|t| (t.id.clone(), json!(t)))
-            .collect();
-        json!(map)
+        let total = tracks.len();
+        let start = (page - 1).saturating_mul(per_page);
+        let items = tracks.into_iter().skip(start).take(per_page).collect();
+        (items, total)
     }
 
     // ── デバイス管理 ──
@@ -349,11 +367,9 @@ impl AppState {
         let _ = self.tx.send(msg.to_string());
     }
 
+    /// トラック一覧の変更をクライアントに通知する (内容は REST で再取得させる)
     pub async fn broadcast_tracks(&self) {
-        let msg = json!({
-            "type": "tracks_update",
-            "tracks": self.tracks_json().await,
-        });
+        let msg = json!({ "type": "tracks_update" });
         let _ = self.tx.send(msg.to_string());
     }
 

@@ -13,10 +13,16 @@ export interface Device {
   current_track?: Track;
 }
 
+export interface TracksPage {
+  tracks: Track[];
+  total: number;
+  page: number;
+  per_page: number;
+}
+
 export interface WSInitMessage {
   type: "init";
   devices: Record<string, Device>;
-  tracks: Record<string, Track>;
 }
 
 export interface WSDeviceUpdateMessage {
@@ -26,7 +32,6 @@ export interface WSDeviceUpdateMessage {
 
 export interface WSTracksUpdateMessage {
   type: "tracks_update";
-  tracks: Record<string, Track>;
 }
 
 export interface WSExtractAudioResultMessage {

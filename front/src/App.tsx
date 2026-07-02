@@ -16,7 +16,7 @@ export function App() {
   const [wsActive, setWsActive] = useState(false);
   const [connected, setConnected] = useState(false);
   const [devices, setDevices] = useState<Record<string, Device>>({});
-  const [tracks, setTracks] = useState<Record<string, Track>>({});
+  const [tracksVersion, setTracksVersion] = useState(0);
   const [currentTrack, setCurrentTrack] = useState<Track | null>(null);
   const { toasts, showToast } = useToast();
   const urlInputRef = useRef<UrlInputHandle>(null);
@@ -37,7 +37,6 @@ export function App() {
   const handleExtractResult = useCallback((track: Track) => {
     setExtracting(false);
     setCurrentTrack(track);
-    setTracks((prev) => ({ ...prev, [track.id]: track }));
     showToast(`「${track.title}」を取得しました`);
     urlInputRef.current?.clear();
   }, [showToast]);
@@ -52,25 +51,14 @@ export function App() {
       setConnected(c);
       if (!c) setExtracting(false);
     },
-    onInit: (devs, trks) => {
-      setDevices(devs);
-      setTracks(trks);
-    },
+    onInit: setDevices,
     onDeviceUpdate: setDevices,
-    onTracksUpdate: (trks) => {
-      setTracks(trks);
-      setCurrentTrack((prev) => (prev && !(prev.id in trks) ? null : prev));
-    },
+    onTracksUpdate: () => setTracksVersion((v) => v + 1),
     onExtractResult: handleExtractResult,
     onExtractError: handleExtractError,
   });
 
   function handleTrackDeleted(trackId: string) {
-    setTracks((prev) => {
-      const next = { ...prev };
-      delete next[trackId];
-      return next;
-    });
     if (currentTrack?.id === trackId) setCurrentTrack(null);
   }
 
@@ -116,7 +104,8 @@ export function App() {
           </div>
           <div className="main-right">
             <History
-              tracks={tracks}
+              active={wsActive}
+              refreshKey={tracksVersion}
               currentTrack={currentTrack}
               onSelectTrack={setCurrentTrack}
               onTrackDeleted={handleTrackDeleted}

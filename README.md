@@ -8,6 +8,10 @@ Built with axum + tokio (backend) and React + TypeScript (frontend).
 ```
 youtube-multiroom-rs/
 ├── Cargo.toml
+├── Dockerfile
+├── .github/
+│   └── workflows/
+│       └── build-image.yml   # Container image build (ghcr.io)
 ├── src/
 │   ├── main.rs        # Entry point & router
 │   ├── state.rs       # Shared state, audio & device management
@@ -31,6 +35,7 @@ youtube-multiroom-rs/
 │           ├── Header.tsx
 │           ├── History.tsx
 │           ├── NowPlaying.tsx
+│           ├── ScrollingText.tsx
 │           ├── Toast.tsx
 │           └── UrlInput.tsx
 ├── alexa_interaction_model.json
@@ -99,6 +104,20 @@ When enabled:
 
 If `API_TOKEN` is not set, no authentication is required.
 
+### Docker
+
+A multi-arch (amd64/arm64) container image is built by GitHub Actions and published to GHCR.
+The image bundles `yt-dlp`, `ffmpeg`, and `deno`; only Redis is needed externally.
+
+```bash
+docker run -d -p 8888:8888 \
+  -e REDIS_URL=redis://<redis-host>/ \
+  -e API_TOKEN=your-secret-token \
+  ghcr.io/gomasy/youtube-multiroom-rs
+```
+
+To build locally: `docker build -t youtube-multiroom .`
+
 ### Cross-compilation for Raspberry Pi
 
 ```bash
@@ -139,7 +158,7 @@ The binary, `front/dist/`, `yt-dlp`, and `ffmpeg` are needed on the Pi.
     │  axum Router                                         │
     ├──────────────────────────────────────────────────────┤
     │  GET    /api/audio/:id/stream   MP3 streaming        │
-    │  GET    /api/tracks             track list            │
+    │  GET    /api/tracks             track list (paged)    │
     │  DELETE /api/tracks/:id         delete track          │
     │  GET    /api/devices            device list           │
     │  DELETE /api/devices/:id        delete device         │
@@ -156,8 +175,8 @@ Audio extraction is handled via WebSocket to avoid reverse proxy read timeouts.
 The client sends `{ "type": "extract_audio", "url": "..." }` and receives `extract_audio_result` or `extract_audio_error`.
 
 State changes are broadcast to all WebSocket clients via `tokio::sync::broadcast`:
-- `device_update` — device status, track assignment, connection changes
-- `tracks_update` — track extraction, deletion
+- `device_update` — device status, track assignment, connection changes (full device map)
+- `tracks_update` — notification that the track list changed; clients refetch their current page via `GET /api/tracks`
 
 ## systemd Service
 
@@ -190,7 +209,7 @@ sudo systemctl enable --now yt-multiroom
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | GET | `/api/audio/:id/stream` | No | Stream MP3 audio (supports Range requests) |
-| GET | `/api/tracks` | Yes | List extracted tracks |
+| GET | `/api/tracks` | Yes | List extracted tracks, newest first (paginated) |
 | DELETE | `/api/tracks/:id` | Yes | Delete a track and its cached file |
 | GET | `/api/devices` | Yes | List connected devices |
 | DELETE | `/api/devices/:id` | Yes | Delete a device |
@@ -199,6 +218,12 @@ sudo systemctl enable --now yt-multiroom
 | POST | `/api/devices/:id/stop` | Yes | Stop a device |
 | POST | `/alexa` | No | Alexa skill webhook |
 | WS | `/ws` | Yes | Real-time sync & audio extraction |
+
+`GET /api/tracks` accepts `page` (default 1) and `per_page` (default 10, max 100) query parameters and returns:
+
+```json
+{ "tracks": [ ... ], "total": 42, "page": 1, "per_page": 10 }
+```
 
 ## License
 

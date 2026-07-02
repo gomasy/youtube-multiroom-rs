@@ -1,3 +1,4 @@
+import { ScrollingText } from "./ScrollingText";
 import type { Track } from "../types";
 
 function formatDuration(seconds?: number): string {
@@ -27,9 +28,10 @@ export function NowPlaying({ track }: Props) {
           </div>
         )}
         <div className="track-info">
-          <div className="track-title">
-            {track ? track.title : "曲が選択されていません"}
-          </div>
+          <ScrollingText
+            className="track-title"
+            text={track ? track.title : "曲が選択されていません"}
+          />
           <div className="track-meta">
             {track
               ? [track.channel, formatDuration(track.duration)].filter(Boolean).join(" · ")

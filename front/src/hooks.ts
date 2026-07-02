@@ -3,9 +3,9 @@ import { getToken } from "./api";
 import type { Device, Track, WSMessage } from "./types";
 
 interface WSCallbacks {
-  onInit: (devices: Record<string, Device>, tracks: Record<string, Track>) => void;
+  onInit: (devices: Record<string, Device>) => void;
   onDeviceUpdate: (devices: Record<string, Device>) => void;
-  onTracksUpdate: (tracks: Record<string, Track>) => void;
+  onTracksUpdate: () => void;
   onExtractResult: (track: Track) => void;
   onExtractError: (error: string) => void;
   onConnectedChange: (connected: boolean) => void;
@@ -43,11 +43,11 @@ export function useWebSocket(active: boolean, callbacks: WSCallbacks) {
     ws.onmessage = (event) => {
       const data: WSMessage = JSON.parse(event.data);
       if (data.type === "init") {
-        cbRef.current.onInit(data.devices || {}, data.tracks || {});
+        cbRef.current.onInit(data.devices || {});
       } else if (data.type === "device_update") {
         cbRef.current.onDeviceUpdate(data.devices || {});
       } else if (data.type === "tracks_update") {
-        cbRef.current.onTracksUpdate(data.tracks || {});
+        cbRef.current.onTracksUpdate();
       } else if (data.type === "extract_audio_result") {
         cbRef.current.onExtractResult(data.track);
       } else if (data.type === "extract_audio_error") {

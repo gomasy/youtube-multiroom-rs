@@ -1,5 +1,9 @@
-import { authFetch } from "../api";
+import { useEffect, useState } from "react";
+import { authFetch, fetchTracks } from "../api";
+import { ScrollingText } from "./ScrollingText";
 import type { Track } from "../types";
+
+const PER_PAGE = 10;
 
 function formatDuration(seconds?: number): string {
   if (!seconds) return "--:--";
@@ -9,7 +13,8 @@ function formatDuration(seconds?: number): string {
 }
 
 interface Props {
-  tracks: Record<string, Track>;
+  active: boolean;
+  refreshKey: number;
   currentTrack: Track | null;
   onSelectTrack: (track: Track) => void;
   onTrackDeleted: (trackId: string) => void;
@@ -17,9 +22,32 @@ interface Props {
   showToast: (msg: string) => void;
 }
 
-export function History({ tracks, currentTrack, onSelectTrack, onTrackDeleted, onUnauthorized, showToast }: Props) {
-  const entries = Object.values(tracks);
-  if (entries.length === 0) return null;
+export function History({ active, refreshKey, currentTrack, onSelectTrack, onTrackDeleted, onUnauthorized, showToast }: Props) {
+  const [page, setPage] = useState(1);
+  const [tracks, setTracks] = useState<Track[]>([]);
+  const [total, setTotal] = useState(0);
+
+  const totalPages = Math.max(1, Math.ceil(total / PER_PAGE));
+
+  useEffect(() => {
+    if (!active) return;
+    let cancelled = false;
+    fetchTracks(page, PER_PAGE, onUnauthorized)
+      .then((data) => {
+        if (cancelled) return;
+        setTracks(data.tracks);
+        setTotal(data.total);
+        // 削除でページが範囲外になったら最終ページへ戻す
+        const last = Math.max(1, Math.ceil(data.total / PER_PAGE));
+        if (page > last) setPage(last);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [active, page, refreshKey, onUnauthorized]);
+
+  if (total === 0) return null;
 
   async function deleteTrack(trackId: string) {
     try {
@@ -38,9 +66,9 @@ export function History({ tracks, currentTrack, onSelectTrack, onTrackDeleted, o
 
   return (
     <div className="history-section">
-      <div className="section-label">取得済みトラック</div>
+      <div className="section-label">取得済みトラック ({total})</div>
       <div className="history-list">
-        {entries.map((t) => {
+        {tracks.map((t) => {
           const isCurrent = currentTrack?.id === t.id;
           return (
             <div
@@ -58,7 +86,7 @@ export function History({ tracks, currentTrack, onSelectTrack, onTrackDeleted, o
                 />
               )}
               <div className="history-info">
-                <div className="history-title">{t.title}</div>
+                <ScrollingText className="history-title" text={t.title} />
                 <div className="history-meta">
                   {t.channel ? `${t.channel} · ` : ""}
                   {formatDuration(t.duration)}
@@ -77,6 +105,28 @@ export function History({ tracks, currentTrack, onSelectTrack, onTrackDeleted, o
           );
         })}
       </div>
+
+      {totalPages > 1 && (
+        <div className="pagination">
+          <button
+            className="btn btn-outline btn-sm"
+            disabled={page <= 1}
+            onClick={() => setPage(page - 1)}
+          >
+            前へ
+          </button>
+          <span className="pagination-info">
+            {page} / {totalPages}
+          </span>
+          <button
+            className="btn btn-outline btn-sm"
+            disabled={page >= totalPages}
+            onClick={() => setPage(page + 1)}
+          >
+            次へ
+          </button>
+        </div>
+      )}
     </div>
   );
 }

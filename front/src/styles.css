@@ -39,7 +39,8 @@ body {
   }
   .main-grid {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    /* minmax(0, …) がないと nowrap な長いタイトルがカラム幅を押し広げる */
+    grid-template-columns: minmax(0, 4fr) minmax(0, 6fr);
     gap: 24px;
     align-items: start;
   }
@@ -168,14 +169,44 @@ body {
 .track-title {
   font-size: 15px;
   font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
   margin-bottom: 4px;
 }
 .track-meta {
   font-size: 12px;
   color: var(--text-dim);
+}
+
+/* ── Scrolling title (marquee) ── */
+.marquee {
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.marquee-text {
+  display: inline-block;
+  vertical-align: top;
+}
+.marquee.overflowing {
+  /* はみ出し側 (右端) をフェードさせる */
+  -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 16px), transparent);
+  mask-image: linear-gradient(90deg, #000 calc(100% - 16px), transparent);
+}
+.marquee.overflowing .marquee-text {
+  animation: marquee-pingpong var(--marquee-duration, 10s) linear infinite;
+}
+/* 両端で停止 → 逆端までスクロール → 停止 → 戻る */
+@keyframes marquee-pingpong {
+  0%, 15%   { transform: translateX(0); }
+  48%, 63%  { transform: translateX(var(--marquee-shift)); }
+  96%, 100% { transform: translateX(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .marquee.overflowing {
+    -webkit-mask-image: none;
+    mask-image: none;
+    text-overflow: ellipsis;
+  }
+  .marquee.overflowing .marquee-text { animation: none; }
 }
 
 /* ── Section label ── */
@@ -257,9 +288,6 @@ body {
 .device-track-name {
   font-size: 11px;
   color: var(--text-dim);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
   margin-top: 2px;
 }
 
@@ -330,6 +358,7 @@ body {
   animation: toast-in 0.3s ease;
   max-width: 380px;
   text-align: center;
+  overflow-wrap: anywhere;
 }
 @keyframes toast-in {
   from { opacity: 0; transform: translateY(12px); }
@@ -351,6 +380,21 @@ body {
   border: 1px solid transparent;
 }
 .history-item:hover { background: var(--surface-2); border-color: var(--border); }
+
+/* ── Pagination ── */
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 14px;
+}
+.pagination-info {
+  font-size: 12px;
+  color: var(--text-dim);
+  min-width: 48px;
+  text-align: center;
+}
 
 /* ── Auth Modal ── */
 .auth-modal {
@@ -385,8 +429,5 @@ body {
 .history-title {
   font-size: 13px;
   font-weight: 500;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 .history-meta { font-size: 11px; color: var(--text-dim); }

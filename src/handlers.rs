@@ -1,9 +1,10 @@
 use crate::alexa::handle_alexa;
 use crate::state::{AppState, DeviceUpdate, PlayRequest};
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{Path, State, WebSocketUpgrade};
+use axum::extract::{Path, Query, State, WebSocketUpgrade};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::fs;
@@ -126,10 +127,26 @@ fn parse_byte_range(header: &str, total: usize) -> Option<(usize, usize)> {
     }
 }
 
-/// GET /api/tracks
-pub async fn list_tracks(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let tracks = state.list_tracks().await;
-    Json(json!(tracks))
+#[derive(Deserialize)]
+pub struct TracksQuery {
+    page: Option<usize>,
+    per_page: Option<usize>,
+}
+
+/// GET /api/tracks?page=1&per_page=10
+pub async fn list_tracks(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<TracksQuery>,
+) -> Json<Value> {
+    let per_page = query.per_page.unwrap_or(10).clamp(1, 100);
+    let page = query.page.unwrap_or(1).max(1);
+    let (tracks, total) = state.list_tracks_page(page, per_page).await;
+    Json(json!({
+        "tracks": tracks,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+    }))
 }
 
 /// DELETE /api/tracks/:id
@@ -271,11 +288,10 @@ pub async fn ws_upgrade(
 async fn ws_handler(mut socket: WebSocket, state: Arc<AppState>) {
     tracing::info!("WebSocket client connected");
 
-    // 初期状態を送信
+    // 初期状態を送信 (トラック一覧は REST でページ取得させる)
     let init_msg = json!({
         "type": "init",
         "devices": state.devices_json().await,
-        "tracks": state.tracks_json().await,
     });
     if socket
         .send(Message::Text(init_msg.to_string()))
