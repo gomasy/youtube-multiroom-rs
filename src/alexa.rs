@@ -96,13 +96,10 @@ async fn on_intent(state: &Arc<AppState>, body: &Value, device_id: &str, base_ur
         }
 
         "AMAZON.ResumeIntent" => {
-            let devices = state.devices.read().await;
-            if let Some(dev) = devices.get(device_id) {
-                if let Some(ref track) = dev.current_track {
-                    let track = track.clone();
-                    let pos = dev.position_ms;
-                    drop(devices);
-                    return play_directive(state, &track, device_id, pos, base_url).await;
+            if let Some(dev) = state.get_device(device_id).await {
+                if let Some(track) = dev.current_track {
+                    return play_directive(state, &track, device_id, dev.position_ms, base_url)
+                        .await;
                 }
             }
             speech("再生する曲がありません。", true)

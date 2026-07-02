@@ -8,10 +8,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::broadcast;
 use tokio::time;
 
 const REDIS_KEY_TRACKS: &str = "youtube:tracks";
+const REDIS_KEY_DEVICES: &str = "youtube:devices";
+const REDIS_KEY_PENDING: &str = "youtube:pending";
+
+/// キューされた再生コマンドの有効期限 (秒)
+const PENDING_TTL_SECS: f64 = 600.0;
 
 // ════════════════════════════════════════
 // データモデル
@@ -69,10 +74,12 @@ pub struct DeviceState {
     pub last_update: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingCommand {
     pub action: String,
     pub track: AudioTrack,
+    #[serde(default)]
+    pub queued_at: f64,
 }
 
 // API リクエスト
@@ -92,7 +99,6 @@ pub struct DeviceUpdate {
     pub current_track: Option<AudioTrack>,
     pub position_ms: Option<u64>,
     pub name: Option<String>,
-    pub connected: Option<bool>,
 }
 
 impl DeviceUpdate {
@@ -119,8 +125,6 @@ impl DeviceUpdate {
 
 pub struct AppState {
     redis: ConnectionManager,
-    pub devices: RwLock<HashMap<String, DeviceState>>,
-    pub pending: RwLock<HashMap<String, PendingCommand>>,
     pub tx: broadcast::Sender<String>,
     pub cache_dir: PathBuf,
     pub api_token: Option<String>,
@@ -147,8 +151,6 @@ impl AppState {
 
         Ok(Arc::new(Self {
             redis,
-            devices: RwLock::new(HashMap::new()),
-            pending: RwLock::new(HashMap::new()),
             tx,
             cache_dir,
             api_token,
@@ -256,13 +258,30 @@ impl AppState {
         let _: Result<(), _> = conn.hdel(REDIS_KEY_TRACKS, id).await;
 
         let _ = tokio::fs::remove_file(&track.file_path).await;
-        self.pending.write().await.retain(|_, cmd| cmd.track.id != id);
 
-        let mut devices = self.devices.write().await;
-        for dev in devices.values_mut() {
+        // 削除トラックをキューしている pending コマンドを除去
+        let all_pending: HashMap<String, String> = conn
+            .hgetall(REDIS_KEY_PENDING)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("Redis error listing pending commands: {e}");
+                HashMap::new()
+            });
+        for (device_id, s) in all_pending {
+            if serde_json::from_str::<PendingCommand>(&s)
+                .ok()
+                .is_some_and(|cmd| cmd.track.id == id)
+            {
+                let _: Result<(), _> =
+                    conn.hdel(REDIS_KEY_PENDING, &device_id).await;
+            }
+        }
+
+        for mut dev in self.all_devices().await.into_values() {
             if dev.current_track.as_ref().is_some_and(|t| t.id == id) {
                 dev.current_track = None;
                 dev.status = "idle".to_string();
+                self.write_device(&dev).await;
             }
         }
 
@@ -304,57 +323,108 @@ impl AppState {
 
     // ── デバイス管理 ──
 
-    pub async fn register_device(&self, device_id: &str, name: &str) -> DeviceState {
-        let mut devices = self.devices.write().await;
-        let dev = devices.entry(device_id.to_string()).or_insert(DeviceState {
-            device_id: device_id.to_string(),
-            name: name.to_string(),
-            status: "idle".to_string(),
-            current_track: None,
-            position_ms: 0,
-            connected: true,
-            last_update: now_f64(),
-        });
-        dev.connected = true;
-        dev.last_update = now_f64();
-        dev.clone()
-    }
-
-    pub async fn update_device(&self, device_id: &str, upd: DeviceUpdate) {
-        let mut devices = self.devices.write().await;
-        if let Some(dev) = devices.get_mut(device_id) {
-            if let Some(s) = upd.status {
-                dev.status = s;
+    async fn write_device(&self, dev: &DeviceState) {
+        let json_str = match serde_json::to_string(dev) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("Failed to serialize device {}: {e}", dev.device_id);
+                return;
             }
-            if let Some(t) = upd.current_track {
-                dev.current_track = Some(t);
-            }
-            if let Some(p) = upd.position_ms {
-                dev.position_ms = p;
-            }
-            if let Some(n) = upd.name {
-                dev.name = n;
-            }
-            if let Some(c) = upd.connected {
-                dev.connected = c;
-            }
-            dev.last_update = now_f64();
+        };
+        let mut conn = self.redis.clone();
+        if let Err(e) = conn
+            .hset::<_, _, _, ()>(REDIS_KEY_DEVICES, &dev.device_id, json_str)
+            .await
+        {
+            tracing::warn!("Redis error writing device {}: {e}", dev.device_id);
         }
     }
 
+    pub async fn get_device(&self, device_id: &str) -> Option<DeviceState> {
+        let mut conn = self.redis.clone();
+        match conn
+            .hget::<_, _, Option<String>>(REDIS_KEY_DEVICES, device_id)
+            .await
+        {
+            Ok(Some(s)) => serde_json::from_str(&s).ok(),
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!("Redis error reading device {device_id}: {e}");
+                None
+            }
+        }
+    }
+
+    async fn all_devices(&self) -> HashMap<String, DeviceState> {
+        let mut conn = self.redis.clone();
+        let all: HashMap<String, String> = conn
+            .hgetall(REDIS_KEY_DEVICES)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("Redis error listing devices: {e}");
+                HashMap::new()
+            });
+        all.into_iter()
+            .filter_map(|(k, s)| {
+                serde_json::from_str(&s).ok().map(|d| (k, d))
+            })
+            .collect()
+    }
+
+    pub async fn device_ids(&self) -> redis::RedisResult<Vec<String>> {
+        let mut conn = self.redis.clone();
+        conn.hkeys(REDIS_KEY_DEVICES).await
+    }
+
+    pub async fn register_device(&self, device_id: &str, name: &str) -> DeviceState {
+        let mut dev =
+            self.get_device(device_id)
+                .await
+                .unwrap_or_else(|| DeviceState {
+                    device_id: device_id.to_string(),
+                    name: name.to_string(),
+                    status: "idle".to_string(),
+                    current_track: None,
+                    position_ms: 0,
+                    connected: true,
+                    last_update: now_f64(),
+                });
+        dev.connected = true;
+        dev.last_update = now_f64();
+        self.write_device(&dev).await;
+        dev
+    }
+
+    pub async fn update_device(&self, device_id: &str, upd: DeviceUpdate) {
+        let Some(mut dev) = self.get_device(device_id).await else {
+            return;
+        };
+        if let Some(s) = upd.status {
+            dev.status = s;
+        }
+        if let Some(t) = upd.current_track {
+            dev.current_track = Some(t);
+        }
+        if let Some(p) = upd.position_ms {
+            dev.position_ms = p;
+        }
+        if let Some(n) = upd.name {
+            dev.name = n;
+        }
+        dev.last_update = now_f64();
+        self.write_device(&dev).await;
+    }
+
     pub async fn remove_device(&self, device_id: &str) -> Option<DeviceState> {
-        let device = self.devices.write().await.remove(device_id)?;
-        self.pending.write().await.remove(device_id);
+        let device = self.get_device(device_id).await?;
+        let mut conn = self.redis.clone();
+        let _: Result<(), _> = conn.hdel(REDIS_KEY_DEVICES, device_id).await;
+        let _: Result<(), _> = conn.hdel(REDIS_KEY_PENDING, device_id).await;
         Some(device)
     }
 
     pub async fn devices_json(&self) -> Value {
-        let devices = self.devices.read().await;
-        let map: HashMap<String, Value> = devices
-            .iter()
-            .map(|(k, v)| (k.clone(), json!(v)))
-            .collect();
-        json!(map)
+        json!(self.all_devices().await)
     }
 
     // ── ブロードキャスト ──
@@ -376,13 +446,23 @@ impl AppState {
     // ── コマンドキュー ──
 
     pub async fn queue_play(&self, device_id: &str, track: AudioTrack) {
-        self.pending.write().await.insert(
-            device_id.to_string(),
-            PendingCommand {
-                action: "play".to_string(),
-                track: track.clone(),
-            },
-        );
+        let cmd = PendingCommand {
+            action: "play".to_string(),
+            track: track.clone(),
+            queued_at: now_f64(),
+        };
+        let Ok(json_str) = serde_json::to_string(&cmd) else {
+            return;
+        };
+        let mut conn = self.redis.clone();
+        if let Err(e) = conn
+            .hset::<_, _, _, ()>(REDIS_KEY_PENDING, device_id, json_str)
+            .await
+        {
+            // キューを保存できなかった場合は queued 表示にしない
+            tracing::warn!("Redis error queueing play for {device_id}: {e}");
+            return;
+        }
         self.update_device(
             device_id,
             DeviceUpdate::new().status("queued").track(track),
@@ -390,8 +470,47 @@ impl AppState {
         .await;
     }
 
+    /// キューされたコマンドを取り出す (取り出し後は削除、失効分は破棄)
     pub async fn take_pending(&self, device_id: &str) -> Option<PendingCommand> {
-        self.pending.write().await.remove(device_id)
+        let mut conn = self.redis.clone();
+        let json_str = match conn
+            .hget::<_, _, Option<String>>(REDIS_KEY_PENDING, device_id)
+            .await
+        {
+            Ok(Some(s)) => s,
+            Ok(None) => return None,
+            Err(e) => {
+                tracing::warn!("Redis error reading pending for {device_id}: {e}");
+                return None;
+            }
+        };
+
+        // 削除できた側だけが取り出しに成功する (同時取り出しの二重消費を防ぐ)
+        let deleted: i64 = conn
+            .hdel(REDIS_KEY_PENDING, device_id)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("Redis error deleting pending for {device_id}: {e}");
+                0
+            });
+        if deleted == 0 {
+            return None;
+        }
+
+        let cmd: PendingCommand = match serde_json::from_str(&json_str) {
+            Ok(cmd) => cmd,
+            Err(e) => {
+                tracing::warn!(
+                    "Discarding unparsable pending command for {device_id}: {e}"
+                );
+                return None;
+            }
+        };
+        if now_f64() - cmd.queued_at > PENDING_TTL_SECS {
+            tracing::info!("Discarding expired pending command: {}", device_id);
+            return None;
+        }
+        Some(cmd)
     }
 }
 

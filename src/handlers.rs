@@ -33,6 +33,12 @@ impl AppError {
             message: msg.into(),
         }
     }
+    fn internal(msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: msg.into(),
+        }
+    }
 }
 
 impl IntoResponse for AppError {
@@ -206,12 +212,9 @@ pub async fn play_on_all(
         .ok_or_else(|| AppError::not_found("Track not found"))?;
 
     let device_ids: Vec<String> = state
-        .devices
-        .read()
+        .device_ids()
         .await
-        .keys()
-        .cloned()
-        .collect();
+        .map_err(|e| AppError::internal(format!("Failed to list devices: {e}")))?;
 
     for did in &device_ids {
         state.queue_play(did, track.clone()).await;
