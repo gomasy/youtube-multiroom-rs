@@ -1,8 +1,9 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { checkAuth } from "./api";
 import { useWebSocket } from "./hooks";
 import { Header } from "./components/Header";
 import { UrlInput } from "./components/UrlInput";
+import type { UrlInputHandle } from "./components/UrlInput";
 import { NowPlaying } from "./components/NowPlaying";
 import { DeviceList } from "./components/DeviceList";
 import { History } from "./components/History";
@@ -18,6 +19,7 @@ export function App() {
   const [tracks, setTracks] = useState<Record<string, Track>>({});
   const [currentTrack, setCurrentTrack] = useState<Track | null>(null);
   const { toasts, showToast } = useToast();
+  const urlInputRef = useRef<UrlInputHandle>(null);
 
   const [extracting, setExtracting] = useState(false);
   const onUnauthorized = useCallback(() => setShowAuth(true), []);
@@ -37,6 +39,7 @@ export function App() {
     setCurrentTrack(track);
     setTracks((prev) => ({ ...prev, [track.id]: track }));
     showToast(`「${track.title}」を取得しました`);
+    urlInputRef.current?.clear();
   }, [showToast]);
 
   const handleExtractError = useCallback((error: string) => {
@@ -89,6 +92,7 @@ export function App() {
       <div className="app">
         <Header connected={connected} />
         <UrlInput
+          ref={urlInputRef}
           extracting={extracting}
           onExtract={(url) => {
             if (sendMessage({ type: "extract_audio", url })) {

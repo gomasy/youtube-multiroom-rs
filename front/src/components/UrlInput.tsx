@@ -1,4 +1,8 @@
-import { useRef } from "react";
+import { useRef, useImperativeHandle, forwardRef } from "react";
+
+export interface UrlInputHandle {
+  clear: () => void;
+}
 
 interface Props {
   extracting: boolean;
@@ -6,8 +10,17 @@ interface Props {
   showToast: (msg: string) => void;
 }
 
-export function UrlInput({ extracting, onExtract, showToast }: Props) {
+export const UrlInput = forwardRef<UrlInputHandle, Props>(function UrlInput(
+  { extracting, onExtract, showToast },
+  ref,
+) {
   const inputRef = useRef<HTMLInputElement>(null);
+
+  useImperativeHandle(ref, () => ({
+    clear: () => {
+      if (inputRef.current) inputRef.current.value = "";
+    },
+  }));
 
   function extract() {
     const url = inputRef.current?.value.trim();
@@ -17,7 +30,6 @@ export function UrlInput({ extracting, onExtract, showToast }: Props) {
     }
 
     onExtract(url);
-    if (inputRef.current) inputRef.current.value = "";
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {
@@ -52,4 +64,4 @@ export function UrlInput({ extracting, onExtract, showToast }: Props) {
       </div>
     </div>
   );
-}
+});
