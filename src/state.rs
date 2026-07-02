@@ -13,10 +13,15 @@ use tokio::time;
 
 const REDIS_KEY_TRACKS: &str = "youtube:tracks";
 const REDIS_KEY_DEVICES: &str = "youtube:devices";
-const REDIS_KEY_PENDING: &str = "youtube:pending";
+/// pending コマンドのキー接頭辞 (デバイスごとに youtube:pending:{device_id})
+const REDIS_PENDING_PREFIX: &str = "youtube:pending";
 
-/// キューされた再生コマンドの有効期限 (秒)
-const PENDING_TTL_SECS: f64 = 600.0;
+/// キューされた再生コマンドの有効期限 (秒) — Redis のキー TTL で失効する
+const PENDING_TTL_SECS: u64 = 600;
+
+fn pending_key(device_id: &str) -> String {
+    format!("{REDIS_PENDING_PREFIX}:{device_id}")
+}
 
 // ════════════════════════════════════════
 // データモデル
@@ -78,8 +83,6 @@ pub struct DeviceState {
 pub struct PendingCommand {
     pub action: String,
     pub track: AudioTrack,
-    #[serde(default)]
-    pub queued_at: f64,
 }
 
 // API リクエスト
@@ -260,20 +263,28 @@ impl AppState {
         let _ = tokio::fs::remove_file(&track.file_path).await;
 
         // 削除トラックをキューしている pending コマンドを除去
-        let all_pending: HashMap<String, String> = conn
-            .hgetall(REDIS_KEY_PENDING)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!("Redis error listing pending commands: {e}");
-                HashMap::new()
-            });
-        for (device_id, s) in all_pending {
-            if serde_json::from_str::<PendingCommand>(&s)
-                .ok()
+        let pattern = format!("{REDIS_PENDING_PREFIX}:*");
+        let keys: Vec<String> = match conn.scan_match::<_, String>(&pattern).await {
+            Ok(mut iter) => {
+                let mut keys = Vec::new();
+                while let Some(key) = iter.next_item().await {
+                    keys.push(key);
+                }
+                keys
+            }
+            Err(e) => {
+                tracing::warn!("Redis error scanning pending commands: {e}");
+                Vec::new()
+            }
+        };
+        for key in keys {
+            let json_str: Option<String> =
+                conn.get(&key).await.unwrap_or_default();
+            if json_str
+                .and_then(|s| serde_json::from_str::<PendingCommand>(&s).ok())
                 .is_some_and(|cmd| cmd.track.id == id)
             {
-                let _: Result<(), _> =
-                    conn.hdel(REDIS_KEY_PENDING, &device_id).await;
+                let _: Result<(), _> = conn.del(&key).await;
             }
         }
 
@@ -419,7 +430,7 @@ impl AppState {
         let device = self.get_device(device_id).await?;
         let mut conn = self.redis.clone();
         let _: Result<(), _> = conn.hdel(REDIS_KEY_DEVICES, device_id).await;
-        let _: Result<(), _> = conn.hdel(REDIS_KEY_PENDING, device_id).await;
+        let _: Result<(), _> = conn.del(pending_key(device_id)).await;
         Some(device)
     }
 
@@ -449,14 +460,13 @@ impl AppState {
         let cmd = PendingCommand {
             action: "play".to_string(),
             track: track.clone(),
-            queued_at: now_f64(),
         };
         let Ok(json_str) = serde_json::to_string(&cmd) else {
             return;
         };
         let mut conn = self.redis.clone();
         if let Err(e) = conn
-            .hset::<_, _, _, ()>(REDIS_KEY_PENDING, device_id, json_str)
+            .set_ex::<_, _, ()>(pending_key(device_id), json_str, PENDING_TTL_SECS)
             .await
         {
             // キューを保存できなかった場合は queued 表示にしない
@@ -470,47 +480,29 @@ impl AppState {
         .await;
     }
 
-    /// キューされたコマンドを取り出す (取り出し後は削除、失効分は破棄)
+    /// キューされたコマンドを取り出す (GETDEL でアトミックに取得+削除、失効は Redis の TTL 任せ)
     pub async fn take_pending(&self, device_id: &str) -> Option<PendingCommand> {
         let mut conn = self.redis.clone();
         let json_str = match conn
-            .hget::<_, _, Option<String>>(REDIS_KEY_PENDING, device_id)
+            .get_del::<_, Option<String>>(pending_key(device_id))
             .await
         {
             Ok(Some(s)) => s,
             Ok(None) => return None,
             Err(e) => {
-                tracing::warn!("Redis error reading pending for {device_id}: {e}");
+                tracing::warn!("Redis error taking pending for {device_id}: {e}");
                 return None;
             }
         };
-
-        // 削除できた側だけが取り出しに成功する (同時取り出しの二重消費を防ぐ)
-        let deleted: i64 = conn
-            .hdel(REDIS_KEY_PENDING, device_id)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!("Redis error deleting pending for {device_id}: {e}");
-                0
-            });
-        if deleted == 0 {
-            return None;
-        }
-
-        let cmd: PendingCommand = match serde_json::from_str(&json_str) {
-            Ok(cmd) => cmd,
+        match serde_json::from_str(&json_str) {
+            Ok(cmd) => Some(cmd),
             Err(e) => {
                 tracing::warn!(
                     "Discarding unparsable pending command for {device_id}: {e}"
                 );
-                return None;
+                None
             }
-        };
-        if now_f64() - cmd.queued_at > PENDING_TTL_SECS {
-            tracing::info!("Discarding expired pending command: {}", device_id);
-            return None;
         }
-        Some(cmd)
     }
 }
 

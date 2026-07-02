@@ -149,9 +149,10 @@ The binary, `front/dist/`, `yt-dlp`, and `ffmpeg` are needed on the Pi.
 
 ```
     AppState (Arc)
-    ├── redis:   ConnectionManager  # track metadata (Redis hash)
-    ├── devices: RwLock<HashMap>    # connected Echo devices
-    ├── pending: RwLock<HashMap>    # queued play commands
+    ├── redis: ConnectionManager    # all persistent state
+    │    ├── youtube:tracks                # track metadata (hash)
+    │    ├── youtube:devices               # Echo device states (hash)
+    │    └── youtube:pending:{device_id}   # queued play command (10 min TTL)
     └── tx: broadcast::Sender      # real-time sync
          │
     ┌────┴─────────────────────────────────────────────────┐
@@ -170,6 +171,9 @@ The binary, `front/dist/`, `yt-dlp`, and `ffmpeg` are needed on the Pi.
     │  GET    /*                     front/dist static      │
     └──────────────────────────────────────────────────────┘
 ```
+
+All state lives in Redis, so tracks, devices, and queued play commands survive server restarts.
+Queued play commands are stored per device with a native Redis TTL (10 minutes) and consumed atomically via `GETDEL`.
 
 Audio extraction is handled via WebSocket to avoid reverse proxy read timeouts.
 The client sends `{ "type": "extract_audio", "url": "..." }` and receives `extract_audio_result` or `extract_audio_error`.
