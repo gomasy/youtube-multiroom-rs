@@ -32,6 +32,28 @@ body {
   padding: 20px 16px 140px;
 }
 
+@media (min-width: 768px) {
+  .app {
+    max-width: 960px;
+    padding: 24px 24px 80px;
+  }
+  .main-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+    align-items: start;
+  }
+  .main-right .history-section { margin-top: 0; }
+}
+
+@media (min-width: 1200px) {
+  .app {
+    max-width: 1120px;
+    padding: 32px 40px 80px;
+  }
+  .main-grid { gap: 32px; }
+}
+
 /* ── Header ── */
 .header {
   display: flex;

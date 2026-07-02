@@ -103,22 +103,28 @@ export function App() {
           }}
           showToast={showToast}
         />
-        <NowPlaying track={currentTrack} />
-        <DeviceList
-          devices={devices}
-          currentTrack={currentTrack}
-          onDeviceDeleted={handleDeviceDeleted}
-          onUnauthorized={onUnauthorized}
-          showToast={showToast}
-        />
-        <History
-          tracks={tracks}
-          currentTrack={currentTrack}
-          onSelectTrack={setCurrentTrack}
-          onTrackDeleted={handleTrackDeleted}
-          onUnauthorized={onUnauthorized}
-          showToast={showToast}
-        />
+        <div className="main-grid">
+          <div className="main-left">
+            <NowPlaying track={currentTrack} />
+            <DeviceList
+              devices={devices}
+              currentTrack={currentTrack}
+              onDeviceDeleted={handleDeviceDeleted}
+              onUnauthorized={onUnauthorized}
+              showToast={showToast}
+            />
+          </div>
+          <div className="main-right">
+            <History
+              tracks={tracks}
+              currentTrack={currentTrack}
+              onSelectTrack={setCurrentTrack}
+              onTrackDeleted={handleTrackDeleted}
+              onUnauthorized={onUnauthorized}
+              showToast={showToast}
+            />
+          </div>
+        </div>
       </div>
 
       {showAuth && (
