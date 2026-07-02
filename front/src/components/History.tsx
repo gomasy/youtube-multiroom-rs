@@ -26,6 +26,8 @@ export function History({ active, refreshKey, currentTrack, onSelectTrack, onTra
   const [page, setPage] = useState(1);
   const [tracks, setTracks] = useState<Track[]>([]);
   const [total, setTotal] = useState(0);
+  // WS 切断中でも REST 操作後にリストを更新できるようにするローカルカウンター
+  const [localVersion, setLocalVersion] = useState(0);
 
   const totalPages = Math.max(1, Math.ceil(total / PER_PAGE));
 
@@ -45,7 +47,7 @@ export function History({ active, refreshKey, currentTrack, onSelectTrack, onTra
     return () => {
       cancelled = true;
     };
-  }, [active, page, refreshKey, onUnauthorized]);
+  }, [active, page, refreshKey, localVersion, onUnauthorized]);
 
   if (total === 0) return null;
 
@@ -58,6 +60,7 @@ export function History({ active, refreshKey, currentTrack, onSelectTrack, onTra
       );
       if (!res.ok) throw new Error("削除に失敗しました");
       onTrackDeleted(trackId);
+      setLocalVersion((v) => v + 1);
       showToast("トラックを削除しました");
     } catch (e) {
       showToast(`エラー: ${(e as Error).message}`);

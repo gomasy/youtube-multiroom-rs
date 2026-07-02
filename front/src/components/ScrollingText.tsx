@@ -4,6 +4,9 @@ import { useLayoutEffect, useRef, useState } from "react";
 const SCROLL_SPEED = 30;
 // タイムライン中でスクロールに使う割合 (残りは両端での停止時間)
 const SCROLL_RATIO = 0.66;
+// 右端フェードマスクの幅 (styles.css の .marquee.overflowing と合わせる)。
+// この分だけ余計にスクロールし、終端で末尾の文字がフェードにかからないようにする
+const FADE_WIDTH = 16;
 
 interface Props {
   text: string;
@@ -26,7 +29,7 @@ export function ScrollingText({ text, className }: Props) {
 
     const measure = () => {
       const diff = inner.scrollWidth - container.clientWidth;
-      setDistance(diff > 1 ? diff : 0);
+      setDistance(diff > 1 ? diff + FADE_WIDTH : 0);
     };
     measure();
 

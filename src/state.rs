@@ -297,7 +297,7 @@ impl AppState {
     ) -> (Vec<AudioTrack>, usize) {
         let tracks = self.list_tracks().await;
         let total = tracks.len();
-        let start = (page - 1).saturating_mul(per_page);
+        let start = page.saturating_sub(1).saturating_mul(per_page);
         let items = tracks.into_iter().skip(start).take(per_page).collect();
         (items, total)
     }
