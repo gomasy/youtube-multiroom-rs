@@ -13,6 +13,11 @@ use tokio::time;
 
 const REDIS_KEY_TRACKS: &str = "youtube:tracks";
 const REDIS_KEY_DEVICES: &str = "youtube:devices";
+/// 再生終了時の挙動 ("loop" | "shuffle" | "off") を保持するキー
+const REDIS_KEY_PLAYBACK_MODE: &str = "youtube:playback_mode";
+
+const PLAYBACK_MODES: [&str; 3] = ["loop", "shuffle", "off"];
+const DEFAULT_PLAYBACK_MODE: &str = "loop";
 /// pending コマンドのキー接頭辞 (デバイスごとに youtube:pending:{device_id})
 const REDIS_PENDING_PREFIX: &str = "youtube:pending";
 
@@ -319,6 +324,43 @@ impl AppState {
         tracks
     }
 
+    /// 再生モードに従い、再生終了後に続ける曲を返す ("off" なら None)
+    pub async fn auto_next_track(&self, current_id: &str) -> Option<AudioTrack> {
+        match self.playback_mode().await.as_str() {
+            "loop" => self.next_track(current_id).await,
+            "shuffle" => self.random_track(current_id).await,
+            _ => None, // "off": 自動再生しない
+        }
+    }
+
+    /// ライブラリ順 (新しい順) で現在トラックの次を返す。
+    /// 末尾なら先頭に戻り、現在トラックが見つからない (削除済みなど) 場合も先頭を返す
+    async fn next_track(&self, current_id: &str) -> Option<AudioTrack> {
+        let tracks = self.list_tracks().await;
+        let next = match tracks.iter().position(|t| t.id == current_id) {
+            Some(i) => tracks.get(i + 1).or_else(|| tracks.first()),
+            None => tracks.first(),
+        };
+        next.cloned()
+    }
+
+    /// シャッフル用に現在トラック以外からランダムに 1 曲返す (1 曲しかなければその曲)
+    async fn random_track(&self, current_id: &str) -> Option<AudioTrack> {
+        let mut tracks = self.list_tracks().await;
+        if tracks.len() > 1 {
+            tracks.retain(|t| t.id != current_id);
+        }
+        if tracks.is_empty() {
+            return None;
+        }
+        // 選曲のばらつき程度で十分なので時刻のナノ秒を乱数代わりに使う
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos() as usize;
+        Some(tracks.swap_remove(nanos % tracks.len()))
+    }
+
     /// 指定ページのトラックと総件数を返す (page は 1 始まり)
     pub async fn list_tracks_page(
         &self,
@@ -454,6 +496,47 @@ impl AppState {
         let _ = self.tx.send(msg.to_string());
     }
 
+    // ── 再生モード ──
+
+    /// 再生終了時の挙動を返す。未設定・不正値・Redis エラー時はデフォルト
+    pub async fn playback_mode(&self) -> String {
+        let mut conn = self.redis.clone();
+        match conn
+            .get::<_, Option<String>>(REDIS_KEY_PLAYBACK_MODE)
+            .await
+        {
+            Ok(Some(m)) if PLAYBACK_MODES.contains(&m.as_str()) => m,
+            Ok(_) => DEFAULT_PLAYBACK_MODE.to_string(),
+            Err(e) => {
+                tracing::warn!("Redis error reading playback mode: {e}");
+                DEFAULT_PLAYBACK_MODE.to_string()
+            }
+        }
+    }
+
+    /// 再生モードを保存する。未知の値や Redis エラー時は false
+    pub async fn set_playback_mode(&self, mode: &str) -> bool {
+        if !PLAYBACK_MODES.contains(&mode) {
+            return false;
+        }
+        let mut conn = self.redis.clone();
+        match conn.set::<_, _, ()>(REDIS_KEY_PLAYBACK_MODE, mode).await {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!("Redis error writing playback mode: {e}");
+                false
+            }
+        }
+    }
+
+    pub async fn broadcast_playback_mode(&self, mode: &str) {
+        let msg = json!({
+            "type": "playback_mode_update",
+            "mode": mode,
+        });
+        let _ = self.tx.send(msg.to_string());
+    }
+
     // ── コマンドキュー ──
 
     pub async fn queue_play(&self, device_id: &str, track: AudioTrack) {
@@ -483,14 +566,38 @@ impl AppState {
     /// キューされたコマンドを取り出す (GETDEL でアトミックに取得+削除、失効は Redis の TTL 任せ)
     pub async fn take_pending(&self, device_id: &str) -> Option<PendingCommand> {
         let mut conn = self.redis.clone();
-        let json_str = match conn
+        let result = conn
             .get_del::<_, Option<String>>(pending_key(device_id))
-            .await
-        {
+            .await;
+        Self::parse_pending(device_id, result)
+    }
+
+    /// キューされたコマンドを消費せずに参照する (取り出す場合は take_pending)
+    pub async fn peek_pending(&self, device_id: &str) -> Option<PendingCommand> {
+        let mut conn = self.redis.clone();
+        let result = conn
+            .get::<_, Option<String>>(pending_key(device_id))
+            .await;
+        Self::parse_pending(device_id, result)
+    }
+
+    /// キューされたコマンドを破棄する
+    pub async fn clear_pending(&self, device_id: &str) {
+        let mut conn = self.redis.clone();
+        if let Err(e) = conn.del::<_, ()>(pending_key(device_id)).await {
+            tracing::warn!("Redis error clearing pending for {device_id}: {e}");
+        }
+    }
+
+    fn parse_pending(
+        device_id: &str,
+        result: redis::RedisResult<Option<String>>,
+    ) -> Option<PendingCommand> {
+        let json_str = match result {
             Ok(Some(s)) => s,
             Ok(None) => return None,
             Err(e) => {
-                tracing::warn!("Redis error taking pending for {device_id}: {e}");
+                tracing::warn!("Redis error reading pending for {device_id}: {e}");
                 return None;
             }
         };

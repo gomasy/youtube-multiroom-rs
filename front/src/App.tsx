@@ -6,10 +6,11 @@ import { UrlInput } from "./components/UrlInput";
 import type { UrlInputHandle } from "./components/UrlInput";
 import { NowPlaying } from "./components/NowPlaying";
 import { DeviceList } from "./components/DeviceList";
+import { PlaybackModeSelector } from "./components/PlaybackModeSelector";
 import { History } from "./components/History";
 import { AuthModal } from "./components/AuthModal";
 import { ToastContainer, useToast } from "./components/Toast";
-import type { Device, Track, TracksPage } from "./types";
+import type { Device, PlaybackMode, Track, TracksPage } from "./types";
 
 export function App() {
   const [showAuth, setShowAuth] = useState(false);
@@ -20,6 +21,7 @@ export function App() {
   // 認証確認時に取得した 1 ページ目のスナップショット。History が一度だけ消費する
   const [initialTracks, setInitialTracks] = useState<TracksPage | null>(null);
   const [currentTrack, setCurrentTrack] = useState<Track | null>(null);
+  const [playbackMode, setPlaybackMode] = useState<PlaybackMode>("loop");
   const { toasts, showToast } = useToast();
   const urlInputRef = useRef<UrlInputHandle>(null);
 
@@ -57,6 +59,7 @@ export function App() {
     onInit: setDevices,
     onDeviceUpdate: setDevices,
     onTracksUpdate: () => setTracksVersion((v) => v + 1),
+    onPlaybackMode: setPlaybackMode,
     onExtractResult: handleExtractResult,
     onExtractError: handleExtractError,
   });
@@ -71,6 +74,13 @@ export function App() {
       delete next[deviceId];
       return next;
     });
+  }
+
+  function handlePlaybackModeChange(mode: PlaybackMode) {
+    // 表示の更新は保存成功時にサーバーが返す playback_mode_update に任せる
+    if (!sendMessage({ type: "set_playback_mode", mode })) {
+      showToast("サーバーに接続されていません");
+    }
   }
 
   function handleAuthenticated(data: TracksPage | null) {
@@ -104,6 +114,10 @@ export function App() {
               onDeviceDeleted={handleDeviceDeleted}
               onUnauthorized={onUnauthorized}
               showToast={showToast}
+            />
+            <PlaybackModeSelector
+              mode={playbackMode}
+              onChange={handlePlaybackModeChange}
             />
           </div>
           <div className="main-right">

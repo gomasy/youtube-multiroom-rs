@@ -21,7 +21,7 @@ pub async fn handle_alexa(state: &Arc<AppState>, body: Value, base_url: &str) ->
         "IntentRequest" => on_intent(state, &body, &device_id, base_url).await,
         "SessionEndedRequest" => speech("セッション終了", true),
         t if t.starts_with("AudioPlayer.") => {
-            on_audio_event(state, t, &body, &device_id).await
+            on_audio_event(state, t, &body, &device_id, base_url).await
         }
         _ => speech("すみません、よくわかりませんでした。", true),
     };
@@ -124,17 +124,31 @@ async fn on_audio_event(
     event_type: &str,
     body: &Value,
     device_id: &str,
+    base_url: &str,
 ) -> Value {
     let offset = body["request"]["offsetInMilliseconds"]
         .as_u64()
         .unwrap_or(0);
+    let token = body["request"]["token"].as_str().unwrap_or("");
+    let track_id = token_track_id(token);
 
     match event_type {
         "AudioPlayer.PlaybackStarted" => {
             tracing::info!("Playback started: {}", tail_chars(device_id, 8));
-            state
-                .update_device(device_id, DeviceUpdate::new().status("playing"))
-                .await;
+            // エンキューされた曲が始まった場合に備え、token から現在の曲を反映する
+            let mut upd = DeviceUpdate::new().status("playing");
+            if let Some(track) = state.get_track(track_id).await {
+                upd = upd.track(track);
+            }
+            state.update_device(device_id, upd).await;
+            // 始まったのが Web からキューされた曲なら、pending は役目を終えたので消す
+            if state
+                .peek_pending(device_id)
+                .await
+                .is_some_and(|cmd| cmd.track.id == track_id)
+            {
+                state.clear_pending(device_id).await;
+            }
         }
         "AudioPlayer.PlaybackFinished" => {
             state
@@ -150,7 +164,21 @@ async fn on_audio_event(
                 .await;
         }
         "AudioPlayer.PlaybackNearlyFinished" => {
-            // 次トラックのキュー対応はここに追加可能
+            // Web からキューされた曲を優先し、なければ再生モードに従って次の曲を決める。
+            // pending はここでは消費しない (再生開始を確認した PlaybackStarted で消す)。
+            // ENQUEUE が破棄されても曲を失わず、イベントが再送されても同じ結果になる
+            let next = match state.peek_pending(device_id).await {
+                Some(cmd) if cmd.action == "play" => Some(cmd.track),
+                _ => state.auto_next_track(track_id).await,
+            };
+            if let Some(track) = next {
+                tracing::info!(
+                    "Enqueueing next track '{}' on {}",
+                    track.title,
+                    tail_chars(device_id, 8)
+                );
+                return play_response(&track, base_url, 0, Some(token));
+            }
         }
         "AudioPlayer.PlaybackFailed" => {
             let err = &body["request"]["error"];
@@ -174,8 +202,6 @@ async fn play_directive(
     offset_ms: u64,
     base_url: &str,
 ) -> Value {
-    let stream_url = format!("{}/api/audio/{}/stream", base_url, track.id);
-
     state
         .update_device(
             device_id,
@@ -186,18 +212,40 @@ async fn play_directive(
         )
         .await;
 
+    play_response(track, base_url, offset_ms, None)
+}
+
+/// AudioPlayer.Play レスポンスを組み立てる。
+/// enqueue_after (直前の token) を渡すと ENQUEUE、なければ REPLACE_ALL。
+/// エンキュー時のデバイス状態は更新しない (再生が始まると PlaybackStarted で反映される)
+fn play_response(
+    track: &AudioTrack,
+    base_url: &str,
+    offset_ms: u64,
+    enqueue_after: Option<&str>,
+) -> Value {
+    let stream_url = format!("{}/api/audio/{}/stream", base_url, track.id);
+
+    let mut stream = json!({
+        "url": stream_url,
+        "token": new_token(&track.id),
+        "offsetInMilliseconds": offset_ms
+    });
+    let play_behavior = if let Some(prev) = enqueue_after {
+        stream["expectedPreviousToken"] = json!(prev);
+        "ENQUEUE"
+    } else {
+        "REPLACE_ALL"
+    };
+
     json!({
         "version": "1.0",
         "response": {
             "directives": [{
                 "type": "AudioPlayer.Play",
-                "playBehavior": "REPLACE_ALL",
+                "playBehavior": play_behavior,
                 "audioItem": {
-                    "stream": {
-                        "url": stream_url,
-                        "token": track.id,
-                        "offsetInMilliseconds": offset_ms
-                    },
+                    "stream": stream,
                     "metadata": {
                         "title": track.title,
                         "subtitle": if track.channel.is_empty() {
@@ -211,6 +259,18 @@ async fn play_directive(
             "shouldEndSession": true
         }
     })
+}
+
+/// token は "{track_id}#{発行時刻ミリ秒}" 形式。
+/// Alexa は直前と同じ token の ENQUEUE を無視するため (1 曲ループ対策)、再生ごとに一意化する
+fn new_token(track_id: &str) -> String {
+    let millis = (crate::state::now_f64() * 1000.0) as u64;
+    format!("{track_id}#{millis}")
+}
+
+/// token からトラック ID 部分を取り出す (YouTube の ID に '#' は含まれない)
+fn token_track_id(token: &str) -> &str {
+    token.split('#').next().unwrap_or(token)
 }
 
 fn tail_chars(s: &str, n: usize) -> &str {

@@ -1,11 +1,12 @@
 import { useEffect, useRef, useCallback } from "react";
 import { getToken } from "./api";
-import type { Device, Track, WSMessage } from "./types";
+import type { Device, PlaybackMode, Track, WSMessage } from "./types";
 
 interface WSCallbacks {
   onInit: (devices: Record<string, Device>) => void;
   onDeviceUpdate: (devices: Record<string, Device>) => void;
   onTracksUpdate: () => void;
+  onPlaybackMode: (mode: PlaybackMode) => void;
   onExtractResult: (track: Track) => void;
   onExtractError: (error: string) => void;
   onConnectedChange: (connected: boolean) => void;
@@ -44,10 +45,13 @@ export function useWebSocket(active: boolean, callbacks: WSCallbacks) {
       const data: WSMessage = JSON.parse(event.data);
       if (data.type === "init") {
         cbRef.current.onInit(data.devices || {});
+        if (data.playback_mode) cbRef.current.onPlaybackMode(data.playback_mode);
       } else if (data.type === "device_update") {
         cbRef.current.onDeviceUpdate(data.devices || {});
       } else if (data.type === "tracks_update") {
         cbRef.current.onTracksUpdate();
+      } else if (data.type === "playback_mode_update") {
+        cbRef.current.onPlaybackMode(data.mode);
       } else if (data.type === "extract_audio_result") {
         cbRef.current.onExtractResult(data.track);
       } else if (data.type === "extract_audio_error") {

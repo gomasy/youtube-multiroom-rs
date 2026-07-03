@@ -20,9 +20,12 @@ export interface TracksPage {
   per_page: number;
 }
 
+export type PlaybackMode = "loop" | "shuffle" | "off";
+
 export interface WSInitMessage {
   type: "init";
   devices: Record<string, Device>;
+  playback_mode?: PlaybackMode;
 }
 
 export interface WSDeviceUpdateMessage {
@@ -32,6 +35,11 @@ export interface WSDeviceUpdateMessage {
 
 export interface WSTracksUpdateMessage {
   type: "tracks_update";
+}
+
+export interface WSPlaybackModeUpdateMessage {
+  type: "playback_mode_update";
+  mode: PlaybackMode;
 }
 
 export interface WSExtractAudioResultMessage {
@@ -48,5 +56,6 @@ export type WSMessage =
   | WSInitMessage
   | WSDeviceUpdateMessage
   | WSTracksUpdateMessage
+  | WSPlaybackModeUpdateMessage
   | WSExtractAudioResultMessage
   | WSExtractAudioErrorMessage;

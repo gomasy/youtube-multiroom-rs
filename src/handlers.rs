@@ -295,6 +295,7 @@ async fn ws_handler(mut socket: WebSocket, state: Arc<AppState>) {
     let init_msg = json!({
         "type": "init",
         "devices": state.devices_json().await,
+        "playback_mode": state.playback_mode().await,
     });
     if socket
         .send(Message::Text(init_msg.to_string()))
@@ -370,6 +371,13 @@ async fn ws_handler(mut socket: WebSocket, state: Arc<AppState>) {
                                         });
                                         if socket.send(Message::Text(msg.to_string())).await.is_err() {
                                             break;
+                                        }
+                                    }
+                                }
+                                "set_playback_mode" => {
+                                    if let Some(mode) = data["mode"].as_str() {
+                                        if state.set_playback_mode(mode).await {
+                                            state.broadcast_playback_mode(mode).await;
                                         }
                                     }
                                 }

@@ -304,6 +304,35 @@ body {
 }
 .delete-btn:hover { color: #e53935; background: rgba(229, 57, 53, 0.1); }
 
+/* ── Playback mode ── */
+.playback-mode-section { margin-bottom: 24px; }
+.segmented {
+  display: flex;
+  gap: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px;
+}
+.segmented-btn {
+  flex: 1;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 8px 0;
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.segmented-btn:hover { color: var(--text); }
+.segmented-btn.active {
+  background: var(--surface-3);
+  color: var(--text);
+  font-weight: 600;
+}
+
 /* ── Empty states ── */
 .empty-state {
   text-align: center;
