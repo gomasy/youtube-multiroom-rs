@@ -177,7 +177,7 @@ async fn on_audio_event(
                     track.title,
                     tail_chars(device_id, 8)
                 );
-                return play_response(&track, base_url, 0, Some(token));
+                return play_response(state, &track, base_url, 0, Some(token));
             }
         }
         "AudioPlayer.PlaybackFailed" => {
@@ -212,19 +212,25 @@ async fn play_directive(
         )
         .await;
 
-    play_response(track, base_url, offset_ms, None)
+    play_response(state, track, base_url, offset_ms, None)
 }
 
 /// AudioPlayer.Play レスポンスを組み立てる。
 /// enqueue_after (直前の token) を渡すと ENQUEUE、なければ REPLACE_ALL。
 /// エンキュー時のデバイス状態は更新しない (再生が始まると PlaybackStarted で反映される)
 fn play_response(
+    state: &Arc<AppState>,
     track: &AudioTrack,
     base_url: &str,
     offset_ms: u64,
     enqueue_after: Option<&str>,
 ) -> Value {
-    let stream_url = format!("{}/api/audio/{}/stream", base_url, track.id);
+    // Echo は認証ヘッダを付けられないため、署名付き URL でストリームを認証する
+    let mut stream_url = format!("{}/api/audio/{}/stream", base_url, track.id);
+    if let Some(secret) = &state.api_token {
+        stream_url.push('?');
+        stream_url.push_str(&crate::auth::stream_query(secret, &track.id));
+    }
 
     let mut stream = json!({
         "url": stream_url,

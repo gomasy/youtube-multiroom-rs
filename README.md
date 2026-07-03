@@ -101,7 +101,8 @@ REDIS_URL=redis://127.0.0.1/ API_TOKEN=your-secret-token ./target/release/youtub
 When enabled:
 - The Web UI prompts for the token on first access (stored in localStorage)
 - API endpoints and WebSocket require `Authorization: Bearer <token>` (or `?token=` query param for WebSocket)
-- `/alexa` and `/api/audio/:id/stream` are excluded from authentication since Alexa accesses them directly
+- `/api/audio/:id/stream` requires a signed URL: stream URLs handed to Alexa carry an HMAC-SHA256 signature (`?exp=<unix>&sig=<hmac>`, derived from `API_TOKEN`, valid for 24h) since Echo devices cannot send auth headers. Bearer auth is also accepted
+- `/alexa` is excluded from authentication since Alexa accesses it directly
 
 If `API_TOKEN` is not set, no authentication is required.
 
@@ -232,7 +233,7 @@ sudo systemctl enable --now yt-multiroom
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| GET | `/api/audio/:id/stream` | No | Stream MP3 audio (supports Range requests) |
+| GET | `/api/audio/:id/stream` | Signed URL | Stream MP3 audio (supports Range requests) |
 | GET | `/api/tracks` | Yes | List extracted tracks, newest first (paginated) |
 | DELETE | `/api/tracks/:id` | Yes | Delete a track and its cached file |
 | GET | `/api/devices` | Yes | List connected devices |

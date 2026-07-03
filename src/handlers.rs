@@ -84,7 +84,7 @@ pub async fn stream_audio(
                     (header::CONTENT_LENGTH, body.len().to_string()),
                     (
                         header::CACHE_CONTROL,
-                        "public, max-age=3600".to_string(),
+                        "private, max-age=3600".to_string(),
                     ),
                 ],
                 body,
@@ -101,7 +101,7 @@ pub async fn stream_audio(
             (header::CONTENT_LENGTH, total.to_string()),
             (
                 header::CACHE_CONTROL,
-                "public, max-age=3600".to_string(),
+                "private, max-age=3600".to_string(),
             ),
         ],
         bytes,
