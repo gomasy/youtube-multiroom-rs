@@ -35,6 +35,7 @@ youtube-multiroom-rs/
 │           ├── Header.tsx
 │           ├── History.tsx
 │           ├── NowPlaying.tsx
+│           ├── PlaybackModeSelector.tsx
 │           ├── ScrollingText.tsx
 │           ├── Toast.tsx
 │           └── UrlInput.tsx
@@ -144,6 +145,7 @@ The binary, `front/dist/`, `yt-dlp`, and `ffmpeg` are needed on the Pi.
 3. Say to your Echo: **「アレクサ、YouTube プレーヤーを開いて」**
 4. Select devices in the Web UI and click play
 5. Say to each Echo again: **「アレクサ、YouTube プレーヤーを開いて」** to start playback
+6. Optionally pick a playback mode (off / loop / shuffle) in the Web UI to auto-play the next track
 
 ## Architecture
 
@@ -152,6 +154,7 @@ The binary, `front/dist/`, `yt-dlp`, and `ffmpeg` are needed on the Pi.
     ├── redis: ConnectionManager    # all persistent state
     │    ├── youtube:tracks                # track metadata (hash)
     │    ├── youtube:devices               # Echo device states (hash)
+    │    ├── youtube:playback_mode         # auto-play mode ("off" | "loop" | "shuffle")
     │    └── youtube:pending:{device_id}   # queued play command (10 min TTL)
     └── tx: broadcast::Sender      # real-time sync
          │
@@ -175,12 +178,29 @@ The binary, `front/dist/`, `yt-dlp`, and `ffmpeg` are needed on the Pi.
 All state lives in Redis, so tracks, devices, and queued play commands survive server restarts.
 Queued play commands are stored per device with a native Redis TTL (10 minutes) and consumed atomically via `GETDEL`.
 
+### Playback Modes
+
+Auto-play behavior when a track finishes is controlled by a global playback mode (selectable in the Web UI, persisted in Redis, default `off`):
+
+- `off` — stop after the current track
+- `loop` — continue with the next track in library order (newest first), wrapping to the top
+- `shuffle` — continue with a random track other than the current one
+
+On Alexa's `AudioPlayer.PlaybackNearlyFinished` event, the server picks the next track according to the mode and enqueues it via an `ENQUEUE` directive.
+
+### WebSocket Protocol
+
 Audio extraction is handled via WebSocket to avoid reverse proxy read timeouts.
 The client sends `{ "type": "extract_audio", "url": "..." }` and receives `extract_audio_result` or `extract_audio_error`.
+The client can also send `{ "type": "set_playback_mode", "mode": "off" | "loop" | "shuffle" }` and `{ "type": "ping" }` (answered with `pong`).
+
+On connect, the server sends an `init` message containing the current device map and playback mode
+(the track list is fetched separately via `GET /api/tracks`).
 
 State changes are broadcast to all WebSocket clients via `tokio::sync::broadcast`:
 - `device_update` — device status, track assignment, connection changes (full device map)
 - `tracks_update` — notification that the track list changed; clients refetch their current page via `GET /api/tracks`
+- `playback_mode_update` — the playback mode was changed by a client
 
 ## systemd Service
 
