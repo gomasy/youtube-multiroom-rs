@@ -1,9 +1,9 @@
 import type { PlaybackMode } from "../types";
 
 const MODES: { value: PlaybackMode; label: string; hint: string }[] = [
+  { value: "off", label: "オフ", hint: "曲が終わったら停止" },
   { value: "loop", label: "ループ", hint: "ライブラリ順に連続再生" },
   { value: "shuffle", label: "シャッフル", hint: "ランダムに連続再生" },
-  { value: "off", label: "オフ", hint: "曲が終わったら停止" },
 ];
 
 interface Props {

@@ -21,7 +21,7 @@ export function App() {
   // 認証確認時に取得した 1 ページ目のスナップショット。History が一度だけ消費する
   const [initialTracks, setInitialTracks] = useState<TracksPage | null>(null);
   const [currentTrack, setCurrentTrack] = useState<Track | null>(null);
-  const [playbackMode, setPlaybackMode] = useState<PlaybackMode>("loop");
+  const [playbackMode, setPlaybackMode] = useState<PlaybackMode>("off");
   const { toasts, showToast } = useToast();
   const urlInputRef = useRef<UrlInputHandle>(null);
 

@@ -17,7 +17,7 @@ const REDIS_KEY_DEVICES: &str = "youtube:devices";
 const REDIS_KEY_PLAYBACK_MODE: &str = "youtube:playback_mode";
 
 const PLAYBACK_MODES: [&str; 3] = ["loop", "shuffle", "off"];
-const DEFAULT_PLAYBACK_MODE: &str = "loop";
+const DEFAULT_PLAYBACK_MODE: &str = "off";
 /// pending コマンドのキー接頭辞 (デバイスごとに youtube:pending:{device_id})
 const REDIS_PENDING_PREFIX: &str = "youtube:pending";
 
