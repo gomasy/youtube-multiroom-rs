@@ -1,8 +1,9 @@
 import { useRef } from "react";
-import { setToken, verifyToken } from "../api";
+import { checkAuth, setToken } from "../api";
+import type { TracksPage } from "../types";
 
 interface Props {
-  onAuthenticated: () => void;
+  onAuthenticated: (data: TracksPage | null) => void;
   showToast: (msg: string) => void;
 }
 
@@ -13,14 +14,14 @@ export function AuthModal({ onAuthenticated, showToast }: Props) {
     const token = inputRef.current?.value.trim();
     if (!token) return;
 
-    const valid = await verifyToken(token);
-    if (!valid) {
+    const { authorized, data } = await checkAuth(token);
+    if (!authorized) {
       showToast("トークンが正しくありません");
       return;
     }
 
     setToken(token);
-    onAuthenticated();
+    onAuthenticated(data);
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {

@@ -1,5 +1,7 @@
 import type { TracksPage } from "./types";
 
+export const PER_PAGE = 10;
+
 let apiToken = localStorage.getItem("api_token");
 
 export function getToken(): string | null {
@@ -35,34 +37,30 @@ export async function fetchTracks(
   page: number,
   perPage: number,
   onUnauthorized?: () => void,
+  token?: string,
 ): Promise<TracksPage> {
   const res = await authFetch(
     `/api/tracks?page=${page}&per_page=${perPage}`,
-    {},
+    token ? { headers: { Authorization: `Bearer ${token}` } } : {},
     onUnauthorized,
   );
   if (!res.ok) throw new Error("トラック一覧の取得に失敗しました");
   return res.json();
 }
 
-export async function checkAuth(): Promise<boolean> {
+// 認証確認を兼ねてトラック一覧の先頭ページを取得する。
+// token を渡すと保存済みトークンの代わりにそれで検証する(モーダルでの入力確認用)。
+// authorized=false は 401(要認証)。ネットワークエラー等は認証済み扱いで進める。
+export async function checkAuth(
+  token?: string,
+): Promise<{ authorized: boolean; data: TracksPage | null }> {
+  let unauthorized = false;
   try {
-    const res = await fetch("/api/tracks", { headers: authHeaders() });
-    return res.status !== 401;
+    const data = await fetchTracks(1, PER_PAGE, () => {
+      unauthorized = true;
+    }, token);
+    return { authorized: true, data };
   } catch {
-    return true;
-  }
-}
-
-export async function verifyToken(token: string): Promise<boolean> {
-  const h: Record<string, string> = {
-    "Content-Type": "application/json",
-    Authorization: `Bearer ${token}`,
-  };
-  try {
-    const res = await fetch("/api/tracks", { headers: h });
-    return res.status !== 401;
-  } catch {
-    return true;
+    return { authorized: !unauthorized, data: null };
   }
 }

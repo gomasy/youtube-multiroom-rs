@@ -1,9 +1,7 @@
-import { useEffect, useState } from "react";
-import { authFetch, fetchTracks } from "../api";
+import { useEffect, useRef, useState } from "react";
+import { authFetch, fetchTracks, PER_PAGE } from "../api";
 import { ScrollingText } from "./ScrollingText";
-import type { Track } from "../types";
-
-const PER_PAGE = 10;
+import type { Track, TracksPage } from "../types";
 
 function formatDuration(seconds?: number): string {
   if (!seconds) return "--:--";
@@ -14,6 +12,8 @@ function formatDuration(seconds?: number): string {
 
 interface Props {
   active: boolean;
+  // 認証確認時に取得済みの 1 ページ目。初回フェッチの代わりに使う
+  initialData: TracksPage | null;
   refreshKey: number;
   currentTrack: Track | null;
   onSelectTrack: (track: Track) => void;
@@ -22,17 +22,29 @@ interface Props {
   showToast: (msg: string) => void;
 }
 
-export function History({ active, refreshKey, currentTrack, onSelectTrack, onTrackDeleted, onUnauthorized, showToast }: Props) {
+export function History({ active, initialData, refreshKey, currentTrack, onSelectTrack, onTrackDeleted, onUnauthorized, showToast }: Props) {
   const [page, setPage] = useState(1);
   const [tracks, setTracks] = useState<Track[]>([]);
   const [total, setTotal] = useState(0);
   // WS 切断中でも REST 操作後にリストを更新できるようにするローカルカウンター
   const [localVersion, setLocalVersion] = useState(0);
+  // 消費済みの initialData を識別し、再認証などで新しいスナップショットが
+  // 渡されたときはあらためて消費できるようにする
+  const consumedInitial = useRef<TracksPage | null>(null);
 
   const totalPages = Math.max(1, Math.ceil(total / PER_PAGE));
 
   useEffect(() => {
     if (!active) return;
+    if (initialData && consumedInitial.current !== initialData) {
+      consumedInitial.current = initialData;
+      // 表示中のページと一致する場合のみ採用。ずれていれば通常のフェッチへ
+      if (page === initialData.page) {
+        setTracks(initialData.tracks);
+        setTotal(initialData.total);
+        return;
+      }
+    }
     let cancelled = false;
     fetchTracks(page, PER_PAGE, onUnauthorized)
       .then((data) => {
@@ -47,7 +59,7 @@ export function History({ active, refreshKey, currentTrack, onSelectTrack, onTra
     return () => {
       cancelled = true;
     };
-  }, [active, page, refreshKey, localVersion, onUnauthorized]);
+  }, [active, initialData, page, refreshKey, localVersion, onUnauthorized]);
 
   if (total === 0) return null;
 

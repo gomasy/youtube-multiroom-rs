@@ -9,7 +9,7 @@ import { DeviceList } from "./components/DeviceList";
 import { History } from "./components/History";
 import { AuthModal } from "./components/AuthModal";
 import { ToastContainer, useToast } from "./components/Toast";
-import type { Device, Track } from "./types";
+import type { Device, Track, TracksPage } from "./types";
 
 export function App() {
   const [showAuth, setShowAuth] = useState(false);
@@ -17,6 +17,8 @@ export function App() {
   const [connected, setConnected] = useState(false);
   const [devices, setDevices] = useState<Record<string, Device>>({});
   const [tracksVersion, setTracksVersion] = useState(0);
+  // 認証確認時に取得した 1 ページ目のスナップショット。History が一度だけ消費する
+  const [initialTracks, setInitialTracks] = useState<TracksPage | null>(null);
   const [currentTrack, setCurrentTrack] = useState<Track | null>(null);
   const { toasts, showToast } = useToast();
   const urlInputRef = useRef<UrlInputHandle>(null);
@@ -25,10 +27,11 @@ export function App() {
   const onUnauthorized = useCallback(() => setShowAuth(true), []);
 
   useEffect(() => {
-    checkAuth().then((ok) => {
-      if (!ok) {
+    checkAuth().then(({ authorized, data }) => {
+      if (!authorized) {
         setShowAuth(true);
       } else {
+        setInitialTracks(data);
         setWsActive(true);
       }
     });
@@ -70,8 +73,9 @@ export function App() {
     });
   }
 
-  function handleAuthenticated() {
+  function handleAuthenticated(data: TracksPage | null) {
     setShowAuth(false);
+    if (data) setInitialTracks(data);
     setWsActive(true);
   }
 
@@ -105,6 +109,7 @@ export function App() {
           <div className="main-right">
             <History
               active={wsActive}
+              initialData={initialTracks}
               refreshKey={tracksVersion}
               currentTrack={currentTrack}
               onSelectTrack={setCurrentTrack}
