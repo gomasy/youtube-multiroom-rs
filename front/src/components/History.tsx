@@ -10,6 +10,11 @@ function formatDuration(seconds?: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+// 総件数から最終ページ番号 (1 始まり) を求める
+function lastPage(total: number): number {
+  return Math.max(1, Math.ceil(total / PER_PAGE));
+}
+
 interface Props {
   active: boolean;
   // 認証確認時に取得済みの 1 ページ目。初回フェッチの代わりに使う
@@ -36,9 +41,18 @@ export function History({ active, initialData, refreshKey, currentTrack, onSelec
   const [dragId, setDragId] = useState<string | null>(null);
   // 挿入位置 (0 〜 tracks.length)。i は「i 番目の前」を意味する
   const [dropIndex, setDropIndex] = useState<number | null>(null);
+  // ページをまたいでドロップしたとき用に、開始時のトラックと全体位置を控える
+  const dragOrigin = useRef<{ track: Track; globalIndex: number } | null>(null);
+  // ドラッグ中にページ送りボタンへかざしている方向 (-1 / 0 / 1)
+  const [flipDir, setFlipDir] = useState(0);
+  // tracks がどのページの内容か。ページ送り直後はフェッチ完了まで page と
+  // ずれるため、ドロップ位置の計算はこちらを基準にする
+  const [loadedPage, setLoadedPage] = useState(1);
   const listRef = useRef<HTMLDivElement>(null);
+  const prevBtnRef = useRef<HTMLButtonElement>(null);
+  const nextBtnRef = useRef<HTMLButtonElement>(null);
 
-  const totalPages = Math.max(1, Math.ceil(total / PER_PAGE));
+  const totalPages = lastPage(total);
 
   useEffect(() => {
     if (!active) return;
@@ -48,6 +62,7 @@ export function History({ active, initialData, refreshKey, currentTrack, onSelec
       if (page === initialData.page) {
         setTracks(initialData.tracks);
         setTotal(initialData.total);
+        setLoadedPage(initialData.page);
         return;
       }
     }
@@ -57,8 +72,9 @@ export function History({ active, initialData, refreshKey, currentTrack, onSelec
         if (cancelled) return;
         setTracks(data.tracks);
         setTotal(data.total);
+        setLoadedPage(page);
         // 削除でページが範囲外になったら最終ページへ戻す
-        const last = Math.max(1, Math.ceil(data.total / PER_PAGE));
+        const last = lastPage(data.total);
         if (page > last) setPage(last);
       })
       .catch(() => {});
@@ -66,6 +82,18 @@ export function History({ active, initialData, refreshKey, currentTrack, onSelec
       cancelled = true;
     };
   }, [active, initialData, page, refreshKey, localVersion, onUnauthorized]);
+
+  // ドラッグ中のかざし方向に従って一定間隔でページを送る。端に達したら
+  // 止めてハイライトも消す。クリーンアップがタイマーの停止を兼ねる
+  useEffect(() => {
+    if (flipDir === 0) return;
+    if (flipDir === -1 ? page <= 1 : page >= totalPages) {
+      setFlipDir(0);
+      return;
+    }
+    const timer = window.setInterval(() => setPage((p) => p + flipDir), 650);
+    return () => clearInterval(timer);
+  }, [flipDir, page, totalPages]);
 
   if (total === 0) return null;
 
@@ -86,22 +114,43 @@ export function History({ active, initialData, refreshKey, currentTrack, onSelec
   }
 
   function resetDrag() {
+    setFlipDir(0);
+    dragOrigin.current = null;
     setDragId(null);
     setDropIndex(null);
   }
 
-  // マウス・タッチ共通の Pointer Events でドラッグする。
-  // ハンドルが setPointerCapture するので move/up はハンドル上で受けられる
-  function handleDragStart(e: React.PointerEvent<HTMLElement>, trackId: string) {
-    if (tracks.length < 2) return;
+  function isOver(el: HTMLElement | null, e: React.PointerEvent) {
+    if (!el) return false;
+    const r = el.getBoundingClientRect();
+    return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+  }
+
+  // マウス・タッチ共通の Pointer Events でドラッグする。ページ送りで行要素が
+  // 消えてもドラッグを継続できるよう、残り続けるリスト要素にキャプチャして
+  // move/up はリスト側で受ける
+  function handleDragStart(e: React.PointerEvent<HTMLElement>, track: Track, index: number) {
+    if (total < 2) return;
     e.preventDefault();
-    e.currentTarget.setPointerCapture(e.pointerId);
-    setDragId(trackId);
+    listRef.current?.setPointerCapture(e.pointerId);
+    dragOrigin.current = { track, globalIndex: (loadedPage - 1) * PER_PAGE + index };
+    setDragId(track.id);
     updateDropIndex(e.clientY);
   }
 
   function handleDragMove(e: React.PointerEvent<HTMLElement>) {
     if (dragId === null) return;
+    // ページ送りボタンにかざしている間は挿入位置ではなくページを切り替える。
+    // このとき自動スクロールするとボタンがずれて誤動作するため止めておく
+    const dir =
+      page > 1 && isOver(prevBtnRef.current, e) ? -1
+      : page < totalPages && isOver(nextBtnRef.current, e) ? 1
+      : 0;
+    setFlipDir(dir);
+    if (dir !== 0) {
+      setDropIndex(null);
+      return;
+    }
     // 画面端に近づいたらページをスクロールして続きを見せる
     if (e.clientY < 70) {
       window.scrollBy({ top: -14 });
@@ -114,25 +163,33 @@ export function History({ active, initialData, refreshKey, currentTrack, onSelec
   // ドロップ確定: ローカルを楽観的に並べ替えてからサーバーへ保存する。
   // 確定表示はサーバーが tracks_update で通知してくる再取得に任せる
   async function commitReorder() {
-    if (dragId === null || dropIndex === null) return;
-    // ドラッグ中に一覧が更新された場合に備え、現在の配列から位置を引き直す
-    const from = tracks.findIndex((t) => t.id === dragId);
-    let to = dropIndex;
+    const id = dragId;
+    const to = dropIndex;
+    const origin = dragOrigin.current;
     resetDrag();
-    if (from === -1) return; // ドラッグ中に削除された
-    if (to === from || to === from + 1) return; // 位置が変わらない
-    if (to > from) to -= 1; // 自分自身を除いた後の挿入位置に補正
+    if (id === null || to === null || origin === null) return;
+    // ドラッグ中に一覧が更新された場合に備え、現在の配列から位置を引き直す。
+    // ページをまたいだ場合は現在ページに存在しないので開始時の位置を使う
+    const from = tracks.findIndex((t) => t.id === id);
+    const origGlobal = from !== -1 ? (loadedPage - 1) * PER_PAGE + from : origin.globalIndex;
+    const targetGlobal = (loadedPage - 1) * PER_PAGE + to;
+    if (targetGlobal === origGlobal || targetGlobal === origGlobal + 1) return; // 位置が変わらない
+    // 自分自身を除いた後の挿入位置に補正
+    const newIndex = targetGlobal > origGlobal ? targetGlobal - 1 : targetGlobal;
 
-    const next = [...tracks];
-    const [moved] = next.splice(from, 1);
-    next.splice(to, 0, moved);
-    setTracks(next);
+    const moved = from !== -1 ? tracks[from] : origin.track;
+    const next = tracks.filter((t) => t.id !== id);
+    next.splice(from !== -1 && from < to ? to - 1 : to, 0, moved);
+    setTracks(next.slice(0, PER_PAGE));
 
     try {
-      await reorderTrack(moved.id, (page - 1) * PER_PAGE + to, onUnauthorized);
+      await reorderTrack(id, newIndex, onUnauthorized);
     } catch (e) {
-      setLocalVersion((v) => v + 1); // サーバー側の並びに戻す
       showToast(`エラー: ${(e as Error).message}`);
+    } finally {
+      // 成功時も WS 切断中に備えて REST で取り直し、失敗時はサーバー側の
+      // 並びへ戻す
+      setLocalVersion((v) => v + 1);
     }
   }
 
@@ -155,7 +212,13 @@ export function History({ active, initialData, refreshKey, currentTrack, onSelec
   return (
     <div className="history-section">
       <div className="section-label">取得済みトラック ({total})</div>
-      <div className="history-list" ref={listRef}>
+      <div
+        className="history-list"
+        ref={listRef}
+        onPointerMove={handleDragMove}
+        onPointerUp={() => commitReorder()}
+        onPointerCancel={resetDrag}
+      >
         {tracks.map((t, i) => {
           const isCurrent = currentTrack?.id === t.id;
           const classes = ["history-item"];
@@ -171,15 +234,12 @@ export function History({ active, initialData, refreshKey, currentTrack, onSelec
               style={isCurrent ? { borderColor: "var(--accent)" } : undefined}
               onClick={() => onSelectTrack(t)}
             >
-              {tracks.length > 1 && (
+              {total > 1 && (
                 <span
                   className="drag-handle"
                   title="ドラッグで並べ替え"
                   onClick={(e) => e.stopPropagation()}
-                  onPointerDown={(e) => handleDragStart(e, t.id)}
-                  onPointerMove={handleDragMove}
-                  onPointerUp={() => commitReorder()}
-                  onPointerCancel={resetDrag}
+                  onPointerDown={(e) => handleDragStart(e, t, i)}
                 >
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
                     <circle cx="9" cy="5" r="1.7" />
@@ -224,7 +284,8 @@ export function History({ active, initialData, refreshKey, currentTrack, onSelec
       {totalPages > 1 && (
         <div className="pagination">
           <button
-            className="btn btn-outline btn-sm"
+            ref={prevBtnRef}
+            className={"btn btn-outline btn-sm" + (flipDir === -1 ? " drag-over" : "")}
             disabled={page <= 1}
             onClick={() => setPage(page - 1)}
           >
@@ -234,7 +295,8 @@ export function History({ active, initialData, refreshKey, currentTrack, onSelec
             {page} / {totalPages}
           </span>
           <button
-            className="btn btn-outline btn-sm"
+            ref={nextBtnRef}
+            className={"btn btn-outline btn-sm" + (flipDir === 1 ? " drag-over" : "")}
             disabled={page >= totalPages}
             onClick={() => setPage(page + 1)}
           >

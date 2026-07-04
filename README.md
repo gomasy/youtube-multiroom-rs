@@ -147,7 +147,7 @@ The binary, `front/dist/`, `yt-dlp`, and `ffmpeg` are needed on the Pi.
 4. Select devices in the Web UI and click play
 5. Say to each Echo again: **「アレクサ、YouTube プレーヤーを開いて」** to start playback
 6. Optionally pick a playback mode (off / loop / shuffle) in the Web UI to auto-play the next track
-7. Drag the grip handle (⋮⋮) on a track row to rearrange the library order (also used by loop playback)
+7. Drag the grip handle (⋮⋮) on a track row to rearrange the library order (also used by loop playback); hold the drag over the prev/next pagination button to flip pages and drop the track on another page
 
 ## Architecture
 
@@ -186,7 +186,7 @@ If the track metadata hash is ever lost (e.g. Redis was wiped), the next `GET /a
 
 ### Track Ordering
 
-Tracks are listed and auto-played in a user-defined order persisted in the `youtube:tracks_order` Redis list. Rows in the Web UI can be rearranged by dragging the grip handle (works with both mouse and touch via Pointer Events). Newly extracted tracks are placed at the top; tracks not present in the order list (data from before this feature) are appended newest-first.
+Tracks are listed and auto-played in a user-defined order persisted in the `youtube:tracks_order` Redis list. Rows in the Web UI can be rearranged by dragging the grip handle (works with both mouse and touch via Pointer Events). Reordering works across pages: hovering the prev/next pagination button mid-drag auto-flips pages (one page per 650 ms) so the track can be dropped anywhere in the library. Newly extracted tracks are placed at the top; tracks not present in the order list (data from before this feature) are appended newest-first.
 
 ### Playback Modes
 

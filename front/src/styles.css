@@ -435,6 +435,11 @@ body {
   gap: 12px;
   margin-top: 14px;
 }
+/* ドラッグ中にページ送りボタンへかざしているときの強調表示 */
+.pagination .btn.drag-over {
+  border-color: var(--accent);
+  color: var(--accent);
+}
 .pagination-info {
   font-size: 12px;
   color: var(--text-dim);
