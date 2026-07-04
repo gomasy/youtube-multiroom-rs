@@ -147,6 +147,7 @@ The binary, `front/dist/`, `yt-dlp`, and `ffmpeg` are needed on the Pi.
 4. Select devices in the Web UI and click play
 5. Say to each Echo again: **「アレクサ、YouTube プレーヤーを開いて」** to start playback
 6. Optionally pick a playback mode (off / loop / shuffle) in the Web UI to auto-play the next track
+7. Drag the grip handle (⋮⋮) on a track row to rearrange the library order (also used by loop playback)
 
 ## Architecture
 
@@ -154,6 +155,7 @@ The binary, `front/dist/`, `yt-dlp`, and `ffmpeg` are needed on the Pi.
     AppState (Arc)
     ├── redis: ConnectionManager    # all persistent state
     │    ├── youtube:tracks                # track metadata (hash)
+    │    ├── youtube:tracks_order          # track display/playback order (list)
     │    ├── youtube:devices               # Echo device states (hash)
     │    ├── youtube:playback_mode         # auto-play mode ("off" | "loop" | "shuffle")
     │    └── youtube:pending:{device_id}   # queued play command (10 min TTL)
@@ -164,6 +166,7 @@ The binary, `front/dist/`, `yt-dlp`, and `ffmpeg` are needed on the Pi.
     ├──────────────────────────────────────────────────────┤
     │  GET    /api/audio/:id/stream   MP3 streaming        │
     │  GET    /api/tracks             track list (paged)    │
+    │  POST   /api/tracks/reorder     move a track          │
     │  DELETE /api/tracks/:id         delete track          │
     │  GET    /api/devices            device list           │
     │  DELETE /api/devices/:id        delete device         │
@@ -179,12 +182,18 @@ The binary, `front/dist/`, `yt-dlp`, and `ffmpeg` are needed on the Pi.
 All state lives in Redis, so tracks, devices, and queued play commands survive server restarts.
 Queued play commands are stored per device with a native Redis TTL (10 minutes) and consumed atomically via `GETDEL`.
 
+If the track metadata hash is ever lost (e.g. Redis was wiped), the next `GET /api/tracks` detects the missing key and rebuilds it in the background from the mp3 filenames in `audio_cache/`, re-fetching metadata via yt-dlp (file mtime is used as the registration time to preserve ordering; a `tracks_update` is broadcast when done). The custom track order itself cannot be recovered this way — tracks fall back to newest-first.
+
+### Track Ordering
+
+Tracks are listed and auto-played in a user-defined order persisted in the `youtube:tracks_order` Redis list. Rows in the Web UI can be rearranged by dragging the grip handle (works with both mouse and touch via Pointer Events). Newly extracted tracks are placed at the top; tracks not present in the order list (data from before this feature) are appended newest-first.
+
 ### Playback Modes
 
 Auto-play behavior when a track finishes is controlled by a global playback mode (selectable in the Web UI, persisted in Redis, default `off`):
 
 - `off` — stop after the current track
-- `loop` — continue with the next track in library order (newest first), wrapping to the top
+- `loop` — continue with the next track in library order (see Track Ordering above), wrapping to the top
 - `shuffle` — continue with a random track other than the current one
 
 On Alexa's `AudioPlayer.PlaybackNearlyFinished` event, the server picks the next track according to the mode and enqueues it via an `ENQUEUE` directive.
@@ -234,7 +243,8 @@ sudo systemctl enable --now yt-multiroom
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | GET | `/api/audio/:id/stream` | Signed URL | Stream MP3 audio (supports Range requests) |
-| GET | `/api/tracks` | Yes | List extracted tracks, newest first (paginated) |
+| GET | `/api/tracks` | Yes | List extracted tracks in library order (paginated) |
+| POST | `/api/tracks/reorder` | Yes | Move a track within the library order |
 | DELETE | `/api/tracks/:id` | Yes | Delete a track and its cached file |
 | GET | `/api/devices` | Yes | List connected devices |
 | DELETE | `/api/devices/:id` | Yes | Delete a device |
@@ -248,6 +258,12 @@ sudo systemctl enable --now yt-multiroom
 
 ```json
 { "tracks": [ ... ], "total": 42, "page": 1, "per_page": 10 }
+```
+
+`POST /api/tracks/reorder` moves a track to a zero-based position in the overall library order (out-of-range indexes are clamped to the end):
+
+```json
+{ "track_id": "dQw4w9WgXcQ", "new_index": 3 }
 ```
 
 ## License

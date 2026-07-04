@@ -48,6 +48,23 @@ export async function fetchTracks(
   return res.json();
 }
 
+// トラックを全体並びの newIndex (0 始まり) へ移動する
+export async function reorderTrack(
+  trackId: string,
+  newIndex: number,
+  onUnauthorized?: () => void,
+): Promise<void> {
+  const res = await authFetch(
+    "/api/tracks/reorder",
+    {
+      method: "POST",
+      body: JSON.stringify({ track_id: trackId, new_index: newIndex }),
+    },
+    onUnauthorized,
+  );
+  if (!res.ok) throw new Error("並べ替えに失敗しました");
+}
+
 // 認証確認を兼ねてトラック一覧の先頭ページを取得する。
 // token を渡すと保存済みトークンの代わりにそれで検証する(モーダルでの入力確認用)。
 // authorized=false は 401(要認証)。ネットワークエラー等は認証済み扱いで進める。

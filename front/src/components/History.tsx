@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { authFetch, fetchTracks, PER_PAGE } from "../api";
+import { authFetch, fetchTracks, reorderTrack, PER_PAGE } from "../api";
 import { ScrollingText } from "./ScrollingText";
 import type { Track, TracksPage } from "../types";
 
@@ -31,6 +31,12 @@ export function History({ active, initialData, refreshKey, currentTrack, onSelec
   // 消費済みの initialData を識別し、再認証などで新しいスナップショットが
   // 渡されたときはあらためて消費できるようにする
   const consumedInitial = useRef<TracksPage | null>(null);
+  // ドラッグ&ドロップ並べ替えの状態。ドラッグ中に WS 通知などで一覧が
+  // 入れ替わってもよいように、対象はインデックスではなく ID で追跡する
+  const [dragId, setDragId] = useState<string | null>(null);
+  // 挿入位置 (0 〜 tracks.length)。i は「i 番目の前」を意味する
+  const [dropIndex, setDropIndex] = useState<number | null>(null);
+  const listRef = useRef<HTMLDivElement>(null);
 
   const totalPages = Math.max(1, Math.ceil(total / PER_PAGE));
 
@@ -63,6 +69,73 @@ export function History({ active, initialData, refreshKey, currentTrack, onSelec
 
   if (total === 0) return null;
 
+  // ポインタ位置から挿入インデックスを求める (各行の中央を境に前後を判定)
+  function updateDropIndex(clientY: number) {
+    const list = listRef.current;
+    if (!list) return;
+    const items = list.querySelectorAll<HTMLElement>(".history-item");
+    let idx = items.length;
+    for (let i = 0; i < items.length; i++) {
+      const rect = items[i].getBoundingClientRect();
+      if (clientY < rect.top + rect.height / 2) {
+        idx = i;
+        break;
+      }
+    }
+    setDropIndex(idx);
+  }
+
+  function resetDrag() {
+    setDragId(null);
+    setDropIndex(null);
+  }
+
+  // マウス・タッチ共通の Pointer Events でドラッグする。
+  // ハンドルが setPointerCapture するので move/up はハンドル上で受けられる
+  function handleDragStart(e: React.PointerEvent<HTMLElement>, trackId: string) {
+    if (tracks.length < 2) return;
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setDragId(trackId);
+    updateDropIndex(e.clientY);
+  }
+
+  function handleDragMove(e: React.PointerEvent<HTMLElement>) {
+    if (dragId === null) return;
+    // 画面端に近づいたらページをスクロールして続きを見せる
+    if (e.clientY < 70) {
+      window.scrollBy({ top: -14 });
+    } else if (e.clientY > window.innerHeight - 70) {
+      window.scrollBy({ top: 14 });
+    }
+    updateDropIndex(e.clientY);
+  }
+
+  // ドロップ確定: ローカルを楽観的に並べ替えてからサーバーへ保存する。
+  // 確定表示はサーバーが tracks_update で通知してくる再取得に任せる
+  async function commitReorder() {
+    if (dragId === null || dropIndex === null) return;
+    // ドラッグ中に一覧が更新された場合に備え、現在の配列から位置を引き直す
+    const from = tracks.findIndex((t) => t.id === dragId);
+    let to = dropIndex;
+    resetDrag();
+    if (from === -1) return; // ドラッグ中に削除された
+    if (to === from || to === from + 1) return; // 位置が変わらない
+    if (to > from) to -= 1; // 自分自身を除いた後の挿入位置に補正
+
+    const next = [...tracks];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    setTracks(next);
+
+    try {
+      await reorderTrack(moved.id, (page - 1) * PER_PAGE + to, onUnauthorized);
+    } catch (e) {
+      setLocalVersion((v) => v + 1); // サーバー側の並びに戻す
+      showToast(`エラー: ${(e as Error).message}`);
+    }
+  }
+
   async function deleteTrack(trackId: string) {
     try {
       const res = await authFetch(
@@ -82,21 +155,48 @@ export function History({ active, initialData, refreshKey, currentTrack, onSelec
   return (
     <div className="history-section">
       <div className="section-label">取得済みトラック ({total})</div>
-      <div className="history-list">
-        {tracks.map((t) => {
+      <div className="history-list" ref={listRef}>
+        {tracks.map((t, i) => {
           const isCurrent = currentTrack?.id === t.id;
+          const classes = ["history-item"];
+          if (dragId === t.id) classes.push("dragging");
+          if (dropIndex === i) classes.push("drop-before");
+          if (i === tracks.length - 1 && dropIndex === tracks.length) {
+            classes.push("drop-after");
+          }
           return (
             <div
               key={t.id}
-              className="history-item"
+              className={classes.join(" ")}
               style={isCurrent ? { borderColor: "var(--accent)" } : undefined}
               onClick={() => onSelectTrack(t)}
             >
+              {tracks.length > 1 && (
+                <span
+                  className="drag-handle"
+                  title="ドラッグで並べ替え"
+                  onClick={(e) => e.stopPropagation()}
+                  onPointerDown={(e) => handleDragStart(e, t.id)}
+                  onPointerMove={handleDragMove}
+                  onPointerUp={() => commitReorder()}
+                  onPointerCancel={resetDrag}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                    <circle cx="9" cy="5" r="1.7" />
+                    <circle cx="15" cy="5" r="1.7" />
+                    <circle cx="9" cy="12" r="1.7" />
+                    <circle cx="15" cy="12" r="1.7" />
+                    <circle cx="9" cy="19" r="1.7" />
+                    <circle cx="15" cy="19" r="1.7" />
+                  </svg>
+                </span>
+              )}
               {t.thumbnail && (
                 <img
                   className="history-thumb"
                   src={t.thumbnail}
                   alt=""
+                  draggable={false}
                   onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
                 />
               )}

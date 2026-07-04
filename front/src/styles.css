@@ -409,6 +409,23 @@ body {
   border: 1px solid transparent;
 }
 .history-item:hover { background: var(--surface-2); border-color: var(--border); }
+.history-item.dragging { opacity: 0.4; }
+.history-item.drop-before { box-shadow: 0 -2px 0 0 var(--accent); }
+.history-item.drop-after { box-shadow: 0 2px 0 0 var(--accent); }
+.drag-handle {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding: 8px 2px;
+  margin: -8px 0;
+  color: var(--text-dim);
+  cursor: grab;
+  /* タッチドラッグ中のページスクロールを抑止する */
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.drag-handle:active { cursor: grabbing; }
 
 /* ── Pagination ── */
 .pagination {

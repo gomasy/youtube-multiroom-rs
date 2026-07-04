@@ -1,5 +1,5 @@
 use crate::alexa::handle_alexa;
-use crate::state::{AppState, DeviceUpdate, PlayRequest};
+use crate::state::{AppState, DeviceUpdate, PlayRequest, ReorderRequest};
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path, Query, State, WebSocketUpgrade};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -144,6 +144,9 @@ pub async fn list_tracks(
     State(state): State<Arc<AppState>>,
     Query(query): Query<TracksQuery>,
 ) -> Json<Value> {
+    // Redis 初期化などでトラック情報が消えていたら audio_cache から復元
+    state.restore_tracks_if_missing().await;
+
     let per_page = query.per_page.unwrap_or(10).clamp(1, 100);
     let page = query.page.unwrap_or(1).max(1);
     let (tracks, total) = state.list_tracks_page(page, per_page).await;
@@ -153,6 +156,22 @@ pub async fn list_tracks(
         "page": page,
         "per_page": per_page,
     }))
+}
+
+/// POST /api/tracks/reorder
+pub async fn reorder_track(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ReorderRequest>,
+) -> AppResult<Json<Value>> {
+    state
+        .get_track(&req.track_id)
+        .await
+        .ok_or_else(|| AppError::not_found("Track not found"))?;
+    if !state.reorder_track(&req.track_id, req.new_index).await {
+        return Err(AppError::internal("Failed to save track order"));
+    }
+    state.broadcast_tracks().await;
+    Ok(Json(json!({ "status": "ok" })))
 }
 
 /// DELETE /api/tracks/:id

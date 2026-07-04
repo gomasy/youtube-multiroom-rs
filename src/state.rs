@@ -5,13 +5,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Mutex};
 use tokio::time;
 
 const REDIS_KEY_TRACKS: &str = "youtube:tracks";
+/// トラックの表示・再生順 (先頭が一覧の先頭) を保持するリスト
+const REDIS_KEY_TRACKS_ORDER: &str = "youtube:tracks_order";
 const REDIS_KEY_DEVICES: &str = "youtube:devices";
 /// 再生終了時の挙動 ("loop" | "shuffle" | "off") を保持するキー
 const REDIS_KEY_PLAYBACK_MODE: &str = "youtube:playback_mode";
@@ -23,6 +26,12 @@ const REDIS_PENDING_PREFIX: &str = "youtube:pending";
 
 /// キューされた再生コマンドの有効期限 (秒) — Redis のキー TTL で失効する
 const PENDING_TTL_SECS: u64 = 600;
+
+/// YouTube 動画 ID の形式 (11 文字)
+const VIDEO_ID_PATTERN: &str = "[a-zA-Z0-9_-]{11}";
+
+/// audio_cache 復元時のメタデータ再取得 1 件あたりの制限時間 (秒)
+const REFETCH_TIMEOUT_SECS: u64 = 60;
 
 fn pending_key(device_id: &str) -> String {
     format!("{REDIS_PENDING_PREFIX}:{device_id}")
@@ -57,6 +66,24 @@ impl AudioTrack {
             "file_path": self.file_path,
         })
         .to_string()
+    }
+
+    /// yt-dlp のメタデータ JSON からトラックを組み立てる。
+    /// 欠けているフィールドは空値 (タイトルのみ ID) で埋める
+    fn from_meta(id: &str, meta: &Value, created_at: f64, file_path: String) -> Self {
+        Self {
+            id: id.to_string(),
+            title: meta["title"].as_str().unwrap_or(id).to_string(),
+            thumbnail: meta["thumbnail"].as_str().unwrap_or("").to_string(),
+            duration: meta["duration"].as_u64().unwrap_or(0),
+            channel: meta["channel"]
+                .as_str()
+                .or(meta["uploader"].as_str())
+                .unwrap_or("")
+                .to_string(),
+            created_at,
+            file_path,
+        }
     }
 
     fn from_redis_json(s: &str) -> Option<Self> {
@@ -95,6 +122,13 @@ pub struct PendingCommand {
 pub struct PlayRequest {
     pub track_id: String,
     pub device_ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct ReorderRequest {
+    pub track_id: String,
+    /// 移動先の全体インデックス (0 始まり、範囲外は末尾に丸める)
+    pub new_index: usize,
 }
 
 // ════════════════════════════════════════
@@ -136,6 +170,12 @@ pub struct AppState {
     pub tx: broadcast::Sender<String>,
     pub cache_dir: PathBuf,
     pub api_token: Option<String>,
+    /// audio_cache からのトラック復元が進行中かどうか (多重起動防止)
+    restoring: AtomicBool,
+    /// youtube:tracks_order の変更を直列化するロック。
+    /// reorder の全置換 (読み→書き) と extract/remove の LPUSH/LREM が
+    /// 交錯すると更新が失われるため
+    order_lock: Mutex<()>,
 }
 
 impl AppState {
@@ -162,6 +202,8 @@ impl AppState {
             tx,
             cache_dir,
             api_token,
+            restoring: AtomicBool::new(false),
+            order_lock: Mutex::new(()),
         }))
     }
 
@@ -184,26 +226,13 @@ impl AppState {
 
         // メタデータ取得
         tracing::info!("Fetching metadata: {}", video_id);
-        let meta_out = Command::new("yt-dlp")
-            .args(["--dump-json", "--no-download", url])
-            .output()
-            .await
-            .map_err(|e| format!("Failed to run yt-dlp: {e}"))?;
-
-        if !meta_out.status.success() {
-            let err: String = String::from_utf8_lossy(&meta_out.stderr)
-                .chars()
-                .take(300)
-                .collect();
-            return Err(format!("Failed to fetch metadata: {err}"));
-        }
-
-        let meta: Value = serde_json::from_slice(&meta_out.stdout)
-            .map_err(|e| format!("Failed to parse metadata: {e}"))?;
+        let meta = fetch_metadata(url).await?;
 
         // 音声ダウンロード
-        let title = meta["title"].as_str().unwrap_or("Unknown");
-        tracing::info!("Downloading: {}", title);
+        tracing::info!(
+            "Downloading: {}",
+            meta["title"].as_str().unwrap_or(&video_id)
+        );
 
         let dl_out = Command::new("yt-dlp")
             .args([
@@ -230,24 +259,21 @@ impl AppState {
             return Err(format!("Failed to download audio: {err}"));
         }
 
-        let track = AudioTrack {
-            id: video_id.clone(),
-            title: title.to_string(),
-            thumbnail: meta["thumbnail"].as_str().unwrap_or("").to_string(),
-            duration: meta["duration"].as_u64().unwrap_or(0),
-            channel: meta["channel"]
-                .as_str()
-                .or(meta["uploader"].as_str())
-                .unwrap_or("")
-                .to_string(),
-            created_at: now_f64(),
-            file_path: output_str,
-        };
+        let track =
+            AudioTrack::from_meta(&video_id, &meta, now_f64(), output_str);
 
         let mut conn = self.redis.clone();
         let _: Result<(), _> = conn
             .hset(REDIS_KEY_TRACKS, &video_id, track.to_redis_json())
             .await;
+        // 並び順リストの先頭に追加 (再取得時の重複を避けるため一旦除去)
+        {
+            let _guard = self.order_lock.lock().await;
+            let _: Result<(), _> =
+                conn.lrem(REDIS_KEY_TRACKS_ORDER, 0, &video_id).await;
+            let _: Result<(), _> =
+                conn.lpush(REDIS_KEY_TRACKS_ORDER, &video_id).await;
+        }
 
         tracing::info!("Ready: {} ({}s)", track.title, track.duration);
         Ok(track)
@@ -262,10 +288,18 @@ impl AppState {
     pub async fn remove_track(&self, id: &str) -> Option<AudioTrack> {
         let track = self.get_track(id).await?;
 
+        // ファイルを先に消す。最後のトラック削除で tracks キーが消滅すると
+        // restore_tracks_if_missing が走りうるため、その時点でファイルが
+        // 残っていると削除したはずのトラックが復活してしまう
+        let _ = tokio::fs::remove_file(&track.file_path).await;
+
         let mut conn = self.redis.clone();
         let _: Result<(), _> = conn.hdel(REDIS_KEY_TRACKS, id).await;
-
-        let _ = tokio::fs::remove_file(&track.file_path).await;
+        {
+            let _guard = self.order_lock.lock().await;
+            let _: Result<(), _> =
+                conn.lrem(REDIS_KEY_TRACKS_ORDER, 0, id).await;
+        }
 
         // 削除トラックをキューしている pending コマンドを除去
         let pattern = format!("{REDIS_PENDING_PREFIX}:*");
@@ -304,24 +338,161 @@ impl AppState {
         Some(track)
     }
 
-    /// 全トラックを新しい順で返す
+    /// 全トラックを保存済みの並び順で返す。
+    /// 並び順リストに無いトラック (並べ替え導入前のデータや復元直後) は
+    /// 従来どおり新しい順で末尾に続ける
     pub async fn list_tracks(&self) -> Vec<AudioTrack> {
         let mut conn = self.redis.clone();
         let all: HashMap<String, String> = conn
             .hgetall(REDIS_KEY_TRACKS)
             .await
             .unwrap_or_default();
-        let mut tracks: Vec<AudioTrack> = all
+        let mut by_id: HashMap<String, AudioTrack> = all
             .values()
             .filter_map(|s| AudioTrack::from_redis_json(s))
+            .map(|t| (t.id.clone(), t))
             .collect();
-        tracks.sort_by(|a, b| {
+
+        let order: Vec<String> = conn
+            .lrange(REDIS_KEY_TRACKS_ORDER, 0, -1)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("Redis error reading track order: {e}");
+                Vec::new()
+            });
+        let mut tracks: Vec<AudioTrack> =
+            order.iter().filter_map(|id| by_id.remove(id)).collect();
+
+        let mut rest: Vec<AudioTrack> = by_id.into_values().collect();
+        rest.sort_by(|a, b| {
             b.created_at
                 .partial_cmp(&a.created_at)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.id.cmp(&b.id))
         });
+        tracks.extend(rest);
         tracks
+    }
+
+    /// トラックを全体の並びの new_index (0 始まり) に移動して保存する。
+    /// 成功時は true、Redis エラー時は false
+    pub async fn reorder_track(&self, track_id: &str, new_index: usize) -> bool {
+        // 読み→全置換の間に他の変更が割り込むと失われるため直列化する
+        let _guard = self.order_lock.lock().await;
+        let mut ids: Vec<String> = self
+            .list_tracks()
+            .await
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        let Some(pos) = ids.iter().position(|id| id == track_id) else {
+            return false;
+        };
+        let id = ids.remove(pos);
+        ids.insert(new_index.min(ids.len()), id);
+
+        // 並び順リスト全体を書き換える (件数は高々数百なので都度全置換で十分)
+        let mut pipe = redis::pipe();
+        pipe.atomic()
+            .del(REDIS_KEY_TRACKS_ORDER)
+            .rpush(REDIS_KEY_TRACKS_ORDER, &ids);
+        let mut conn = self.redis.clone();
+        match pipe.query_async::<()>(&mut conn).await {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!("Redis error writing track order: {e}");
+                false
+            }
+        }
+    }
+
+    /// Redis に youtube:tracks キーが存在しない場合 (初期化直後など) に限り、
+    /// audio_cache の mp3 ファイル名からメタデータを再取得して登録する。
+    /// yt-dlp は 1 件ごとに時間がかかるため復元はバックグラウンドで行い、
+    /// 完了後に tracks_update を通知してクライアントに再取得させる
+    pub async fn restore_tracks_if_missing(self: &Arc<Self>) {
+        let mut conn = self.redis.clone();
+        match conn.exists::<_, bool>(REDIS_KEY_TRACKS).await {
+            Ok(false) => {}
+            Ok(true) => return,
+            Err(e) => {
+                tracing::warn!("Redis error checking tracks key: {e}");
+                return;
+            }
+        }
+
+        let cached = cached_video_ids(&self.cache_dir);
+        if cached.is_empty() {
+            return;
+        }
+
+        if self
+            .restoring
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+
+        let state = self.clone();
+        tokio::spawn(async move {
+            tracing::info!(
+                "Tracks key missing: restoring {} track(s) from audio_cache",
+                cached.len()
+            );
+            for (video_id, path) in cached {
+                let track = state.refetch_track_metadata(&video_id, &path).await;
+                let mut conn = state.redis.clone();
+                if let Err(e) = conn
+                    .hset::<_, _, _, ()>(
+                        REDIS_KEY_TRACKS,
+                        &video_id,
+                        track.to_redis_json(),
+                    )
+                    .await
+                {
+                    tracing::warn!("Redis error restoring track {video_id}: {e}");
+                }
+            }
+            state.broadcast_tracks().await;
+            state.restoring.store(false, Ordering::SeqCst);
+            tracing::info!("Track restore finished");
+        });
+    }
+
+    /// yt-dlp でメタデータのみ再取得する。動画が削除済みなどで取得できない
+    /// 場合もファイル自体は再生できるため、ID をタイトルにした最小情報で返す
+    async fn refetch_track_metadata(
+        &self,
+        video_id: &str,
+        path: &Path,
+    ) -> AudioTrack {
+        let url = format!("https://www.youtube.com/watch?v={video_id}");
+        // yt-dlp が固まると復元全体が止まったままになるため時間を区切る
+        let meta = match time::timeout(
+            time::Duration::from_secs(REFETCH_TIMEOUT_SECS),
+            fetch_metadata(&url),
+        )
+        .await
+        {
+            Ok(Ok(meta)) => meta,
+            Ok(Err(e)) => {
+                tracing::warn!("Metadata refetch failed for {video_id}: {e}");
+                Value::Null
+            }
+            Err(_) => {
+                tracing::warn!("Metadata refetch timed out for {video_id}");
+                Value::Null
+            }
+        };
+
+        // 登録順を保つため元ファイルの更新時刻を登録時刻として使う
+        AudioTrack::from_meta(
+            video_id,
+            &meta,
+            file_mtime_f64(path),
+            path.to_string_lossy().to_string(),
+        )
     }
 
     /// 再生モードに従い、再生終了後に続ける曲を返す ("off" なら None)
@@ -617,15 +788,37 @@ impl AppState {
 // ユーティリティ
 // ════════════════════════════════════════
 
+/// yt-dlp でメタデータ JSON を取得する (ダウンロードなし)
+async fn fetch_metadata(url: &str) -> Result<Value, String> {
+    let out = Command::new("yt-dlp")
+        .args(["--dump-json", "--no-download", url])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run yt-dlp: {e}"))?;
+
+    if !out.status.success() {
+        let err: String = String::from_utf8_lossy(&out.stderr)
+            .chars()
+            .take(300)
+            .collect();
+        return Err(format!("Failed to fetch metadata: {err}"));
+    }
+
+    serde_json::from_slice(&out.stdout)
+        .map_err(|e| format!("Failed to parse metadata: {e}"))
+}
+
 fn extract_video_id(url: &str) -> Option<String> {
     use std::sync::OnceLock;
 
     static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
     let patterns = PATTERNS.get_or_init(|| {
         [
-            r"(?:youtube\.com/watch\?.*v=|youtu\.be/)([a-zA-Z0-9_-]{11})",
-            r"youtube\.com/embed/([a-zA-Z0-9_-]{11})",
-            r"youtube\.com/shorts/([a-zA-Z0-9_-]{11})",
+            format!(
+                r"(?:youtube\.com/watch\?.*v=|youtu\.be/)({VIDEO_ID_PATTERN})"
+            ),
+            format!(r"youtube\.com/embed/({VIDEO_ID_PATTERN})"),
+            format!(r"youtube\.com/shorts/({VIDEO_ID_PATTERN})"),
         ]
         .iter()
         .filter_map(|p| Regex::new(p).ok())
@@ -638,6 +831,46 @@ fn extract_video_id(url: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// audio_cache 内の {video_id}.mp3 を (video_id, パス) で列挙する
+fn cached_video_ids(cache_dir: &Path) -> Vec<(String, PathBuf)> {
+    use std::sync::OnceLock;
+
+    static ID_RE: OnceLock<Option<Regex>> = OnceLock::new();
+    let Some(id_re) = ID_RE
+        .get_or_init(|| Regex::new(&format!("^{VIDEO_ID_PATTERN}$")).ok())
+    else {
+        return Vec::new();
+    };
+
+    let Ok(entries) = std::fs::read_dir(cache_dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let path = e.path();
+            if path.extension().is_none_or(|ext| ext != "mp3") {
+                return None;
+            }
+            let stem = path.file_stem()?.to_str()?;
+            if !id_re.is_match(stem) {
+                return None;
+            }
+            Some((stem.to_string(), path))
+        })
+        .collect()
+}
+
+/// ファイルの更新時刻を UNIX 秒で返す (取得できなければ現在時刻)
+fn file_mtime_f64(path: &Path) -> f64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs_f64())
+        .unwrap_or_else(now_f64)
 }
 
 pub fn now_f64() -> f64 {
