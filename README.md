@@ -164,7 +164,7 @@ The binary, `front/dist/`, `yt-dlp`, and `ffmpeg` are needed on the Pi.
     ┌────┴─────────────────────────────────────────────────┐
     │  axum Router                                         │
     ├──────────────────────────────────────────────────────┤
-    │  GET    /api/audio/:id/stream   MP3 streaming        │
+    │  GET    /api/audio/:id/stream   m4a streaming        │
     │  GET    /api/tracks             track list (paged)    │
     │  POST   /api/tracks/reorder     move a track          │
     │  DELETE /api/tracks/:id         delete track          │
@@ -182,7 +182,7 @@ The binary, `front/dist/`, `yt-dlp`, and `ffmpeg` are needed on the Pi.
 All state lives in Redis, so tracks, devices, and queued play commands survive server restarts.
 Queued play commands are stored per device with a native Redis TTL (10 minutes) and consumed atomically via `GETDEL`.
 
-If the track metadata hash is ever lost (e.g. Redis was wiped), the next `GET /api/tracks` detects the missing key and rebuilds it in the background from the mp3 filenames in `audio_cache/`, re-fetching metadata via yt-dlp (file mtime is used as the registration time to preserve ordering; a `tracks_update` is broadcast when done). The custom track order itself cannot be recovered this way — tracks fall back to newest-first.
+If the track metadata hash is ever lost (e.g. Redis was wiped), the next `GET /api/tracks` detects the missing key and rebuilds it in the background from the m4a filenames in `audio_cache/`, re-fetching metadata via yt-dlp (file mtime is used as the registration time to preserve ordering; a `tracks_update` is broadcast when done). The custom track order itself cannot be recovered this way — tracks fall back to newest-first.
 
 ### Track Ordering
 
@@ -242,7 +242,7 @@ sudo systemctl enable --now yt-multiroom
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| GET | `/api/audio/:id/stream` | Signed URL | Stream MP3 audio (supports Range requests) |
+| GET | `/api/audio/:id/stream` | Signed URL | Stream m4a audio (supports Range requests) |
 | GET | `/api/tracks` | Yes | List extracted tracks in library order (paginated) |
 | POST | `/api/tracks/reorder` | Yes | Move a track within the library order |
 | DELETE | `/api/tracks/:id` | Yes | Delete a track and its cached file |

@@ -1,5 +1,7 @@
 use crate::alexa::handle_alexa;
-use crate::state::{AppState, DeviceUpdate, PlayRequest, ReorderRequest};
+use crate::state::{
+    AppState, DeviceUpdate, PlayRequest, ReorderRequest, AUDIO_MIME,
+};
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path, Query, State, WebSocketUpgrade};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -75,7 +77,7 @@ pub async fn stream_audio(
             return Ok((
                 StatusCode::PARTIAL_CONTENT,
                 [
-                    (header::CONTENT_TYPE, "audio/mpeg".to_string()),
+                    (header::CONTENT_TYPE, AUDIO_MIME.to_string()),
                     (header::ACCEPT_RANGES, "bytes".to_string()),
                     (
                         header::CONTENT_RANGE,
@@ -96,7 +98,7 @@ pub async fn stream_audio(
     Ok((
         StatusCode::OK,
         [
-            (header::CONTENT_TYPE, "audio/mpeg".to_string()),
+            (header::CONTENT_TYPE, AUDIO_MIME.to_string()),
             (header::ACCEPT_RANGES, "bytes".to_string()),
             (header::CONTENT_LENGTH, total.to_string()),
             (

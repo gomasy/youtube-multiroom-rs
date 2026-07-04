@@ -33,6 +33,11 @@ const VIDEO_ID_PATTERN: &str = "[a-zA-Z0-9_-]{11}";
 /// audio_cache 復元時のメタデータ再取得 1 件あたりの制限時間 (秒)
 const REFETCH_TIMEOUT_SECS: u64 = 60;
 
+/// キャッシュする音声フォーマットの拡張子。AUDIO_MIME と対で保つこと
+const AUDIO_EXT: &str = "m4a";
+/// stream_audio が返す Content-Type (AUDIO_EXT に対応するコンテナの MIME)
+pub const AUDIO_MIME: &str = "audio/mp4";
+
 fn pending_key(device_id: &str) -> String {
     format!("{REDIS_PENDING_PREFIX}:{device_id}")
 }
@@ -213,15 +218,19 @@ impl AppState {
         let video_id =
             extract_video_id(url).ok_or("Could not recognize YouTube URL")?;
 
-        // Redis キャッシュ確認
+        // Redis キャッシュ確認。旧フォーマット (mp3 など) のパスを指す
+        // エントリは AUDIO_MIME と食い違うため無視して取り直す
         if let Some(track) = self.get_track(&video_id).await {
-            if Path::new(&track.file_path).exists() {
+            let path = Path::new(&track.file_path);
+            if path.extension().is_some_and(|ext| ext == AUDIO_EXT)
+                && path.exists()
+            {
                 tracing::info!("Cache hit: {}", video_id);
                 return Ok(track);
             }
         }
 
-        let output_path = self.cache_dir.join(format!("{video_id}.mp3"));
+        let output_path = self.cache_dir.join(format!("{video_id}.{AUDIO_EXT}"));
         let output_str = output_path.to_string_lossy().to_string();
 
         // メタデータ取得
@@ -234,13 +243,15 @@ impl AppState {
             meta["title"].as_str().unwrap_or(&video_id)
         );
 
+        // AAC ソースを優先して選べば AUDIO_EXT へは再エンコード不要 (remux のみ)
+        let format_spec = format!("bestaudio[ext={AUDIO_EXT}]/bestaudio");
         let dl_out = Command::new("yt-dlp")
             .args([
+                "-f",
+                &format_spec,
                 "-x",
                 "--audio-format",
-                "mp3",
-                "--audio-quality",
-                "5",
+                AUDIO_EXT,
                 "-o",
                 &output_str,
                 "--no-playlist",
@@ -252,6 +263,9 @@ impl AppState {
             .map_err(|e| format!("Download error: {e}"))?;
 
         if !dl_out.status.success() {
+            // --no-part のため書きかけのファイルが最終名で残る。復元時に
+            // 壊れたトラックとして登録されないよう消しておく
+            let _ = tokio::fs::remove_file(&output_path).await;
             let err: String = String::from_utf8_lossy(&dl_out.stderr)
                 .chars()
                 .take(300)
@@ -407,7 +421,7 @@ impl AppState {
     }
 
     /// Redis に youtube:tracks キーが存在しない場合 (初期化直後など) に限り、
-    /// audio_cache の mp3 ファイル名からメタデータを再取得して登録する。
+    /// audio_cache の m4a ファイル名からメタデータを再取得して登録する。
     /// yt-dlp は 1 件ごとに時間がかかるため復元はバックグラウンドで行い、
     /// 完了後に tracks_update を通知してクライアントに再取得させる
     pub async fn restore_tracks_if_missing(self: &Arc<Self>) {
@@ -833,7 +847,7 @@ fn extract_video_id(url: &str) -> Option<String> {
     None
 }
 
-/// audio_cache 内の {video_id}.mp3 を (video_id, パス) で列挙する
+/// audio_cache 内の {video_id}.m4a を (video_id, パス) で列挙する
 fn cached_video_ids(cache_dir: &Path) -> Vec<(String, PathBuf)> {
     use std::sync::OnceLock;
 
@@ -851,7 +865,7 @@ fn cached_video_ids(cache_dir: &Path) -> Vec<(String, PathBuf)> {
         .filter_map(|e| e.ok())
         .filter_map(|e| {
             let path = e.path();
-            if path.extension().is_none_or(|ext| ext != "mp3") {
+            if path.extension().is_none_or(|ext| ext != AUDIO_EXT) {
                 return None;
             }
             let stem = path.file_stem()?.to_str()?;
