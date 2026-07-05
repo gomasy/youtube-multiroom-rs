@@ -36,7 +36,7 @@ pub async fn require_token(
 
     // Echo は Authorization ヘッダを付けられないため、
     // ストリーム URL は HMAC 署名クエリ (exp & sig) で認証する
-    if let Some(audio_id) = stream_audio_id(path) {
+    if let Some(audio_id) = audio_endpoint_id(path) {
         if verify_stream_query(expected, audio_id, request.uri().query()) {
             return next.run(request).await;
         }
@@ -94,10 +94,12 @@ fn sign(secret: &str, audio_id: &str, exp: u64) -> String {
         .collect()
 }
 
-/// "/api/audio/{id}/stream" からトラック ID を取り出す。
+/// "/api/audio/{id}/stream" または "/api/audio/{id}/live" からトラック ID を取り出す。
 /// パスは main.rs のルート定義・alexa.rs の URL 生成と一致していること
-fn stream_audio_id(path: &str) -> Option<&str> {
-    path.strip_prefix("/api/audio/")?.strip_suffix("/stream")
+fn audio_endpoint_id(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("/api/audio/")?;
+    rest.strip_suffix("/stream")
+        .or_else(|| rest.strip_suffix("/live"))
 }
 
 fn query_param<'a>(query: Option<&'a str>, key: &str) -> Option<&'a str> {
@@ -149,6 +151,14 @@ mod tests {
         let future = now_secs() + 100;
         let q = format!("exp={future}&sig={}", sign("secret", "abc123", exp));
         assert!(!verify_stream_query("secret", "abc123", Some(&q)));
+    }
+
+    #[test]
+    fn audio_endpoint_id_handles_stream_and_live() {
+        assert_eq!(audio_endpoint_id("/api/audio/abc123/stream"), Some("abc123"));
+        assert_eq!(audio_endpoint_id("/api/audio/abc123/live"), Some("abc123"));
+        assert_eq!(audio_endpoint_id("/api/audio/abc123/other"), None);
+        assert_eq!(audio_endpoint_id("/api/tracks"), None);
     }
 
     #[test]

@@ -264,7 +264,9 @@ export function History({ active, initialData, refreshKey, currentTrack, onSelec
                 <ScrollingText className="history-title" text={t.title} />
                 <div className="history-meta">
                   {t.channel ? `${t.channel} · ` : ""}
-                  {formatDuration(t.duration)}
+                  {t.is_live
+                    ? <span className="live-badge">LIVE</span>
+                    : formatDuration(t.duration)}
                 </div>
               </div>
               <button

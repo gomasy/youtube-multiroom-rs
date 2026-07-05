@@ -111,6 +111,69 @@ pub async fn stream_audio(
         .into_response())
 }
 
+/// GET /api/audio/:id/live
+///
+/// ライブ配信はファイルとして保存できないため、yt-dlp で CDN のストリーム
+/// URL を都度解決して 302 リダイレクトを返す。Echo の AudioPlayer は
+/// リダイレクトと HLS (m3u8) を追従できる
+pub async fn live_audio(
+    State(state): State<Arc<AppState>>,
+    Path(audio_id): Path<String>,
+) -> AppResult<Response> {
+    let track = state
+        .get_track(&audio_id)
+        .await
+        .ok_or_else(|| AppError::not_found("Track not found"))?;
+
+    if !track.is_live {
+        return Err(AppError::bad_request("Track is not a live stream"));
+    }
+
+    let url = format!("https://www.youtube.com/watch?v={audio_id}");
+    // Echo は HLS (m3u8) は再生できるが DASH は非対応のため HLS を最優先する。
+    // ライブ配信は音声のみのフォーマットが提供されないことが多く、その場合は
+    // 最低ビットレートの muxed HLS (映像+音声) にフォールバックする
+    let cmd = tokio::process::Command::new("yt-dlp")
+        .args([
+            "--get-url",
+            "-f",
+            "bestaudio[protocol^=m3u8]/worst[protocol^=m3u8]/bestaudio/worst",
+            "--no-playlist",
+            &url,
+        ])
+        .output();
+
+    // Echo はレスポンスを長く待てないため、yt-dlp が固まった場合に備える
+    let out = tokio::time::timeout(std::time::Duration::from_secs(15), cmd)
+        .await
+        .map_err(|_| AppError::internal("yt-dlp timed out fetching live URL"))?
+        .map_err(|e| AppError::internal(format!("Failed to run yt-dlp: {e}")))?;
+
+    if !out.status.success() {
+        let err: String = String::from_utf8_lossy(&out.stderr)
+            .chars()
+            .take(300)
+            .collect();
+        return Err(AppError::internal(format!(
+            "Failed to get live stream URL: {err}"
+        )));
+    }
+
+    // DASH では複数行返ることがあるため先頭の URL のみ使う
+    let cdn_url = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    if cdn_url.is_empty() {
+        return Err(AppError::internal("yt-dlp returned empty stream URL"));
+    }
+
+    Ok((StatusCode::FOUND, [(header::LOCATION, cdn_url)]).into_response())
+}
+
 fn parse_byte_range(header: &str, total: usize) -> Option<(usize, usize)> {
     if total == 0 {
         return None;

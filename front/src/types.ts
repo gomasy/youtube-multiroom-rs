@@ -4,6 +4,7 @@ export interface Track {
   thumbnail?: string;
   duration?: number;
   channel?: string;
+  is_live?: boolean;
 }
 
 export interface Device {

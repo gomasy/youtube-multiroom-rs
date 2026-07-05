@@ -54,6 +54,8 @@ pub struct AudioTrack {
     pub duration: u64,
     pub channel: String,
     #[serde(default)]
+    pub is_live: bool,
+    #[serde(default)]
     pub created_at: f64,
     #[serde(skip)]
     pub file_path: String,
@@ -67,6 +69,7 @@ impl AudioTrack {
             "thumbnail": self.thumbnail,
             "duration": self.duration,
             "channel": self.channel,
+            "is_live": self.is_live,
             "created_at": self.created_at,
             "file_path": self.file_path,
         })
@@ -86,6 +89,7 @@ impl AudioTrack {
                 .or(meta["uploader"].as_str())
                 .unwrap_or("")
                 .to_string(),
+            is_live: meta["is_live"].as_bool().unwrap_or(false),
             created_at,
             file_path,
         }
@@ -99,6 +103,7 @@ impl AudioTrack {
             thumbnail: v["thumbnail"].as_str().unwrap_or("").to_string(),
             duration: v["duration"].as_u64().unwrap_or(0),
             channel: v["channel"].as_str().unwrap_or("").to_string(),
+            is_live: v["is_live"].as_bool().unwrap_or(false),
             created_at: v["created_at"].as_f64().unwrap_or(0.0),
             file_path: v["file_path"].as_str()?.to_string(),
         })
@@ -221,6 +226,10 @@ impl AppState {
         // Redis キャッシュ確認。旧フォーマット (mp3 など) のパスを指す
         // エントリは AUDIO_MIME と食い違うため無視して取り直す
         if let Some(track) = self.get_track(&video_id).await {
+            if track.is_live {
+                tracing::info!("Cache hit (live): {}", video_id);
+                return Ok(track);
+            }
             let path = Path::new(&track.file_path);
             if path.extension().is_some_and(|ext| ext == AUDIO_EXT)
                 && path.exists()
@@ -230,51 +239,61 @@ impl AppState {
             }
         }
 
-        let output_path = self.cache_dir.join(format!("{video_id}.{AUDIO_EXT}"));
-        let output_str = output_path.to_string_lossy().to_string();
-
         // メタデータ取得
         tracing::info!("Fetching metadata: {}", video_id);
         let meta = fetch_metadata(url).await?;
 
-        // 音声ダウンロード
-        tracing::info!(
-            "Downloading: {}",
-            meta["title"].as_str().unwrap_or(&video_id)
-        );
+        // ライブ配信はファイルとして保存できないため、メタデータのみ登録し
+        // 再生時に CDN URL を都度解決する (handlers::live_audio)
+        let track = if meta["is_live"].as_bool().unwrap_or(false) {
+            tracing::info!(
+                "Live stream detected, skipping download: {}",
+                video_id
+            );
+            AudioTrack::from_meta(&video_id, &meta, now_f64(), String::new())
+        } else {
+            let output_path =
+                self.cache_dir.join(format!("{video_id}.{AUDIO_EXT}"));
+            let output_str = output_path.to_string_lossy().to_string();
 
-        // AAC ソースを優先して選べば AUDIO_EXT へは再エンコード不要 (remux のみ)
-        let format_spec = format!("bestaudio[ext={AUDIO_EXT}]/bestaudio");
-        let dl_out = Command::new("yt-dlp")
-            .args([
-                "-f",
-                &format_spec,
-                "-x",
-                "--audio-format",
-                AUDIO_EXT,
-                "-o",
-                &output_str,
-                "--no-playlist",
-                "--no-part",
-                url,
-            ])
-            .output()
-            .await
-            .map_err(|e| format!("Download error: {e}"))?;
+            // 音声ダウンロード
+            tracing::info!(
+                "Downloading: {}",
+                meta["title"].as_str().unwrap_or(&video_id)
+            );
 
-        if !dl_out.status.success() {
-            // --no-part のため書きかけのファイルが最終名で残る。復元時に
-            // 壊れたトラックとして登録されないよう消しておく
-            let _ = tokio::fs::remove_file(&output_path).await;
-            let err: String = String::from_utf8_lossy(&dl_out.stderr)
-                .chars()
-                .take(300)
-                .collect();
-            return Err(format!("Failed to download audio: {err}"));
-        }
+            // AAC ソースを優先して選べば AUDIO_EXT へは再エンコード不要 (remux のみ)
+            let format_spec = format!("bestaudio[ext={AUDIO_EXT}]/bestaudio");
+            let dl_out = Command::new("yt-dlp")
+                .args([
+                    "-f",
+                    &format_spec,
+                    "-x",
+                    "--audio-format",
+                    AUDIO_EXT,
+                    "-o",
+                    &output_str,
+                    "--no-playlist",
+                    "--no-part",
+                    url,
+                ])
+                .output()
+                .await
+                .map_err(|e| format!("Download error: {e}"))?;
 
-        let track =
-            AudioTrack::from_meta(&video_id, &meta, now_f64(), output_str);
+            if !dl_out.status.success() {
+                // --no-part のため書きかけのファイルが最終名で残る。復元時に
+                // 壊れたトラックとして登録されないよう消しておく
+                let _ = tokio::fs::remove_file(&output_path).await;
+                let err: String = String::from_utf8_lossy(&dl_out.stderr)
+                    .chars()
+                    .take(300)
+                    .collect();
+                return Err(format!("Failed to download audio: {err}"));
+            }
+
+            AudioTrack::from_meta(&video_id, &meta, now_f64(), output_str)
+        };
 
         let mut conn = self.redis.clone();
         let _: Result<(), _> = conn
@@ -305,7 +324,9 @@ impl AppState {
         // ファイルを先に消す。最後のトラック削除で tracks キーが消滅すると
         // restore_tracks_if_missing が走りうるため、その時点でファイルが
         // 残っていると削除したはずのトラックが復活してしまう
-        let _ = tokio::fs::remove_file(&track.file_path).await;
+        if !track.file_path.is_empty() {
+            let _ = tokio::fs::remove_file(&track.file_path).await;
+        }
 
         let mut conn = self.redis.clone();
         let _: Result<(), _> = conn.hdel(REDIS_KEY_TRACKS, id).await;
@@ -833,6 +854,7 @@ fn extract_video_id(url: &str) -> Option<String> {
             ),
             format!(r"youtube\.com/embed/({VIDEO_ID_PATTERN})"),
             format!(r"youtube\.com/shorts/({VIDEO_ID_PATTERN})"),
+            format!(r"youtube\.com/live/({VIDEO_ID_PATTERN})"),
         ]
         .iter()
         .filter_map(|p| Regex::new(p).ok())
@@ -892,4 +914,52 @@ pub fn now_f64() -> f64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_id_from_url_variants() {
+        for url in [
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://youtu.be/dQw4w9WgXcQ",
+            "https://www.youtube.com/embed/dQw4w9WgXcQ",
+            "https://www.youtube.com/shorts/dQw4w9WgXcQ",
+            "https://www.youtube.com/live/dQw4w9WgXcQ",
+        ] {
+            assert_eq!(
+                extract_video_id(url).as_deref(),
+                Some("dQw4w9WgXcQ"),
+                "failed for {url}"
+            );
+        }
+        assert_eq!(extract_video_id("https://example.com/watch?v=x"), None);
+    }
+
+    #[test]
+    fn redis_json_roundtrip_preserves_is_live() {
+        let track = AudioTrack {
+            id: "dQw4w9WgXcQ".into(),
+            title: "配信".into(),
+            thumbnail: String::new(),
+            duration: 0,
+            channel: "ch".into(),
+            is_live: true,
+            created_at: 1.0,
+            file_path: String::new(),
+        };
+        let restored =
+            AudioTrack::from_redis_json(&track.to_redis_json()).unwrap();
+        assert!(restored.is_live);
+        assert!(restored.file_path.is_empty());
+    }
+
+    #[test]
+    fn redis_json_without_is_live_defaults_to_false() {
+        let legacy = r#"{"id":"dQw4w9WgXcQ","title":"t","thumbnail":"","duration":10,"channel":"","created_at":1.0,"file_path":"/tmp/a.m4a"}"#;
+        let track = AudioTrack::from_redis_json(legacy).unwrap();
+        assert!(!track.is_live);
+    }
 }

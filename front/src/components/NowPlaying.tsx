@@ -34,7 +34,9 @@ export function NowPlaying({ track }: Props) {
           />
           <div className="track-meta">
             {track
-              ? [track.channel, formatDuration(track.duration)].filter(Boolean).join(" · ")
+              ? track.is_live
+                ? <>{track.channel ? `${track.channel} · ` : ""}<span className="live-badge">LIVE</span></>
+                : [track.channel, formatDuration(track.duration)].filter(Boolean).join(" · ")
               : "YouTube URL を入力して取得してください"}
           </div>
         </div>

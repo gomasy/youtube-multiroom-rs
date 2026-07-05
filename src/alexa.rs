@@ -225,8 +225,11 @@ fn play_response(
     offset_ms: u64,
     enqueue_after: Option<&str>,
 ) -> Value {
-    // Echo は認証ヘッダを付けられないため、署名付き URL でストリームを認証する
-    let mut stream_url = format!("{}/api/audio/{}/stream", base_url, track.id);
+    // Echo は認証ヘッダを付けられないため、署名付き URL でストリームを認証する。
+    // ライブ配信はファイルがないため、CDN へリダイレクトする /live を使う
+    let endpoint = if track.is_live { "live" } else { "stream" };
+    let mut stream_url =
+        format!("{}/api/audio/{}/{}", base_url, track.id, endpoint);
     if let Some(secret) = &state.api_token {
         stream_url.push('?');
         stream_url.push_str(&crate::auth::stream_query(secret, &track.id));
