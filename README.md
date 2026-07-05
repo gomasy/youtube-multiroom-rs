@@ -22,6 +22,7 @@ youtube-multiroom-rs/
 │   ├── package.json
 │   ├── tsconfig.json
 │   └── src/
+│       ├── favicon.svg
 │       ├── index.html
 │       ├── index.tsx
 │       ├── App.tsx
