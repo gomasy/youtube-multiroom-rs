@@ -1,4 +1,4 @@
-import faviconUrl from "../favicon.svg";
+import faviconUrl from "url:../favicon.svg";
 
 interface Props {
   connected: boolean;
