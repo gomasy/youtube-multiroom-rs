@@ -101,7 +101,7 @@ REDIS_URL=redis://127.0.0.1/ API_TOKEN=your-secret-token ./target/release/youtub
 When enabled:
 - The Web UI prompts for the token on first access (stored in localStorage)
 - API endpoints and WebSocket require `Authorization: Bearer <token>` (or `?token=` query param for WebSocket)
-- `/api/audio/:id/stream` requires a signed URL: stream URLs handed to Alexa carry an HMAC-SHA256 signature (`?exp=<unix>&sig=<hmac>`, derived from `API_TOKEN`, valid for 24h) since Echo devices cannot send auth headers. Bearer auth is also accepted
+- `/api/audio/:id/stream` and `/api/audio/:id/live` require a signed URL: stream URLs handed to Alexa carry an HMAC-SHA256 signature (`?exp=<unix>&sig=<hmac>`, derived from `API_TOKEN`, valid for 24h) since Echo devices cannot send auth headers. Bearer auth is also accepted
 - `/alexa` is excluded from authentication since Alexa accesses it directly
 
 If `API_TOKEN` is not set, no authentication is required.
@@ -165,6 +165,7 @@ The binary, `front/dist/`, `yt-dlp`, and `ffmpeg` are needed on the Pi.
     │  axum Router                                         │
     ├──────────────────────────────────────────────────────┤
     │  GET    /api/audio/:id/stream   m4a streaming        │
+    │  GET    /api/audio/:id/live     live audio relay      │
     │  GET    /api/tracks             track list (paged)    │
     │  POST   /api/tracks/reorder     move a track          │
     │  DELETE /api/tracks/:id         delete track          │
@@ -187,6 +188,18 @@ If the track metadata hash is ever lost (e.g. Redis was wiped), the next `GET /a
 ### Track Ordering
 
 Tracks are listed and auto-played in a user-defined order persisted in the `youtube:tracks_order` Redis list. Rows in the Web UI can be rearranged by dragging the grip handle (works with both mouse and touch via Pointer Events). Reordering works across pages: hovering the prev/next pagination button mid-drag auto-flips pages (one page per 650 ms) so the track can be dropped anywhere in the library. Newly extracted tracks are placed at the top; tracks not present in the order list (data from before this feature) are appended newest-first.
+
+### Live Streams
+
+YouTube Live streams (including `youtube.com/live/<id>` URLs) can be added like regular videos. Since a live stream cannot be cached as a file, only its metadata is stored (with an `is_live` flag) and the Web UI shows a red **LIVE** badge in place of the duration.
+
+At playback time, `GET /api/audio/:id/live` resolves a fresh CDN HLS URL via `yt-dlp --get-url` (preferring audio-only HLS, falling back to the lowest-bitrate muxed HLS since live streams often lack audio-only formats) and relays the audio to the Echo as an ADTS AAC stream extracted by ffmpeg. The audio codec is copied without re-encoding, so CPU usage is minimal. When the Echo disconnects, the pipe closes and ffmpeg exits on its own.
+
+Caveats:
+
+- Live tracks are not recoverable by the `audio_cache/` scan described above — if Redis is wiped, re-add them manually
+- A track added while live keeps its `is_live` flag even after the broadcast ends; delete and re-add it to cache the archived video
+- Playback starts a few segments behind the live edge (typical HLS latency)
 
 ### Playback Modes
 
@@ -243,6 +256,7 @@ sudo systemctl enable --now yt-multiroom
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | GET | `/api/audio/:id/stream` | Signed URL | Stream m4a audio (supports Range requests) |
+| GET | `/api/audio/:id/live` | Signed URL | Relay live stream audio as ADTS AAC via ffmpeg |
 | GET | `/api/tracks` | Yes | List extracted tracks in library order (paginated) |
 | POST | `/api/tracks/reorder` | Yes | Move a track within the library order |
 | DELETE | `/api/tracks/:id` | Yes | Delete a track and its cached file |

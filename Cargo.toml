@@ -5,16 +5,17 @@ edition = "2021"
 
 [dependencies]
 axum = { version = "0.7", features = ["ws"] }
-tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.5", features = ["cors", "fs"] }
+hmac = "0.12"
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-regex = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tower-http = { version = "0.5", features = ["cors", "fs"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
-redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
-hmac = "0.12"
-sha2 = "0.10"
 
 [profile.release]
 opt-level = 3

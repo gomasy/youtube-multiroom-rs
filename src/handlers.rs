@@ -113,9 +113,11 @@ pub async fn stream_audio(
 
 /// GET /api/audio/:id/live
 ///
-/// ライブ配信はファイルとして保存できないため、yt-dlp で CDN のストリーム
-/// URL を都度解決して 302 リダイレクトを返す。Echo の AudioPlayer は
-/// リダイレクトと HLS (m3u8) を追従できる
+/// ライブ配信はファイルとして保存できないため、yt-dlp で CDN の HLS URL を
+/// 都度解決し、ffmpeg で音声 (AAC) のみを抜き出して ADTS ストリームとして
+/// 中継する。Echo は映像入りの muxed HLS を再生できないため、リダイレクト
+/// ではなくサーバー側で音声を分離する必要がある。音声はコーデックコピー
+/// (再エンコードなし) のため CPU 負荷は小さい
 pub async fn live_audio(
     State(state): State<Arc<AppState>>,
     Path(audio_id): Path<String>,
@@ -130,9 +132,9 @@ pub async fn live_audio(
     }
 
     let url = format!("https://www.youtube.com/watch?v={audio_id}");
-    // Echo は HLS (m3u8) は再生できるが DASH は非対応のため HLS を最優先する。
-    // ライブ配信は音声のみのフォーマットが提供されないことが多く、その場合は
-    // 最低ビットレートの muxed HLS (映像+音声) にフォールバックする
+    // ffmpeg が扱いやすい HLS を最優先する。ライブ配信は音声のみの
+    // フォーマットが提供されないことが多く、その場合は最低ビットレートの
+    // muxed HLS (映像+音声) にフォールバックする
     let cmd = tokio::process::Command::new("yt-dlp")
         .args([
             "--get-url",
@@ -171,7 +173,50 @@ pub async fn live_audio(
         return Err(AppError::internal("yt-dlp returned empty stream URL"));
     }
 
-    Ok((StatusCode::FOUND, [(header::LOCATION, cdn_url)]).into_response())
+    let mut child = tokio::process::Command::new("ffmpeg")
+        .args([
+            "-loglevel",
+            "error",
+            "-i",
+            &cdn_url,
+            "-vn",
+            "-c:a",
+            "copy",
+            "-f",
+            "adts",
+            "pipe:1",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| AppError::internal(format!("Failed to run ffmpeg: {e}")))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| AppError::internal("Failed to capture ffmpeg stdout"))?;
+
+    // Echo が切断するとレスポンスボディと共に stdout パイプが閉じ、
+    // ffmpeg は EPIPE で自然終了する。ゾンビ化しないようここで回収する
+    tokio::spawn(async move {
+        match child.wait().await {
+            Ok(status) => tracing::info!("ffmpeg exited: {status}"),
+            Err(e) => tracing::warn!("ffmpeg wait error: {e}"),
+        }
+    });
+
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "audio/aac".to_string()),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+        ],
+        axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(
+            stdout,
+        )),
+    )
+        .into_response())
 }
 
 fn parse_byte_range(header: &str, total: usize) -> Option<(usize, usize)> {
