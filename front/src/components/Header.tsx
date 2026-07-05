@@ -1,3 +1,5 @@
+import faviconUrl from "../favicon.svg";
+
 interface Props {
   connected: boolean;
 }
@@ -5,10 +7,7 @@ interface Props {
 export function Header({ connected }: Props) {
   return (
     <div className="header">
-      <svg width="34" height="24" viewBox="0 0 34 24" fill="none">
-        <rect width="34" height="24" rx="6" fill="var(--accent)" />
-        <polygon points="14,6 14,18 23,12" fill="#fff" />
-      </svg>
+      <img src={faviconUrl} width="34" height="24" alt="" />
       <h1>YouTube MultiRoom</h1>
       <div
         className={`dot${connected ? "" : " disconnected"}`}
