@@ -49,7 +49,7 @@ youtube-multiroom-rs/
 
 ### Prerequisites
 
-- Rust 1.75+
+- Rust 1.88+ (required by the pinned `time` crate)
 - OpenSSL headers & pkg-config (build only; `libssl-dev` on Debian/Ubuntu, used for Alexa request signature verification)
 - Node.js 18+
 - Redis

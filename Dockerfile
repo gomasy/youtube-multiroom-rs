@@ -5,7 +5,7 @@ RUN npm ci
 COPY front/ ./
 RUN npm run build
 
-FROM rust:1.87-slim AS backend
+FROM rust:1.96-slim AS backend
 # openssl クレート (Alexa 署名検証) のビルドに必要
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config libssl-dev \
