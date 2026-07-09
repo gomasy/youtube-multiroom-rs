@@ -5,7 +5,8 @@ RUN npm ci
 COPY front/ ./
 RUN npm run build
 
-FROM rust:1.96-slim AS backend
+# 実行ステージと glibc バージョンを揃えるためベース OS を明示
+FROM rust:1.96-slim-trixie AS backend
 # openssl クレート (Alexa 署名検証) のビルドに必要
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config libssl-dev \
@@ -16,9 +17,9 @@ RUN mkdir src && echo 'fn main() {}' > src/main.rs && cargo build --release && r
 COPY src/ src/
 RUN touch src/main.rs && cargo build --release
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl ffmpeg libssl3 python3 pipx unzip \
+        ca-certificates curl ffmpeg libssl3t64 python3 pipx unzip \
     && curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh \
     && pipx install yt-dlp \
     && apt-get purge -y curl pipx unzip \
