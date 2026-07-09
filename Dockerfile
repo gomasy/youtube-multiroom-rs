@@ -1,30 +1,28 @@
-FROM node:24-slim AS frontend
+FROM node:24-alpine AS frontend
 WORKDIR /app/front
 COPY front/package.json front/package-lock.json ./
 RUN npm ci
 COPY front/ ./
 RUN npm run build
 
-# 実行ステージと glibc バージョンを揃えるためベース OS を明示
-FROM rust:1.96-slim-trixie AS backend
+FROM rust:1.96-alpine AS backend
 # openssl クレート (Alexa 署名検証) のビルドに必要
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        pkg-config libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache musl-dev pkgconf openssl-dev
+# 動的リンクにして実行ステージの libssl を共有する (crt-static だと libssl とリンクできない)
+ENV RUSTFLAGS="-C target-feature=-crt-static"
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && echo 'fn main() {}' > src/main.rs && cargo build --release && rm -rf src
 COPY src/ src/
 RUN touch src/main.rs && cargo build --release
 
-FROM debian:trixie-slim
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl ffmpeg libssl3t64 python3 pipx unzip \
-    && curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh \
+FROM alpine:latest
+# deno は yt-dlp の JS ランタイムとして必要。apk 版 yt-dlp は更新が遅れる
+# 可能性があるため、従来どおり pipx で PyPI の最新版を入れる
+RUN apk add --no-cache ca-certificates ffmpeg deno python3 libssl3 \
+    && apk add --no-cache --virtual .build pipx \
     && pipx install yt-dlp \
-    && apt-get purge -y curl pipx unzip \
-    && apt-get autoremove -y \
-    && rm -rf /var/lib/apt/lists/*
+    && apk del .build
 ENV PATH="/root/.local/bin:${PATH}"
 WORKDIR /app
 COPY --from=backend /app/target/release/youtube-multiroom .
