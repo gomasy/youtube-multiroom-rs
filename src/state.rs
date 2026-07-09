@@ -186,6 +186,9 @@ pub struct AppState {
     /// reorder の全置換 (読み→書き) と extract/remove の LPUSH/LREM が
     /// 交錯すると更新が失われるため
     order_lock: Mutex<()>,
+    /// 同一動画の並行ダウンロードが同じ出力ファイルへ同時に書き込まないよう
+    /// 直列化する動画 ID ごとのロック
+    extract_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
 impl AppState {
@@ -214,6 +217,7 @@ impl AppState {
             api_token,
             restoring: AtomicBool::new(false),
             order_lock: Mutex::new(()),
+            extract_locks: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -223,9 +227,33 @@ impl AppState {
         let video_id =
             extract_video_id(url).ok_or("Could not recognize YouTube URL")?;
 
+        // 同一動画の並行リクエストを直列化する。後続の呼び出しはロック獲得後の
+        // キャッシュ確認で即座に返る
+        let lock = {
+            let mut locks = self.extract_locks.lock().await;
+            locks.entry(video_id.clone()).or_default().clone()
+        };
+        let guard = lock.lock().await;
+        let result = self.extract_audio_locked(&video_id, url).await;
+        drop(guard);
+
+        // 待機中の呼び出しがなければエントリを片付ける (2 = マップ + 自分の分)
+        let mut locks = self.extract_locks.lock().await;
+        if locks.get(&video_id).is_some_and(|l| Arc::strong_count(l) <= 2) {
+            locks.remove(&video_id);
+        }
+
+        result
+    }
+
+    async fn extract_audio_locked(
+        &self,
+        video_id: &str,
+        url: &str,
+    ) -> Result<AudioTrack, String> {
         // Redis キャッシュ確認。旧フォーマット (mp3 など) のパスを指す
         // エントリは AUDIO_MIME と食い違うため無視して取り直す
-        if let Some(track) = self.get_track(&video_id).await {
+        if let Some(track) = self.get_track(video_id).await {
             if track.is_live {
                 tracing::info!("Cache hit (live): {}", video_id);
                 return Ok(track);
@@ -250,7 +278,7 @@ impl AppState {
                 "Live stream detected, skipping download: {}",
                 video_id
             );
-            AudioTrack::from_meta(&video_id, &meta, now_f64(), String::new())
+            AudioTrack::from_meta(video_id, &meta, now_f64(), String::new())
         } else {
             let output_path =
                 self.cache_dir.join(format!("{video_id}.{AUDIO_EXT}"));
@@ -259,7 +287,7 @@ impl AppState {
             // 音声ダウンロード
             tracing::info!(
                 "Downloading: {}",
-                meta["title"].as_str().unwrap_or(&video_id)
+                meta["title"].as_str().unwrap_or(video_id)
             );
 
             // AAC ソースを優先して選べば AUDIO_EXT へは再エンコード不要 (remux のみ)
@@ -292,20 +320,20 @@ impl AppState {
                 return Err(format!("Failed to download audio: {err}"));
             }
 
-            AudioTrack::from_meta(&video_id, &meta, now_f64(), output_str)
+            AudioTrack::from_meta(video_id, &meta, now_f64(), output_str)
         };
 
         let mut conn = self.redis.clone();
         let _: Result<(), _> = conn
-            .hset(REDIS_KEY_TRACKS, &video_id, track.to_redis_json())
+            .hset(REDIS_KEY_TRACKS, video_id, track.to_redis_json())
             .await;
         // 並び順リストの先頭に追加 (再取得時の重複を避けるため一旦除去)
         {
             let _guard = self.order_lock.lock().await;
             let _: Result<(), _> =
-                conn.lrem(REDIS_KEY_TRACKS_ORDER, 0, &video_id).await;
+                conn.lrem(REDIS_KEY_TRACKS_ORDER, 0, video_id).await;
             let _: Result<(), _> =
-                conn.lpush(REDIS_KEY_TRACKS_ORDER, &video_id).await;
+                conn.lpush(REDIS_KEY_TRACKS_ORDER, video_id).await;
         }
 
         tracing::info!("Ready: {} ({}s)", track.title, track.duration);
@@ -539,7 +567,7 @@ impl AppState {
         }
     }
 
-    /// ライブラリ順 (新しい順) で現在トラックの次を返す。
+    /// 保存済みの並び順で現在トラックの次を返す。
     /// 末尾なら先頭に戻り、現在トラックが見つからない (削除済みなど) 場合も先頭を返す
     async fn next_track(&self, current_id: &str) -> Option<AudioTrack> {
         let tracks = self.list_tracks().await;

@@ -226,7 +226,7 @@ fn play_response(
     enqueue_after: Option<&str>,
 ) -> Value {
     // Echo は認証ヘッダを付けられないため、署名付き URL でストリームを認証する。
-    // ライブ配信はファイルがないため、CDN へリダイレクトする /live を使う
+    // ライブ配信はファイルがないため、CDN の音声を中継する /live を使う
     let endpoint = if track.is_live { "live" } else { "stream" };
     let mut stream_url =
         format!("{}/api/audio/{}/{}", base_url, track.id, endpoint);

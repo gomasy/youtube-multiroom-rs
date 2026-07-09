@@ -8,6 +8,7 @@ use axum::{
 use hmac::{Hmac, Mac};
 use serde_json::json;
 use sha2::Sha256;
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -48,10 +49,10 @@ pub async fn require_token(
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .is_some_and(|token| token == expected.as_str());
+        .is_some_and(|token| constant_time_eq(token, expected));
 
     let query_ok = query_param(request.uri().query(), "token")
-        .is_some_and(|token| token == expected.as_str());
+        .is_some_and(|token| constant_time_eq(&token, expected));
 
     if header_ok || query_ok {
         next.run(request).await
@@ -78,7 +79,7 @@ fn verify_stream_query(secret: &str, audio_id: &str, query: Option<&str>) -> boo
     let Some(sig) = query_param(query, "sig") else {
         return false;
     };
-    exp >= now_secs() && constant_time_eq(&sign(secret, audio_id, exp), sig)
+    exp >= now_secs() && constant_time_eq(&sign(secret, audio_id, exp), &sig)
 }
 
 fn sign(secret: &str, audio_id: &str, exp: u64) -> String {
@@ -102,11 +103,40 @@ fn audio_endpoint_id(path: &str) -> Option<&str> {
         .or_else(|| rest.strip_suffix("/live"))
 }
 
-fn query_param<'a>(query: Option<&'a str>, key: &str) -> Option<&'a str> {
+/// クエリ文字列から値を取り出す。クライアントが encodeURIComponent 等で
+/// エンコードしたトークンも一致するよう、%XX はデコードして返す
+fn query_param<'a>(query: Option<&'a str>, key: &str) -> Option<Cow<'a, str>> {
     query?.split('&').find_map(|pair| {
         let (k, v) = pair.split_once('=')?;
-        (k == key).then_some(v)
+        (k == key).then(|| percent_decode(v))
     })
+}
+
+fn percent_decode(s: &str) -> Cow<'_, str> {
+    if !s.contains('%') {
+        return Cow::Borrowed(s);
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Some(byte) = hex_pair(bytes[i + 1], bytes[i + 2]) {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    Cow::Owned(String::from_utf8_lossy(&out).into_owned())
+}
+
+fn hex_pair(hi: u8, lo: u8) -> Option<u8> {
+    let h = (hi as char).to_digit(16)?;
+    let l = (lo as char).to_digit(16)?;
+    Some((h * 16 + l) as u8)
 }
 
 fn constant_time_eq(a: &str, b: &str) -> bool {
@@ -159,6 +189,19 @@ mod tests {
         assert_eq!(audio_endpoint_id("/api/audio/abc123/live"), Some("abc123"));
         assert_eq!(audio_endpoint_id("/api/audio/abc123/other"), None);
         assert_eq!(audio_endpoint_id("/api/tracks"), None);
+    }
+
+    #[test]
+    fn query_param_decodes_percent_encoding() {
+        assert_eq!(
+            query_param(Some("token=a%2Bb%20c"), "token").as_deref(),
+            Some("a+b c")
+        );
+        assert_eq!(
+            query_param(Some("token=plain"), "token").as_deref(),
+            Some("plain")
+        );
+        assert_eq!(query_param(Some("token=x"), "other"), None);
     }
 
     #[test]

@@ -1,4 +1,5 @@
 mod alexa;
+mod alexa_verify;
 mod auth;
 mod handlers;
 mod state;
@@ -9,7 +10,6 @@ use axum::Router;
 use state::AppState;
 use std::net::SocketAddr;
 use std::process;
-use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
 #[tokio::main]
@@ -51,14 +51,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             auth::require_token,
         ))
         .fallback_service(ServeDir::new("front/dist"))
-        .layer(CorsLayer::permissive())
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 8888));
 
     println!("══════════════════════════════════════════");
     println!("  YouTube MultiRoom Server (Rust)");
-    println!("  Redis    = {redis_url}");
+    println!("  Redis    = {}", redact_url(&redis_url));
     println!("  Web UI   → http://localhost:8888");
     println!("  Alexa    → POST /alexa");
     if api_token.is_some() {
@@ -73,4 +72,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+/// URL のユーザー情報 (user:password@) を伏せてログ用に整形する
+fn redact_url(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    let (authority, path) = rest.split_at(authority_end);
+    match authority.rsplit_once('@') {
+        Some((_, host)) => format!("{scheme}://***@{host}{path}"),
+        None => url.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact_url;
+
+    #[test]
+    fn redacts_userinfo_only() {
+        assert_eq!(
+            redact_url("redis://user:pass@localhost:6379/0"),
+            "redis://***@localhost:6379/0"
+        );
+        assert_eq!(redact_url("redis://localhost/"), "redis://localhost/");
+    }
 }

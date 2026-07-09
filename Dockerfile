@@ -6,6 +6,10 @@ COPY front/ ./
 RUN npm run build
 
 FROM rust:1.87-slim AS backend
+# openssl クレート (Alexa 署名検証) のビルドに必要
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && echo 'fn main() {}' > src/main.rs && cargo build --release && rm -rf src
@@ -14,7 +18,7 @@ RUN touch src/main.rs && cargo build --release
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl ffmpeg python3 pipx unzip \
+        ca-certificates curl ffmpeg libssl3 python3 pipx unzip \
     && curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh \
     && pipx install yt-dlp \
     && apt-get purge -y curl pipx unzip \

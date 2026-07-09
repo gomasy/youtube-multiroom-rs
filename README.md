@@ -17,7 +17,8 @@ youtube-multiroom-rs/
 │   ├── state.rs       # Shared state, audio & device management
 │   ├── handlers.rs    # HTTP / WebSocket handlers
 │   ├── auth.rs        # Bearer token authentication middleware
-│   └── alexa.rs       # Alexa skill handler
+│   ├── alexa.rs       # Alexa skill handler
+│   └── alexa_verify.rs # Alexa request signature verification
 ├── front/
 │   ├── package.json
 │   ├── tsconfig.json
@@ -49,6 +50,7 @@ youtube-multiroom-rs/
 ### Prerequisites
 
 - Rust 1.75+
+- OpenSSL headers & pkg-config (build only; `libssl-dev` on Debian/Ubuntu, used for Alexa request signature verification)
 - Node.js 18+
 - Redis
 - yt-dlp
@@ -103,7 +105,7 @@ When enabled:
 - The Web UI prompts for the token on first access (stored in localStorage)
 - API endpoints and WebSocket require `Authorization: Bearer <token>` (or `?token=` query param for WebSocket)
 - `/api/audio/:id/stream` and `/api/audio/:id/live` require a signed URL: stream URLs handed to Alexa carry an HMAC-SHA256 signature (`?exp=<unix>&sig=<hmac>`, derived from `API_TOKEN`, valid for 24h) since Echo devices cannot send auth headers. Bearer auth is also accepted
-- `/alexa` is excluded from authentication since Alexa accesses it directly
+- `/alexa` is excluded from Bearer authentication since Alexa accesses it directly; instead, every request to it is verified as genuinely coming from Alexa via Amazon's request signature scheme (certificate chain validation + body signature + timestamp freshness), regardless of whether `API_TOKEN` is set. Note this means you cannot `curl` the `/alexa` endpoint manually
 
 If `API_TOKEN` is not set, no authentication is required.
 
@@ -194,7 +196,7 @@ Tracks are listed and auto-played in a user-defined order persisted in the `yout
 
 YouTube Live streams (including `youtube.com/live/<id>` URLs) can be added like regular videos. Since a live stream cannot be cached as a file, only its metadata is stored (with an `is_live` flag) and the Web UI shows a red **LIVE** badge in place of the duration.
 
-At playback time, `GET /api/audio/:id/live` resolves a fresh CDN HLS URL via `yt-dlp --get-url` (preferring audio-only HLS, falling back to the lowest-bitrate muxed HLS since live streams often lack audio-only formats) and relays the audio to the Echo as an ADTS AAC stream extracted by ffmpeg. The audio codec is copied without re-encoding, so CPU usage is minimal. When the Echo disconnects, the pipe closes and ffmpeg exits on its own.
+At playback time, `GET /api/audio/:id/live` resolves a fresh CDN HLS URL via yt-dlp (preferring audio-only HLS, falling back to the lowest-bitrate muxed HLS since live streams often lack audio-only formats) and relays the audio to the Echo as an ADTS AAC stream extracted by ffmpeg. When the source audio is already AAC the codec is copied without re-encoding, so CPU usage is minimal; if the fallback format carries a non-AAC codec (e.g. Opus, which cannot be wrapped in ADTS), it is transcoded to AAC instead. When the Echo disconnects, the pipe closes and ffmpeg exits on its own.
 
 Caveats:
 
