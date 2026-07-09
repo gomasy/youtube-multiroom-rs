@@ -27,7 +27,9 @@ RUN ./configure \
         --enable-small \
         --enable-openssl \
         --enable-zlib \
-        --enable-protocol=file,pipe,tcp,tls,http,https,httpproxy,crypto \
+        # udp 自体は不要だが、tls_openssl.c が DTLS 対応で ff_udp_* を
+        # 参照するため、リンクを通すのに udp を有効にする必要がある
+        --enable-protocol=file,pipe,tcp,udp,tls,http,https,httpproxy,crypto \
         --enable-demuxer=hls,mpegts,mov,matroska,aac \
         --enable-decoder=aac,opus,vorbis \
         --enable-encoder=aac \
