@@ -268,7 +268,7 @@ sudo systemctl enable --now yt-multiroom
 | POST | `/api/play` | Yes | Queue playback on selected devices |
 | POST | `/api/play-all` | Yes | Queue playback on all devices |
 | POST | `/api/devices/:id/stop` | Yes | Stop a device |
-| POST | `/alexa` | No | Alexa skill webhook |
+| POST | `/alexa` | Amazon signature | Alexa skill webhook |
 | WS | `/ws` | Yes | Real-time sync & audio extraction |
 
 `GET /api/tracks` accepts `page` (default 1) and `per_page` (default 10, max 100) query parameters and returns:
