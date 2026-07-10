@@ -9,7 +9,7 @@ base64 = "0.22"
 dotenvy = "0.15"
 hmac = "0.13"
 openssl = "0.10"
-redis = { version = "0.27", features = ["connection-manager", "tokio-comp"] }
+redis = { version = "0.32", features = ["connection-manager", "tokio-comp"] }
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
 serde = { version = "1", features = ["derive"] }
