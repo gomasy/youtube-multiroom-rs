@@ -1,14 +1,12 @@
 use crate::alexa::handle_alexa;
-use crate::state::{
-    AppState, DeviceUpdate, PlayRequest, ReorderRequest, AUDIO_MIME,
-};
+use crate::state::{AUDIO_MIME, AppState, DeviceUpdate, PlayRequest, ReorderRequest};
 use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path, Query, State, WebSocketUpgrade};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::SeekFrom;
 use std::sync::Arc;
 use tokio::fs;
@@ -98,10 +96,7 @@ pub async fn stream_audio(
                     format!("bytes {start}-{end}/{total}"),
                 ),
                 (header::CONTENT_LENGTH, len.to_string()),
-                (
-                    header::CACHE_CONTROL,
-                    "private, max-age=3600".to_string(),
-                ),
+                (header::CACHE_CONTROL, "private, max-age=3600".to_string()),
             ],
             Body::from_stream(ReaderStream::new(file.take(len as u64))),
         )
@@ -114,10 +109,7 @@ pub async fn stream_audio(
             (header::CONTENT_TYPE, AUDIO_MIME.to_string()),
             (header::ACCEPT_RANGES, "bytes".to_string()),
             (header::CONTENT_LENGTH, total.to_string()),
-            (
-                header::CACHE_CONTROL,
-                "private, max-age=3600".to_string(),
-            ),
+            (header::CACHE_CONTROL, "private, max-age=3600".to_string()),
         ],
         Body::from_stream(ReaderStream::new(file)),
     )
@@ -193,13 +185,12 @@ pub async fn live_audio(
     // AAC ならコンテナ載せ替えのみで済むが、それ以外 (Opus など) は ADTS に
     // 格納できないため AAC へ再エンコードする。muxed HLS では acodec が
     // "unknown" のこともあり、その場合も安全側 (再エンコード) に倒す
-    let codec_args: &[&str] =
-        if acodec.starts_with("mp4a") || acodec.starts_with("aac") {
-            &["-c:a", "copy"]
-        } else {
-            tracing::info!("Live audio codec '{acodec}' is not AAC, transcoding");
-            &["-c:a", "aac", "-b:a", "128k"]
-        };
+    let codec_args: &[&str] = if acodec.starts_with("mp4a") || acodec.starts_with("aac") {
+        &["-c:a", "copy"]
+    } else {
+        tracing::info!("Live audio codec '{acodec}' is not AAC, transcoding");
+        &["-c:a", "aac", "-b:a", "128k"]
+    };
 
     let mut child = tokio::process::Command::new("ffmpeg")
         .args(["-loglevel", "error", "-i", cdn_url, "-vn"])
@@ -241,9 +232,7 @@ pub async fn live_audio(
             (header::CONTENT_TYPE, "audio/aac".to_string()),
             (header::CACHE_CONTROL, "no-store".to_string()),
         ],
-        axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(
-            stdout,
-        )),
+        axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(stdout)),
     )
         .into_response())
 }
@@ -436,8 +425,8 @@ pub async fn alexa_webhook(
         return Err(AppError::bad_request("Request verification failed"));
     }
 
-    let body: Value = serde_json::from_slice(&body)
-        .map_err(|_| AppError::bad_request("Invalid JSON body"))?;
+    let body: Value =
+        serde_json::from_slice(&body).map_err(|_| AppError::bad_request("Invalid JSON body"))?;
 
     if let Err(e) = crate::alexa_verify::verify_timestamp(&body) {
         tracing::warn!("Rejected Alexa request: {e}");
@@ -461,10 +450,7 @@ pub async fn alexa_webhook(
 // ════════════════════════════════════════
 
 /// WS /ws
-pub async fn ws_upgrade(
-    State(state): State<Arc<AppState>>,
-    ws: WebSocketUpgrade,
-) -> Response {
+pub async fn ws_upgrade(State(state): State<Arc<AppState>>, ws: WebSocketUpgrade) -> Response {
     ws.on_upgrade(move |socket| ws_handler(socket, state))
 }
 
@@ -489,8 +475,7 @@ async fn ws_handler(mut socket: WebSocket, state: Arc<AppState>) {
     let mut rx = state.tx.subscribe();
 
     // クライアント固有メッセージ用チャンネル (extract 結果など)
-    let (client_tx, mut client_rx) =
-        tokio::sync::mpsc::unbounded_channel::<String>();
+    let (client_tx, mut client_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
     loop {
         tokio::select! {

@@ -4,9 +4,9 @@ mod auth;
 mod handlers;
 mod state;
 
+use axum::Router;
 use axum::middleware;
 use axum::routing::{delete, get, post};
-use axum::Router;
 use state::AppState;
 use std::net::SocketAddr;
 use std::process;

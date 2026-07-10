@@ -14,7 +14,7 @@ use openssl::pkey::{PKey, Public};
 use openssl::sign::Verifier;
 use openssl::stack::Stack;
 use openssl::x509::store::X509StoreBuilder;
-use openssl::x509::{X509StoreContext, X509VerifyResult, X509};
+use openssl::x509::{X509, X509StoreContext, X509VerifyResult};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -41,10 +41,7 @@ fn cert_cache() -> &'static Mutex<HashMap<String, CachedKey>> {
 }
 
 /// 署名ヘッダと証明書チェーンでリクエストボディの真正性を検証する
-pub async fn verify_request(
-    headers: &HeaderMap,
-    body: &[u8],
-) -> Result<(), String> {
+pub async fn verify_request(headers: &HeaderMap, body: &[u8]) -> Result<(), String> {
     let cert_url = header_str(headers, "signaturecertchainurl")?;
     // SHA-256 署名 (Signature-256) があれば優先し、なければ従来の SHA-1
     let (sig_b64, digest) = match header_str(headers, "signature-256") {
@@ -59,8 +56,8 @@ pub async fn verify_request(
         .decode(sig_b64.trim())
         .map_err(|e| format!("invalid signature base64: {e}"))?;
 
-    let mut verifier = Verifier::new(digest, &key)
-        .map_err(|e| format!("verifier init failed: {e}"))?;
+    let mut verifier =
+        Verifier::new(digest, &key).map_err(|e| format!("verifier init failed: {e}"))?;
     verifier
         .update(body)
         .map_err(|e| format!("verifier update failed: {e}"))?;
@@ -76,11 +73,8 @@ pub fn verify_timestamp(body: &Value) -> Result<(), String> {
     let ts = body["request"]["timestamp"]
         .as_str()
         .ok_or("missing request.timestamp")?;
-    let t = time::OffsetDateTime::parse(
-        ts,
-        &time::format_description::well_known::Rfc3339,
-    )
-    .map_err(|e| format!("invalid timestamp '{ts}': {e}"))?;
+    let t = time::OffsetDateTime::parse(ts, &time::format_description::well_known::Rfc3339)
+        .map_err(|e| format!("invalid timestamp '{ts}': {e}"))?;
     let diff = (time::OffsetDateTime::now_utc() - t).whole_seconds().abs();
     if diff > TIMESTAMP_TOLERANCE_SECS {
         return Err(format!("timestamp out of tolerance ({diff}s)"));
@@ -99,8 +93,7 @@ fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Result<&'a str, String>
 /// パスが /echo.api/ 配下) を満たすことを確認する。
 /// url クレートのパースがドットセグメント (..) の正規化を行う
 fn validate_cert_url(cert_url: &str) -> Result<(), String> {
-    let u = url::Url::parse(cert_url)
-        .map_err(|e| format!("invalid cert URL: {e}"))?;
+    let u = url::Url::parse(cert_url).map_err(|e| format!("invalid cert URL: {e}"))?;
     if u.scheme() != "https" {
         return Err(format!("cert URL scheme is not https: {cert_url}"));
     }
@@ -158,22 +151,21 @@ async fn fetch_verified_key(cert_url: &str) -> Result<PKey<Public>, String> {
 /// PEM 証明書チェーンを検証し、(リーフ証明書の公開鍵, 有効期限) を返す。
 /// チェーンはシステムの CA ストアを起点に検証する (有効期限の確認も含む)
 fn verify_cert_chain(pem: &[u8]) -> Result<(PKey<Public>, SystemTime), String> {
-    let mut certs = X509::stack_from_pem(pem)
-        .map_err(|e| format!("failed to parse cert chain: {e}"))?;
+    let mut certs =
+        X509::stack_from_pem(pem).map_err(|e| format!("failed to parse cert chain: {e}"))?;
     if certs.is_empty() {
         return Err("cert chain is empty".to_string());
     }
     let leaf = certs.remove(0);
 
-    let san_ok = leaf.subject_alt_names().is_some_and(|names| {
-        names.iter().any(|n| n.dnsname() == Some(ECHO_API_SAN))
-    });
+    let san_ok = leaf
+        .subject_alt_names()
+        .is_some_and(|names| names.iter().any(|n| n.dnsname() == Some(ECHO_API_SAN)));
     if !san_ok {
         return Err(format!("certificate SAN does not include {ECHO_API_SAN}"));
     }
 
-    let mut store = X509StoreBuilder::new()
-        .map_err(|e| format!("cert store init failed: {e}"))?;
+    let mut store = X509StoreBuilder::new().map_err(|e| format!("cert store init failed: {e}"))?;
     store
         .set_default_paths()
         .map_err(|e| format!("failed to load system CA store: {e}"))?;
@@ -181,11 +173,13 @@ fn verify_cert_chain(pem: &[u8]) -> Result<(PKey<Public>, SystemTime), String> {
 
     let mut chain = Stack::new().map_err(|e| format!("stack init failed: {e}"))?;
     for c in certs {
-        chain.push(c).map_err(|e| format!("stack push failed: {e}"))?;
+        chain
+            .push(c)
+            .map_err(|e| format!("stack push failed: {e}"))?;
     }
 
-    let mut ctx = X509StoreContext::new()
-        .map_err(|e| format!("verify context init failed: {e}"))?;
+    let mut ctx =
+        X509StoreContext::new().map_err(|e| format!("verify context init failed: {e}"))?;
     let result = ctx
         .init(&store, &leaf, &chain, |c| {
             c.verify_cert()?;
@@ -200,8 +194,7 @@ fn verify_cert_chain(pem: &[u8]) -> Result<(PKey<Public>, SystemTime), String> {
     }
 
     // キャッシュの保持期限として有効期限を SystemTime に換算する
-    let now = Asn1Time::days_from_now(0)
-        .map_err(|e| format!("time init failed: {e}"))?;
+    let now = Asn1Time::days_from_now(0).map_err(|e| format!("time init failed: {e}"))?;
     let remaining = now
         .diff(leaf.not_after())
         .map_err(|e| format!("failed to read cert expiry: {e}"))?;
@@ -253,9 +246,7 @@ mod tests {
 
     #[test]
     fn timestamp_within_tolerance_passes() {
-        let ts = time::OffsetDateTime::now_utc()
-            .format(&Rfc3339)
-            .unwrap();
+        let ts = time::OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
         let body = json!({ "request": { "timestamp": ts } });
         assert!(verify_timestamp(&body).is_ok());
     }
@@ -270,9 +261,6 @@ mod tests {
         assert!(verify_timestamp(&body).is_err());
 
         assert!(verify_timestamp(&json!({ "request": {} })).is_err());
-        assert!(
-            verify_timestamp(&json!({ "request": { "timestamp": "garbage" } }))
-                .is_err()
-        );
+        assert!(verify_timestamp(&json!({ "request": { "timestamp": "garbage" } })).is_err());
     }
 }

@@ -1,15 +1,15 @@
-use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
+use redis::aio::ConnectionManager;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{Mutex, broadcast};
 use tokio::time;
 
 const REDIS_KEY_TRACKS: &str = "youtube:tracks";
@@ -203,12 +203,9 @@ impl AppState {
         std::fs::create_dir_all(&cache_dir).ok();
 
         let client = redis::Client::open(redis_url)?;
-        let redis = time::timeout(
-            time::Duration::from_secs(5),
-            ConnectionManager::new(client),
-        )
-        .await
-        .map_err(|_| format!("Redis connection timed out ({redis_url})"))??;
+        let redis = time::timeout(time::Duration::from_secs(5), ConnectionManager::new(client))
+            .await
+            .map_err(|_| format!("Redis connection timed out ({redis_url})"))??;
 
         Ok(Arc::new(Self {
             redis,
@@ -224,8 +221,7 @@ impl AppState {
     // ── 音声取得 ──
 
     pub async fn extract_audio(&self, url: &str) -> Result<AudioTrack, String> {
-        let video_id =
-            extract_video_id(url).ok_or("Could not recognize YouTube URL")?;
+        let video_id = extract_video_id(url).ok_or("Could not recognize YouTube URL")?;
 
         // 同一動画の並行リクエストを直列化する。後続の呼び出しはロック獲得後の
         // キャッシュ確認で即座に返る
@@ -239,18 +235,17 @@ impl AppState {
 
         // 待機中の呼び出しがなければエントリを片付ける (2 = マップ + 自分の分)
         let mut locks = self.extract_locks.lock().await;
-        if locks.get(&video_id).is_some_and(|l| Arc::strong_count(l) <= 2) {
+        if locks
+            .get(&video_id)
+            .is_some_and(|l| Arc::strong_count(l) <= 2)
+        {
             locks.remove(&video_id);
         }
 
         result
     }
 
-    async fn extract_audio_locked(
-        &self,
-        video_id: &str,
-        url: &str,
-    ) -> Result<AudioTrack, String> {
+    async fn extract_audio_locked(&self, video_id: &str, url: &str) -> Result<AudioTrack, String> {
         // Redis キャッシュ確認。旧フォーマット (mp3 など) のパスを指す
         // エントリは AUDIO_MIME と食い違うため無視して取り直す
         if let Some(track) = self.get_track(video_id).await {
@@ -259,9 +254,7 @@ impl AppState {
                 return Ok(track);
             }
             let path = Path::new(&track.file_path);
-            if path.extension().is_some_and(|ext| ext == AUDIO_EXT)
-                && path.exists()
-            {
+            if path.extension().is_some_and(|ext| ext == AUDIO_EXT) && path.exists() {
                 tracing::info!("Cache hit: {}", video_id);
                 return Ok(track);
             }
@@ -274,14 +267,10 @@ impl AppState {
         // ライブ配信はファイルとして保存できないため、メタデータのみ登録し
         // 再生時に CDN URL を都度解決する (handlers::live_audio)
         let track = if meta["is_live"].as_bool().unwrap_or(false) {
-            tracing::info!(
-                "Live stream detected, skipping download: {}",
-                video_id
-            );
+            tracing::info!("Live stream detected, skipping download: {}", video_id);
             AudioTrack::from_meta(video_id, &meta, now_f64(), String::new())
         } else {
-            let output_path =
-                self.cache_dir.join(format!("{video_id}.{AUDIO_EXT}"));
+            let output_path = self.cache_dir.join(format!("{video_id}.{AUDIO_EXT}"));
             let output_str = output_path.to_string_lossy().to_string();
 
             // 音声ダウンロード
@@ -330,10 +319,8 @@ impl AppState {
         // 並び順リストの先頭に追加 (再取得時の重複を避けるため一旦除去)
         {
             let _guard = self.order_lock.lock().await;
-            let _: Result<(), _> =
-                conn.lrem(REDIS_KEY_TRACKS_ORDER, 0, video_id).await;
-            let _: Result<(), _> =
-                conn.lpush(REDIS_KEY_TRACKS_ORDER, video_id).await;
+            let _: Result<(), _> = conn.lrem(REDIS_KEY_TRACKS_ORDER, 0, video_id).await;
+            let _: Result<(), _> = conn.lpush(REDIS_KEY_TRACKS_ORDER, video_id).await;
         }
 
         tracing::info!("Ready: {} ({}s)", track.title, track.duration);
@@ -360,8 +347,7 @@ impl AppState {
         let _: Result<(), _> = conn.hdel(REDIS_KEY_TRACKS, id).await;
         {
             let _guard = self.order_lock.lock().await;
-            let _: Result<(), _> =
-                conn.lrem(REDIS_KEY_TRACKS_ORDER, 0, id).await;
+            let _: Result<(), _> = conn.lrem(REDIS_KEY_TRACKS_ORDER, 0, id).await;
         }
 
         // 削除トラックをキューしている pending コマンドを除去
@@ -380,8 +366,7 @@ impl AppState {
             }
         };
         for key in keys {
-            let json_str: Option<String> =
-                conn.get(&key).await.unwrap_or_default();
+            let json_str: Option<String> = conn.get(&key).await.unwrap_or_default();
             if json_str
                 .and_then(|s| serde_json::from_str::<PendingCommand>(&s).ok())
                 .is_some_and(|cmd| cmd.track.id == id)
@@ -406,10 +391,7 @@ impl AppState {
     /// 従来どおり新しい順で末尾に続ける
     pub async fn list_tracks(&self) -> Vec<AudioTrack> {
         let mut conn = self.redis.clone();
-        let all: HashMap<String, String> = conn
-            .hgetall(REDIS_KEY_TRACKS)
-            .await
-            .unwrap_or_default();
+        let all: HashMap<String, String> = conn.hgetall(REDIS_KEY_TRACKS).await.unwrap_or_default();
         let mut by_id: HashMap<String, AudioTrack> = all
             .values()
             .filter_map(|s| AudioTrack::from_redis_json(s))
@@ -423,8 +405,7 @@ impl AppState {
                 tracing::warn!("Redis error reading track order: {e}");
                 Vec::new()
             });
-        let mut tracks: Vec<AudioTrack> =
-            order.iter().filter_map(|id| by_id.remove(id)).collect();
+        let mut tracks: Vec<AudioTrack> = order.iter().filter_map(|id| by_id.remove(id)).collect();
 
         let mut rest: Vec<AudioTrack> = by_id.into_values().collect();
         rest.sort_by(|a, b| {
@@ -442,12 +423,7 @@ impl AppState {
     pub async fn reorder_track(&self, track_id: &str, new_index: usize) -> bool {
         // 読み→全置換の間に他の変更が割り込むと失われるため直列化する
         let _guard = self.order_lock.lock().await;
-        let mut ids: Vec<String> = self
-            .list_tracks()
-            .await
-            .into_iter()
-            .map(|t| t.id)
-            .collect();
+        let mut ids: Vec<String> = self.list_tracks().await.into_iter().map(|t| t.id).collect();
         let Some(pos) = ids.iter().position(|id| id == track_id) else {
             return false;
         };
@@ -507,11 +483,7 @@ impl AppState {
                 let track = state.refetch_track_metadata(&video_id, &path).await;
                 let mut conn = state.redis.clone();
                 if let Err(e) = conn
-                    .hset::<_, _, _, ()>(
-                        REDIS_KEY_TRACKS,
-                        &video_id,
-                        track.to_redis_json(),
-                    )
+                    .hset::<_, _, _, ()>(REDIS_KEY_TRACKS, &video_id, track.to_redis_json())
                     .await
                 {
                     tracing::warn!("Redis error restoring track {video_id}: {e}");
@@ -525,11 +497,7 @@ impl AppState {
 
     /// yt-dlp でメタデータのみ再取得する。動画が削除済みなどで取得できない
     /// 場合もファイル自体は再生できるため、ID をタイトルにした最小情報で返す
-    async fn refetch_track_metadata(
-        &self,
-        video_id: &str,
-        path: &Path,
-    ) -> AudioTrack {
+    async fn refetch_track_metadata(&self, video_id: &str, path: &Path) -> AudioTrack {
         let url = format!("https://www.youtube.com/watch?v={video_id}");
         // yt-dlp が固まると復元全体が止まったままになるため時間を区切る
         let meta = match time::timeout(
@@ -596,11 +564,7 @@ impl AppState {
     }
 
     /// 指定ページのトラックと総件数を返す (page は 1 始まり)
-    pub async fn list_tracks_page(
-        &self,
-        page: usize,
-        per_page: usize,
-    ) -> (Vec<AudioTrack>, usize) {
+    pub async fn list_tracks_page(&self, page: usize, per_page: usize) -> (Vec<AudioTrack>, usize) {
         let tracks = self.list_tracks().await;
         let total = tracks.len();
         let start = page.saturating_sub(1).saturating_mul(per_page);
@@ -644,17 +608,13 @@ impl AppState {
 
     async fn all_devices(&self) -> HashMap<String, DeviceState> {
         let mut conn = self.redis.clone();
-        let all: HashMap<String, String> = conn
-            .hgetall(REDIS_KEY_DEVICES)
-            .await
-            .unwrap_or_else(|e| {
+        let all: HashMap<String, String> =
+            conn.hgetall(REDIS_KEY_DEVICES).await.unwrap_or_else(|e| {
                 tracing::warn!("Redis error listing devices: {e}");
                 HashMap::new()
             });
         all.into_iter()
-            .filter_map(|(k, s)| {
-                serde_json::from_str(&s).ok().map(|d| (k, d))
-            })
+            .filter_map(|(k, s)| serde_json::from_str(&s).ok().map(|d| (k, d)))
             .collect()
     }
 
@@ -664,18 +624,18 @@ impl AppState {
     }
 
     pub async fn register_device(&self, device_id: &str, name: &str) -> DeviceState {
-        let mut dev =
-            self.get_device(device_id)
-                .await
-                .unwrap_or_else(|| DeviceState {
-                    device_id: device_id.to_string(),
-                    name: name.to_string(),
-                    status: "idle".to_string(),
-                    current_track: None,
-                    position_ms: 0,
-                    connected: true,
-                    last_update: now_f64(),
-                });
+        let mut dev = self
+            .get_device(device_id)
+            .await
+            .unwrap_or_else(|| DeviceState {
+                device_id: device_id.to_string(),
+                name: name.to_string(),
+                status: "idle".to_string(),
+                current_track: None,
+                position_ms: 0,
+                connected: true,
+                last_update: now_f64(),
+            });
         dev.connected = true;
         dev.last_update = now_f64();
         self.write_device(&dev).await;
@@ -735,10 +695,7 @@ impl AppState {
     /// 再生終了時の挙動を返す。未設定・不正値・Redis エラー時はデフォルト
     pub async fn playback_mode(&self) -> String {
         let mut conn = self.redis.clone();
-        match conn
-            .get::<_, Option<String>>(REDIS_KEY_PLAYBACK_MODE)
-            .await
-        {
+        match conn.get::<_, Option<String>>(REDIS_KEY_PLAYBACK_MODE).await {
             Ok(Some(m)) if PLAYBACK_MODES.contains(&m.as_str()) => m,
             Ok(_) => DEFAULT_PLAYBACK_MODE.to_string(),
             Err(e) => {
@@ -790,11 +747,8 @@ impl AppState {
             tracing::warn!("Redis error queueing play for {device_id}: {e}");
             return;
         }
-        self.update_device(
-            device_id,
-            DeviceUpdate::new().status("queued").track(track),
-        )
-        .await;
+        self.update_device(device_id, DeviceUpdate::new().status("queued").track(track))
+            .await;
     }
 
     /// キューされたコマンドを取り出す (GETDEL でアトミックに取得+削除、失効は Redis の TTL 任せ)
@@ -809,9 +763,7 @@ impl AppState {
     /// キューされたコマンドを消費せずに参照する (取り出す場合は take_pending)
     pub async fn peek_pending(&self, device_id: &str) -> Option<PendingCommand> {
         let mut conn = self.redis.clone();
-        let result = conn
-            .get::<_, Option<String>>(pending_key(device_id))
-            .await;
+        let result = conn.get::<_, Option<String>>(pending_key(device_id)).await;
         Self::parse_pending(device_id, result)
     }
 
@@ -838,9 +790,7 @@ impl AppState {
         match serde_json::from_str(&json_str) {
             Ok(cmd) => Some(cmd),
             Err(e) => {
-                tracing::warn!(
-                    "Discarding unparsable pending command for {device_id}: {e}"
-                );
+                tracing::warn!("Discarding unparsable pending command for {device_id}: {e}");
                 None
             }
         }
@@ -867,8 +817,7 @@ async fn fetch_metadata(url: &str) -> Result<Value, String> {
         return Err(format!("Failed to fetch metadata: {err}"));
     }
 
-    serde_json::from_slice(&out.stdout)
-        .map_err(|e| format!("Failed to parse metadata: {e}"))
+    serde_json::from_slice(&out.stdout).map_err(|e| format!("Failed to parse metadata: {e}"))
 }
 
 fn extract_video_id(url: &str) -> Option<String> {
@@ -877,9 +826,7 @@ fn extract_video_id(url: &str) -> Option<String> {
     static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
     let patterns = PATTERNS.get_or_init(|| {
         [
-            format!(
-                r"(?:youtube\.com/watch\?.*v=|youtu\.be/)({VIDEO_ID_PATTERN})"
-            ),
+            format!(r"(?:youtube\.com/watch\?.*v=|youtu\.be/)({VIDEO_ID_PATTERN})"),
             format!(r"youtube\.com/embed/({VIDEO_ID_PATTERN})"),
             format!(r"youtube\.com/shorts/({VIDEO_ID_PATTERN})"),
             format!(r"youtube\.com/live/({VIDEO_ID_PATTERN})"),
@@ -902,8 +849,7 @@ fn cached_video_ids(cache_dir: &Path) -> Vec<(String, PathBuf)> {
     use std::sync::OnceLock;
 
     static ID_RE: OnceLock<Option<Regex>> = OnceLock::new();
-    let Some(id_re) = ID_RE
-        .get_or_init(|| Regex::new(&format!("^{VIDEO_ID_PATTERN}$")).ok())
+    let Some(id_re) = ID_RE.get_or_init(|| Regex::new(&format!("^{VIDEO_ID_PATTERN}$")).ok())
     else {
         return Vec::new();
     };
@@ -978,8 +924,7 @@ mod tests {
             created_at: 1.0,
             file_path: String::new(),
         };
-        let restored =
-            AudioTrack::from_redis_json(&track.to_redis_json()).unwrap();
+        let restored = AudioTrack::from_redis_json(&track.to_redis_json()).unwrap();
         assert!(restored.is_live);
         assert!(restored.file_path.is_empty());
     }

@@ -1,5 +1,5 @@
 use crate::state::{AppState, AudioTrack, DeviceUpdate};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 /// Alexa スキルリクエストを処理し、レスポンス JSON を返す
@@ -54,9 +54,7 @@ async fn on_launch(state: &Arc<AppState>, device_id: &str, base_url: &str) -> Va
 // ── Intents ──
 
 async fn on_intent(state: &Arc<AppState>, body: &Value, device_id: &str, base_url: &str) -> Value {
-    let intent = body["request"]["intent"]["name"]
-        .as_str()
-        .unwrap_or("");
+    let intent = body["request"]["intent"]["name"].as_str().unwrap_or("");
 
     match intent {
         "PlayFromWebIntent" => {
@@ -99,8 +97,7 @@ async fn on_intent(state: &Arc<AppState>, body: &Value, device_id: &str, base_ur
             if let Some(dev) = state.get_device(device_id).await
                 && let Some(track) = dev.current_track
             {
-                return play_directive(state, &track, device_id, dev.position_ms, base_url)
-                    .await;
+                return play_directive(state, &track, device_id, dev.position_ms, base_url).await;
             }
             speech("再生する曲がありません。", true)
         }
@@ -152,10 +149,7 @@ async fn on_audio_event(
         }
         "AudioPlayer.PlaybackFinished" => {
             state
-                .update_device(
-                    device_id,
-                    DeviceUpdate::new().status("idle").position(0),
-                )
+                .update_device(device_id, DeviceUpdate::new().status("idle").position(0))
                 .await;
         }
         "AudioPlayer.PlaybackStopped" => {
@@ -193,10 +187,7 @@ async fn on_audio_event(
                     err
                 );
                 state
-                    .update_device(
-                        device_id,
-                        DeviceUpdate::new().status("idle").position(0),
-                    )
+                    .update_device(device_id, DeviceUpdate::new().status("idle").position(0))
                     .await;
                 // 自動続行で別のライブを選ぶと、それも終了済みだった場合に
                 // 失敗が連鎖するため、ライブ以外に限る。pending (Web からの
@@ -210,11 +201,7 @@ async fn on_audio_event(
                     return play_directive(state, &next, device_id, 0, base_url).await;
                 }
             } else {
-                tracing::error!(
-                    "Playback failed on {}: {:?}",
-                    tail_chars(device_id, 8),
-                    err
-                );
+                tracing::error!("Playback failed on {}: {:?}", tail_chars(device_id, 8), err);
                 state
                     .update_device(device_id, DeviceUpdate::new().status("error"))
                     .await;
@@ -261,8 +248,7 @@ fn play_response(
     // Echo は認証ヘッダを付けられないため、署名付き URL でストリームを認証する。
     // ライブ配信はファイルがないため、CDN の音声を中継する /live を使う
     let endpoint = if track.is_live { "live" } else { "stream" };
-    let mut stream_url =
-        format!("{}/api/audio/{}/{}", base_url, track.id, endpoint);
+    let mut stream_url = format!("{}/api/audio/{}/{}", base_url, track.id, endpoint);
     if let Some(secret) = &state.api_token {
         stream_url.push('?');
         stream_url.push_str(&crate::auth::stream_query(secret, &track.id));

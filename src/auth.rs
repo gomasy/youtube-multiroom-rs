@@ -83,8 +83,8 @@ fn verify_stream_query(secret: &str, audio_id: &str, query: Option<&str>) -> boo
 }
 
 fn sign(secret: &str, audio_id: &str, exp: u64) -> String {
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-        .expect("HMAC accepts keys of any length");
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts keys of any length");
     mac.update(audio_id.as_bytes());
     mac.update(b"\n");
     mac.update(exp.to_string().as_bytes());
@@ -186,7 +186,10 @@ mod tests {
 
     #[test]
     fn audio_endpoint_id_handles_stream_and_live() {
-        assert_eq!(audio_endpoint_id("/api/audio/abc123/stream"), Some("abc123"));
+        assert_eq!(
+            audio_endpoint_id("/api/audio/abc123/stream"),
+            Some("abc123")
+        );
         assert_eq!(audio_endpoint_id("/api/audio/abc123/live"), Some("abc123"));
         assert_eq!(audio_endpoint_id("/api/audio/abc123/other"), None);
         assert_eq!(audio_endpoint_id("/api/tracks"), None);
@@ -209,6 +212,10 @@ mod tests {
     fn rejects_missing_query() {
         assert!(!verify_stream_query("secret", "abc123", None));
         assert!(!verify_stream_query("secret", "abc123", Some("exp=123")));
-        assert!(!verify_stream_query("secret", "abc123", Some("sig=deadbeef")));
+        assert!(!verify_stream_query(
+            "secret",
+            "abc123",
+            Some("sig=deadbeef")
+        ));
     }
 }
