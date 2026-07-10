@@ -356,7 +356,13 @@ impl AppState {
             Ok(mut iter) => {
                 let mut keys = Vec::new();
                 while let Some(key) = iter.next_item().await {
-                    keys.push(key);
+                    match key {
+                        Ok(key) => keys.push(key),
+                        Err(e) => {
+                            tracing::warn!("Redis error scanning pending commands: {e}");
+                            break;
+                        }
+                    }
                 }
                 keys
             }

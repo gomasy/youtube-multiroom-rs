@@ -464,7 +464,7 @@ async fn ws_handler(mut socket: WebSocket, state: Arc<AppState>) {
         "playback_mode": state.playback_mode().await,
     });
     if socket
-        .send(Message::Text(init_msg.to_string()))
+        .send(Message::Text(init_msg.to_string().into()))
         .await
         .is_err()
     {
@@ -481,14 +481,14 @@ async fn ws_handler(mut socket: WebSocket, state: Arc<AppState>) {
         tokio::select! {
             // サーバー → クライアント (broadcast)
             Ok(msg) = rx.recv() => {
-                if socket.send(Message::Text(msg)).await.is_err() {
+                if socket.send(Message::Text(msg.into())).await.is_err() {
                     break;
                 }
             }
 
             // サーバー → クライアント (個別応答)
             Some(msg) = client_rx.recv() => {
-                if socket.send(Message::Text(msg)).await.is_err() {
+                if socket.send(Message::Text(msg.into())).await.is_err() {
                     break;
                 }
             }
@@ -509,7 +509,7 @@ async fn ws_handler(mut socket: WebSocket, state: Arc<AppState>) {
                             match msg_type {
                                 "ping" => {
                                     let pong = json!({ "type": "pong" }).to_string();
-                                    if socket.send(Message::Text(pong)).await.is_err() {
+                                    if socket.send(Message::Text(pong.into())).await.is_err() {
                                         break;
                                     }
                                 }
@@ -541,7 +541,7 @@ async fn ws_handler(mut socket: WebSocket, state: Arc<AppState>) {
                                             "type": "extract_audio_error",
                                             "error": "Missing 'url' field",
                                         });
-                                        if socket.send(Message::Text(msg.to_string())).await.is_err() {
+                                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
                                             break;
                                         }
                                     }
