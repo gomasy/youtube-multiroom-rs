@@ -1,0 +1,8 @@
+.git
+.github
+.env
+target
+audio_cache
+front/node_modules
+front/dist
+front/.parcel-cache
