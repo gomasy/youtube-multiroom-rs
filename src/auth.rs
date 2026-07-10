@@ -37,12 +37,12 @@ pub async fn require_token(
 
     // Echo は Authorization ヘッダを付けられないため、
     // ストリーム URL は HMAC 署名クエリ (exp & sig) で認証する
-    if let Some(audio_id) = audio_endpoint_id(path) {
-        if verify_stream_query(expected, audio_id, request.uri().query()) {
-            return next.run(request).await;
-        }
-        // 署名がなくても通常のトークン認証は受け付ける (下へフォールスルー)
+    if let Some(audio_id) = audio_endpoint_id(path)
+        && verify_stream_query(expected, audio_id, request.uri().query())
+    {
+        return next.run(request).await;
     }
+    // 署名がなくても通常のトークン認証は受け付ける (下へフォールスルー)
 
     let header_ok = request
         .headers()
@@ -120,12 +120,13 @@ fn percent_decode(s: &str) -> Cow<'_, str> {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Some(byte) = hex_pair(bytes[i + 1], bytes[i + 2]) {
-                out.push(byte);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Some(byte) = hex_pair(bytes[i + 1], bytes[i + 2])
+        {
+            out.push(byte);
+            i += 3;
+            continue;
         }
         out.push(bytes[i]);
         i += 1;

@@ -81,31 +81,31 @@ pub async fn stream_audio(
         .map_err(|e| AppError::internal(format!("Failed to stat file: {e}")))?
         .len() as usize;
 
-    if let Some(range) = headers.get(header::RANGE).and_then(|v| v.to_str().ok()) {
-        if let Some((start, end)) = parse_byte_range(range, total) {
-            file.seek(SeekFrom::Start(start as u64))
-                .await
-                .map_err(|e| AppError::internal(format!("Failed to seek: {e}")))?;
-            let len = end - start + 1;
-            return Ok((
-                StatusCode::PARTIAL_CONTENT,
-                [
-                    (header::CONTENT_TYPE, AUDIO_MIME.to_string()),
-                    (header::ACCEPT_RANGES, "bytes".to_string()),
-                    (
-                        header::CONTENT_RANGE,
-                        format!("bytes {start}-{end}/{total}"),
-                    ),
-                    (header::CONTENT_LENGTH, len.to_string()),
-                    (
-                        header::CACHE_CONTROL,
-                        "private, max-age=3600".to_string(),
-                    ),
-                ],
-                Body::from_stream(ReaderStream::new(file.take(len as u64))),
-            )
-                .into_response());
-        }
+    if let Some(range) = headers.get(header::RANGE).and_then(|v| v.to_str().ok())
+        && let Some((start, end)) = parse_byte_range(range, total)
+    {
+        file.seek(SeekFrom::Start(start as u64))
+            .await
+            .map_err(|e| AppError::internal(format!("Failed to seek: {e}")))?;
+        let len = end - start + 1;
+        return Ok((
+            StatusCode::PARTIAL_CONTENT,
+            [
+                (header::CONTENT_TYPE, AUDIO_MIME.to_string()),
+                (header::ACCEPT_RANGES, "bytes".to_string()),
+                (
+                    header::CONTENT_RANGE,
+                    format!("bytes {start}-{end}/{total}"),
+                ),
+                (header::CONTENT_LENGTH, len.to_string()),
+                (
+                    header::CACHE_CONTROL,
+                    "private, max-age=3600".to_string(),
+                ),
+            ],
+            Body::from_stream(ReaderStream::new(file.take(len as u64))),
+        )
+            .into_response());
     }
 
     Ok((
@@ -562,10 +562,10 @@ async fn ws_handler(mut socket: WebSocket, state: Arc<AppState>) {
                                     }
                                 }
                                 "set_playback_mode" => {
-                                    if let Some(mode) = data["mode"].as_str() {
-                                        if state.set_playback_mode(mode).await {
-                                            state.broadcast_playback_mode(mode).await;
-                                        }
+                                    if let Some(mode) = data["mode"].as_str()
+                                        && state.set_playback_mode(mode).await
+                                    {
+                                        state.broadcast_playback_mode(mode).await;
                                     }
                                 }
                                 "rename_device" => {

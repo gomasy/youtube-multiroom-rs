@@ -34,11 +34,11 @@ pub async fn handle_alexa(state: &Arc<AppState>, body: Value, base_url: &str) ->
 
 async fn on_launch(state: &Arc<AppState>, device_id: &str, base_url: &str) -> Value {
     // 保留中コマンドがあれば即再生
-    if let Some(cmd) = state.take_pending(device_id).await {
-        if cmd.action == "play" {
-            tracing::info!("Auto-playing queued track on {}", tail_chars(device_id, 8));
-            return play_directive(state, &cmd.track, device_id, 0, base_url).await;
-        }
+    if let Some(cmd) = state.take_pending(device_id).await
+        && cmd.action == "play"
+    {
+        tracing::info!("Auto-playing queued track on {}", tail_chars(device_id, 8));
+        return play_directive(state, &cmd.track, device_id, 0, base_url).await;
     }
 
     state
@@ -96,11 +96,11 @@ async fn on_intent(state: &Arc<AppState>, body: &Value, device_id: &str, base_ur
         }
 
         "AMAZON.ResumeIntent" => {
-            if let Some(dev) = state.get_device(device_id).await {
-                if let Some(track) = dev.current_track {
-                    return play_directive(state, &track, device_id, dev.position_ms, base_url)
-                        .await;
-                }
+            if let Some(dev) = state.get_device(device_id).await
+                && let Some(track) = dev.current_track
+            {
+                return play_directive(state, &track, device_id, dev.position_ms, base_url)
+                    .await;
             }
             speech("再生する曲がありません。", true)
         }

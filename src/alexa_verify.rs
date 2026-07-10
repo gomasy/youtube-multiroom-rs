@@ -123,10 +123,10 @@ fn validate_cert_url(cert_url: &str) -> Result<(), String> {
 async fn fetch_verified_key(cert_url: &str) -> Result<PKey<Public>, String> {
     {
         let cache = cert_cache().lock().await;
-        if let Some(c) = cache.get(cert_url) {
-            if SystemTime::now() < c.not_after {
-                return Ok(c.key.clone());
-            }
+        if let Some(c) = cache.get(cert_url)
+            && SystemTime::now() < c.not_after
+        {
+            return Ok(c.key.clone());
         }
     }
 
