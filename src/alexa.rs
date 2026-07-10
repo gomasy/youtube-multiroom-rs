@@ -182,10 +182,43 @@ async fn on_audio_event(
         }
         "AudioPlayer.PlaybackFailed" => {
             let err = &body["request"]["error"];
-            tracing::error!("Playback failed on {}: {:?}", tail_chars(device_id, 8), err);
-            state
-                .update_device(device_id, DeviceUpdate::new().status("error"))
-                .await;
+            // ライブ配信は終了すると CDN の URL が解決できなくなり、Echo の
+            // 再接続が失敗して PlaybackFailed が届く。これは正常な終わり方
+            // なのでエラー扱いせず、通常の再生終了と同様に次の曲へ進める
+            if let Some(track) = state.get_track(track_id).await.filter(|t| t.is_live) {
+                tracing::info!(
+                    "Live stream '{}' ended on {} ({:?})",
+                    track.title,
+                    tail_chars(device_id, 8),
+                    err
+                );
+                state
+                    .update_device(
+                        device_id,
+                        DeviceUpdate::new().status("idle").position(0),
+                    )
+                    .await;
+                // 自動続行で別のライブを選ぶと、それも終了済みだった場合に
+                // 失敗が連鎖するため、ライブ以外に限る。pending (Web からの
+                // 明示的な指示) は一度だけ試す (失敗しても pending は残り、
+                // 次回は同一トラック除外で止まるため無限には繰り返さない)
+                let next = match state.peek_pending(device_id).await {
+                    Some(cmd) if cmd.action == "play" => Some(cmd.track),
+                    _ => state.auto_next_track(track_id).await.filter(|t| !t.is_live),
+                };
+                if let Some(next) = next.filter(|t| t.id != track_id) {
+                    return play_directive(state, &next, device_id, 0, base_url).await;
+                }
+            } else {
+                tracing::error!(
+                    "Playback failed on {}: {:?}",
+                    tail_chars(device_id, 8),
+                    err
+                );
+                state
+                    .update_device(device_id, DeviceUpdate::new().status("error"))
+                    .await;
+            }
         }
         _ => {}
     }
