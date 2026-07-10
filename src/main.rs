@@ -14,6 +14,9 @@ use tower_http::services::ServeDir;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // .env があれば読み込む (無くてもエラーにしない)
+    let dotenv_loaded = dotenvy::dotenv().is_ok();
+
     tracing_subscriber::fmt()
         .with_target(false)
         .with_level(true)
@@ -57,6 +60,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("══════════════════════════════════════════");
     println!("  YouTube MultiRoom Server (Rust)");
+    if dotenv_loaded {
+        println!("  Config   → loaded .env");
+    }
     println!("  Redis    = {}", redact_url(&redis_url));
     println!("  Web UI   → http://localhost:8888");
     println!("  Alexa    → POST /alexa");

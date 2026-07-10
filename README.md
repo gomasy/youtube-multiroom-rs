@@ -74,6 +74,13 @@ cargo build --release
 | `REDIS_URL` | Yes | Redis connection URL (e.g. `redis://127.0.0.1/`) |
 | `API_TOKEN` | No | Bearer token for API authentication |
 
+Variables can also be placed in a `.env` file in the working directory (loaded automatically at startup; real environment variables take precedence). See `.env.example`.
+
+```bash
+cp .env.example .env
+# then edit .env
+```
+
 ### Run
 
 ```bash
