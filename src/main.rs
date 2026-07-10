@@ -37,16 +37,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let app = Router::new()
-        .route("/api/audio/:audio_id/stream", get(handlers::stream_audio))
-        .route("/api/audio/:audio_id/live", get(handlers::live_audio))
+        .route("/api/audio/{audio_id}/stream", get(handlers::stream_audio))
+        .route("/api/audio/{audio_id}/live", get(handlers::live_audio))
         .route("/api/tracks", get(handlers::list_tracks))
         .route("/api/tracks/reorder", post(handlers::reorder_track))
-        .route("/api/tracks/:track_id", delete(handlers::delete_track))
+        .route("/api/tracks/{track_id}", delete(handlers::delete_track))
         .route("/api/devices", get(handlers::get_devices))
-        .route("/api/devices/:device_id", delete(handlers::delete_device))
+        .route("/api/devices/{device_id}", delete(handlers::delete_device))
         .route("/api/play", post(handlers::play_on_devices))
         .route("/api/play-all", post(handlers::play_on_all))
-        .route("/api/devices/:device_id/stop", post(handlers::stop_device))
+        .route("/api/devices/{device_id}/stop", post(handlers::stop_device))
         .route("/alexa", post(handlers::alexa_webhook))
         .route("/ws", get(handlers::ws_upgrade))
         .route_layer(middleware::from_fn_with_state(
