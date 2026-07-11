@@ -30,6 +30,7 @@ youtube-multiroom-rs/
 │       ├── api.ts         # Auth-aware fetch wrapper
 │       ├── hooks.ts       # WebSocket hook
 │       ├── types.ts       # Shared type definitions
+│       ├── parcel-env.d.ts # Ambient types for Parcel-specific imports
 │       ├── styles.css
 │       └── components/
 │           ├── AuthModal.tsx
@@ -49,9 +50,9 @@ youtube-multiroom-rs/
 
 ### Prerequisites
 
-- Rust 1.88+ (required by the pinned `time` crate)
+- Rust 1.88+
 - OpenSSL headers & pkg-config (build only; `libssl-dev` on Debian/Ubuntu, used for Alexa request signature verification)
-- Node.js 18+
+- Node.js 22+
 - Redis
 - yt-dlp
 - ffmpeg
@@ -111,7 +112,7 @@ REDIS_URL=redis://127.0.0.1/ API_TOKEN=your-secret-token ./target/release/youtub
 When enabled:
 - The Web UI prompts for the token on first access (stored in localStorage)
 - API endpoints and WebSocket require `Authorization: Bearer <token>` (or `?token=` query param for WebSocket)
-- `/api/audio/:id/stream` and `/api/audio/:id/live` require a signed URL: stream URLs handed to Alexa carry an HMAC-SHA256 signature (`?exp=<unix>&sig=<hmac>`, derived from `API_TOKEN`, valid for 24h) since Echo devices cannot send auth headers. Bearer auth is also accepted
+- `/api/audio/{id}/stream` and `/api/audio/{id}/live` require a signed URL: stream URLs handed to Alexa carry an HMAC-SHA256 signature (`?exp=<unix>&sig=<hmac>`, derived from `API_TOKEN`, valid for 24h) since Echo devices cannot send auth headers. Bearer auth is also accepted
 - `/alexa` is excluded from Bearer authentication since Alexa accesses it directly; instead, every request to it is verified as genuinely coming from Alexa via Amazon's request signature scheme (certificate chain validation + body signature + timestamp freshness), regardless of whether `API_TOKEN` is set. Note this means you cannot `curl` the `/alexa` endpoint manually
 
 If `API_TOKEN` is not set, no authentication is required.
@@ -174,16 +175,16 @@ The binary, `front/dist/`, `yt-dlp`, and `ffmpeg` are needed on the Pi.
     ┌────┴─────────────────────────────────────────────────┐
     │  axum Router                                         │
     ├──────────────────────────────────────────────────────┤
-    │  GET    /api/audio/:id/stream   m4a streaming        │
-    │  GET    /api/audio/:id/live     live audio relay      │
+    │  GET    /api/audio/{id}/stream  m4a streaming        │
+    │  GET    /api/audio/{id}/live    live audio relay      │
     │  GET    /api/tracks             track list (paged)    │
     │  POST   /api/tracks/reorder     move a track          │
-    │  DELETE /api/tracks/:id         delete track          │
+    │  DELETE /api/tracks/{id}        delete track          │
     │  GET    /api/devices            device list           │
-    │  DELETE /api/devices/:id        delete device         │
+    │  DELETE /api/devices/{id}       delete device         │
     │  POST   /api/play              queue to devices       │
     │  POST   /api/play-all          queue to all           │
-    │  POST   /api/devices/:id/stop  stop device            │
+    │  POST   /api/devices/{id}/stop stop device            │
     │  POST   /alexa                 Alexa webhook          │
     │  WS     /ws                    real-time sync         │
     │  GET    /*                     front/dist static      │
@@ -265,16 +266,16 @@ sudo systemctl enable --now yt-multiroom
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| GET | `/api/audio/:id/stream` | Signed URL | Stream m4a audio (supports Range requests) |
-| GET | `/api/audio/:id/live` | Signed URL | Relay live stream audio as ADTS AAC via ffmpeg |
+| GET | `/api/audio/{id}/stream` | Signed URL | Stream m4a audio (supports Range requests) |
+| GET | `/api/audio/{id}/live` | Signed URL | Relay live stream audio as ADTS AAC via ffmpeg |
 | GET | `/api/tracks` | Yes | List extracted tracks in library order (paginated) |
 | POST | `/api/tracks/reorder` | Yes | Move a track within the library order |
-| DELETE | `/api/tracks/:id` | Yes | Delete a track and its cached file |
+| DELETE | `/api/tracks/{id}` | Yes | Delete a track and its cached file |
 | GET | `/api/devices` | Yes | List connected devices |
-| DELETE | `/api/devices/:id` | Yes | Delete a device |
+| DELETE | `/api/devices/{id}` | Yes | Delete a device |
 | POST | `/api/play` | Yes | Queue playback on selected devices |
 | POST | `/api/play-all` | Yes | Queue playback on all devices |
-| POST | `/api/devices/:id/stop` | Yes | Stop a device |
+| POST | `/api/devices/{id}/stop` | Yes | Stop a device |
 | POST | `/alexa` | Amazon signature | Alexa skill webhook |
 | WS | `/ws` | Yes | Real-time sync & audio extraction |
 
