@@ -23,18 +23,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let api_token = std::env::var("API_TOKEN").ok().filter(|s| !s.is_empty());
-    let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| {
-        eprintln!("Error: REDIS_URL must be set");
-        process::exit(1);
-    });
+    let auth_enabled = api_token.is_some();
+    let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| die("REDIS_URL must be set"));
 
-    let state = match AppState::new(api_token.clone(), &redis_url).await {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            process::exit(1);
-        }
-    };
+    let state = AppState::new(api_token, &redis_url)
+        .await
+        .unwrap_or_else(|e| die(e));
 
     let app = Router::new()
         .route("/api/audio/{audio_id}/stream", get(handlers::stream_audio))
@@ -66,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Redis    = {}", redact_url(&redis_url));
     println!("  Web UI   → http://localhost:8888");
     println!("  Alexa    → POST /alexa");
-    if api_token.is_some() {
+    if auth_enabled {
         println!("  Auth     → API_TOKEN is set");
     } else {
         println!("  Auth     → disabled (set API_TOKEN to enable)");
@@ -78,6 +72,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+/// 起動に必須の設定が欠けている場合にエラーを表示して終了する
+fn die(msg: impl std::fmt::Display) -> ! {
+    eprintln!("Error: {msg}");
+    process::exit(1);
 }
 
 /// URL のユーザー情報 (user:password@) を伏せてログ用に整形する

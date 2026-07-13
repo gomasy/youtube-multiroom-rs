@@ -50,30 +50,26 @@ fn pending_key(device_id: &str) -> String {
 pub struct AudioTrack {
     pub id: String,
     pub title: String,
+    #[serde(default)]
     pub thumbnail: String,
+    #[serde(default)]
     pub duration: u64,
+    #[serde(default)]
     pub channel: String,
     #[serde(default)]
     pub is_live: bool,
     #[serde(default)]
     pub created_at: f64,
+    /// API レスポンスには含めない (Redis 保存時のみ to_redis_json が付与)
     #[serde(skip)]
     pub file_path: String,
 }
 
 impl AudioTrack {
     fn to_redis_json(&self) -> String {
-        json!({
-            "id": self.id,
-            "title": self.title,
-            "thumbnail": self.thumbnail,
-            "duration": self.duration,
-            "channel": self.channel,
-            "is_live": self.is_live,
-            "created_at": self.created_at,
-            "file_path": self.file_path,
-        })
-        .to_string()
+        let mut v = serde_json::to_value(self).expect("AudioTrack serializes to JSON");
+        v["file_path"] = json!(self.file_path);
+        v.to_string()
     }
 
     /// yt-dlp のメタデータ JSON からトラックを組み立てる。
@@ -97,16 +93,10 @@ impl AudioTrack {
 
     fn from_redis_json(s: &str) -> Option<Self> {
         let v: Value = serde_json::from_str(s).ok()?;
-        Some(Self {
-            id: v["id"].as_str()?.to_string(),
-            title: v["title"].as_str()?.to_string(),
-            thumbnail: v["thumbnail"].as_str().unwrap_or("").to_string(),
-            duration: v["duration"].as_u64().unwrap_or(0),
-            channel: v["channel"].as_str().unwrap_or("").to_string(),
-            is_live: v["is_live"].as_bool().unwrap_or(false),
-            created_at: v["created_at"].as_f64().unwrap_or(0.0),
-            file_path: v["file_path"].as_str()?.to_string(),
-        })
+        let file_path = v["file_path"].as_str()?.to_string();
+        let mut track: Self = serde_json::from_value(v).ok()?;
+        track.file_path = file_path;
+        Some(track)
     }
 }
 
@@ -147,10 +137,10 @@ pub struct ReorderRequest {
 
 #[derive(Default)]
 pub struct DeviceUpdate {
-    pub status: Option<String>,
-    pub current_track: Option<AudioTrack>,
-    pub position_ms: Option<u64>,
-    pub name: Option<String>,
+    status: Option<String>,
+    current_track: Option<AudioTrack>,
+    position_ms: Option<u64>,
+    name: Option<String>,
 }
 
 impl DeviceUpdate {
@@ -167,6 +157,10 @@ impl DeviceUpdate {
     }
     pub fn position(mut self, p: u64) -> Self {
         self.position_ms = Some(p);
+        self
+    }
+    pub fn name(mut self, n: impl Into<String>) -> Self {
+        self.name = Some(n.into());
         self
     }
 }
@@ -302,11 +296,10 @@ impl AppState {
                 // --no-part のため書きかけのファイルが最終名で残る。復元時に
                 // 壊れたトラックとして登録されないよう消しておく
                 let _ = tokio::fs::remove_file(&output_path).await;
-                let err: String = String::from_utf8_lossy(&dl_out.stderr)
-                    .chars()
-                    .take(300)
-                    .collect();
-                return Err(format!("Failed to download audio: {err}"));
+                return Err(format!(
+                    "Failed to download audio: {}",
+                    stderr_snippet(&dl_out)
+                ));
             }
 
             AudioTrack::from_meta(video_id, &meta, now_f64(), output_str)
@@ -682,18 +675,21 @@ impl AppState {
 
     // ── ブロードキャスト ──
 
+    /// 接続中の全 WebSocket クライアントへメッセージを送る (購読者ゼロは無視)
+    fn broadcast(&self, msg: Value) {
+        let _ = self.tx.send(msg.to_string());
+    }
+
     pub async fn broadcast_devices(&self) {
-        let msg = json!({
+        self.broadcast(json!({
             "type": "device_update",
             "devices": self.devices_json().await,
-        });
-        let _ = self.tx.send(msg.to_string());
+        }));
     }
 
     /// トラック一覧の変更をクライアントに通知する (内容は REST で再取得させる)
     pub async fn broadcast_tracks(&self) {
-        let msg = json!({ "type": "tracks_update" });
-        let _ = self.tx.send(msg.to_string());
+        self.broadcast(json!({ "type": "tracks_update" }));
     }
 
     // ── 再生モード ──
@@ -727,11 +723,10 @@ impl AppState {
     }
 
     pub async fn broadcast_playback_mode(&self, mode: &str) {
-        let msg = json!({
+        self.broadcast(json!({
             "type": "playback_mode_update",
             "mode": mode,
-        });
-        let _ = self.tx.send(msg.to_string());
+        }));
     }
 
     // ── コマンドキュー ──
@@ -807,6 +802,14 @@ impl AppState {
 // ユーティリティ
 // ════════════════════════════════════════
 
+/// コマンドの stderr をエラーメッセージ用に先頭 300 文字へ切り詰める
+pub fn stderr_snippet(out: &std::process::Output) -> String {
+    String::from_utf8_lossy(&out.stderr)
+        .chars()
+        .take(300)
+        .collect()
+}
+
 /// yt-dlp でメタデータ JSON を取得する (ダウンロードなし)
 async fn fetch_metadata(url: &str) -> Result<Value, String> {
     let out = Command::new("yt-dlp")
@@ -816,11 +819,10 @@ async fn fetch_metadata(url: &str) -> Result<Value, String> {
         .map_err(|e| format!("Failed to run yt-dlp: {e}"))?;
 
     if !out.status.success() {
-        let err: String = String::from_utf8_lossy(&out.stderr)
-            .chars()
-            .take(300)
-            .collect();
-        return Err(format!("Failed to fetch metadata: {err}"));
+        return Err(format!(
+            "Failed to fetch metadata: {}",
+            stderr_snippet(&out)
+        ));
     }
 
     serde_json::from_slice(&out.stdout).map_err(|e| format!("Failed to parse metadata: {e}"))

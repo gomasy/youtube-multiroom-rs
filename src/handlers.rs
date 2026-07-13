@@ -1,5 +1,7 @@
 use crate::alexa::handle_alexa;
-use crate::state::{AUDIO_MIME, AppState, DeviceUpdate, PlayRequest, ReorderRequest};
+use crate::state::{
+    AUDIO_MIME, AppState, AudioTrack, DeviceUpdate, PlayRequest, ReorderRequest, stderr_snippet,
+};
 use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path, Query, State, WebSocketUpgrade};
@@ -79,41 +81,36 @@ pub async fn stream_audio(
         .map_err(|e| AppError::internal(format!("Failed to stat file: {e}")))?
         .len() as usize;
 
-    if let Some(range) = headers.get(header::RANGE).and_then(|v| v.to_str().ok())
-        && let Some((start, end)) = parse_byte_range(range, total)
-    {
+    let range = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|r| parse_byte_range(r, total));
+
+    let mut resp = Response::builder()
+        .header(header::CONTENT_TYPE, AUDIO_MIME)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CACHE_CONTROL, "private, max-age=3600");
+
+    let body = if let Some((start, end)) = range {
         file.seek(SeekFrom::Start(start as u64))
             .await
             .map_err(|e| AppError::internal(format!("Failed to seek: {e}")))?;
         let len = end - start + 1;
-        return Ok((
-            StatusCode::PARTIAL_CONTENT,
-            [
-                (header::CONTENT_TYPE, AUDIO_MIME.to_string()),
-                (header::ACCEPT_RANGES, "bytes".to_string()),
-                (
-                    header::CONTENT_RANGE,
-                    format!("bytes {start}-{end}/{total}"),
-                ),
-                (header::CONTENT_LENGTH, len.to_string()),
-                (header::CACHE_CONTROL, "private, max-age=3600".to_string()),
-            ],
-            Body::from_stream(ReaderStream::new(file.take(len as u64))),
-        )
-            .into_response());
-    }
+        resp = resp
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header(
+                header::CONTENT_RANGE,
+                format!("bytes {start}-{end}/{total}"),
+            )
+            .header(header::CONTENT_LENGTH, len);
+        Body::from_stream(ReaderStream::new(file.take(len as u64)))
+    } else {
+        resp = resp.header(header::CONTENT_LENGTH, total);
+        Body::from_stream(ReaderStream::new(file))
+    };
 
-    Ok((
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, AUDIO_MIME.to_string()),
-            (header::ACCEPT_RANGES, "bytes".to_string()),
-            (header::CONTENT_LENGTH, total.to_string()),
-            (header::CACHE_CONTROL, "private, max-age=3600".to_string()),
-        ],
-        Body::from_stream(ReaderStream::new(file)),
-    )
-        .into_response())
+    resp.body(body)
+        .map_err(|e| AppError::internal(format!("Failed to build response: {e}")))
 }
 
 /// GET /api/audio/:id/live
@@ -127,10 +124,7 @@ pub async fn live_audio(
     State(state): State<Arc<AppState>>,
     Path(audio_id): Path<String>,
 ) -> AppResult<Response> {
-    let track = state
-        .get_track(&audio_id)
-        .await
-        .ok_or_else(|| AppError::not_found("Track not found"))?;
+    let track = track_or_404(&state, &audio_id).await?;
 
     if !track.is_live {
         return Err(AppError::bad_request("Track is not a live stream"));
@@ -161,12 +155,9 @@ pub async fn live_audio(
         .map_err(|e| AppError::internal(format!("Failed to run yt-dlp: {e}")))?;
 
     if !out.status.success() {
-        let err: String = String::from_utf8_lossy(&out.stderr)
-            .chars()
-            .take(300)
-            .collect();
         return Err(AppError::internal(format!(
-            "Failed to get live stream URL: {err}"
+            "Failed to get live stream URL: {}",
+            stderr_snippet(&out)
         )));
     }
 
@@ -232,7 +223,7 @@ pub async fn live_audio(
             (header::CONTENT_TYPE, "audio/aac".to_string()),
             (header::CACHE_CONTROL, "no-store".to_string()),
         ],
-        axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(stdout)),
+        Body::from_stream(ReaderStream::new(stdout)),
     )
         .into_response())
 }
@@ -296,10 +287,7 @@ pub async fn reorder_track(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ReorderRequest>,
 ) -> AppResult<Json<Value>> {
-    state
-        .get_track(&req.track_id)
-        .await
-        .ok_or_else(|| AppError::not_found("Track not found"))?;
+    track_or_404(&state, &req.track_id).await?;
     if !state.reorder_track(&req.track_id, req.new_index).await {
         return Err(AppError::internal("Failed to save track order"));
     }
@@ -335,22 +323,8 @@ pub async fn play_on_devices(
     State(state): State<Arc<AppState>>,
     Json(req): Json<PlayRequest>,
 ) -> AppResult<Json<Value>> {
-    let track = state
-        .get_track(&req.track_id)
-        .await
-        .ok_or_else(|| AppError::not_found("Track not found"))?;
-
-    for did in &req.device_ids {
-        state.queue_play(did, track.clone()).await;
-    }
-
-    state.broadcast_devices().await;
-
-    Ok(Json(json!({
-        "status": "queued",
-        "devices": req.device_ids,
-        "message": "Say 'Alexa, open YouTube Player' on each Echo device"
-    })))
+    let track = track_or_404(&state, &req.track_id).await?;
+    queue_on_devices(&state, track, req.device_ids).await
 }
 
 /// POST /api/play-all
@@ -358,16 +332,27 @@ pub async fn play_on_all(
     State(state): State<Arc<AppState>>,
     Json(req): Json<PlayRequest>,
 ) -> AppResult<Json<Value>> {
-    let track = state
-        .get_track(&req.track_id)
-        .await
-        .ok_or_else(|| AppError::not_found("Track not found"))?;
-
-    let device_ids: Vec<String> = state
+    let track = track_or_404(&state, &req.track_id).await?;
+    let device_ids = state
         .device_ids()
         .await
         .map_err(|e| AppError::internal(format!("Failed to list devices: {e}")))?;
+    queue_on_devices(&state, track, device_ids).await
+}
 
+async fn track_or_404(state: &AppState, track_id: &str) -> AppResult<AudioTrack> {
+    state
+        .get_track(track_id)
+        .await
+        .ok_or_else(|| AppError::not_found("Track not found"))
+}
+
+/// トラックを各デバイスの pending キューに積み、デバイス状態を通知する
+async fn queue_on_devices(
+    state: &AppState,
+    track: AudioTrack,
+    device_ids: Vec<String>,
+) -> AppResult<Json<Value>> {
     for did in &device_ids {
         state.queue_play(did, track.clone()).await;
     }
@@ -498,78 +483,14 @@ async fn ws_handler(mut socket: WebSocket, state: Arc<AppState>) {
                 // Close フレームなしの切断 (None / Err) でも確実にループを
                 // 抜ける。パターンマッチで受けると不一致時にこのブランチが
                 // 無効化されるだけで、タスクが残留してしまう
-                let msg = match recv {
-                    Some(Ok(msg)) => msg,
-                    Some(Err(_)) | None => break,
-                };
-                match msg {
-                    Message::Text(text) => {
+                match recv {
+                    Some(Ok(Message::Text(text))) => {
                         if let Ok(data) = serde_json::from_str::<Value>(&text) {
-                            let msg_type = data["type"].as_str().unwrap_or("");
-                            match msg_type {
-                                "ping" => {
-                                    let pong = json!({ "type": "pong" }).to_string();
-                                    if socket.send(Message::Text(pong.into())).await.is_err() {
-                                        break;
-                                    }
-                                }
-                                "extract_audio" => {
-                                    if let Some(url) = data["url"].as_str() {
-                                        let state = state.clone();
-                                        let tx = client_tx.clone();
-                                        let url = url.to_string();
-                                        tokio::spawn(async move {
-                                            let result = match state.extract_audio(&url).await {
-                                                Ok(track) => {
-                                                    state.broadcast_tracks().await;
-                                                    json!({
-                                                        "type": "extract_audio_result",
-                                                        "track": track,
-                                                    })
-                                                }
-                                                Err(e) => {
-                                                    json!({
-                                                        "type": "extract_audio_error",
-                                                        "error": e,
-                                                    })
-                                                }
-                                            };
-                                            let _ = tx.send(result.to_string());
-                                        });
-                                    } else {
-                                        let msg = json!({
-                                            "type": "extract_audio_error",
-                                            "error": "Missing 'url' field",
-                                        });
-                                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
-                                            break;
-                                        }
-                                    }
-                                }
-                                "set_playback_mode" => {
-                                    if let Some(mode) = data["mode"].as_str()
-                                        && state.set_playback_mode(mode).await
-                                    {
-                                        state.broadcast_playback_mode(mode).await;
-                                    }
-                                }
-                                "rename_device" => {
-                                    if let (Some(did), Some(name)) = (
-                                        data["device_id"].as_str(),
-                                        data["name"].as_str(),
-                                    ) {
-                                        let mut upd = DeviceUpdate::new();
-                                        upd.name = Some(name.to_string());
-                                        state.update_device(did, upd).await;
-                                        state.broadcast_devices().await;
-                                    }
-                                }
-                                _ => {}
-                            }
+                            handle_ws_message(&state, &client_tx, &data).await;
                         }
                     }
-                    Message::Close(_) => break,
-                    _ => {}
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                    Some(Ok(_)) => {}
                 }
             }
 
@@ -578,6 +499,60 @@ async fn ws_handler(mut socket: WebSocket, state: Arc<AppState>) {
     }
 
     tracing::info!("WebSocket client disconnected");
+}
+
+/// クライアントからの 1 メッセージを処理する。
+/// 応答はすべて client_tx に積み、ws_handler の select ループから送信させる
+async fn handle_ws_message(
+    state: &Arc<AppState>,
+    client_tx: &tokio::sync::mpsc::UnboundedSender<String>,
+    data: &Value,
+) {
+    match data["type"].as_str().unwrap_or("") {
+        "ping" => {
+            let _ = client_tx.send(json!({ "type": "pong" }).to_string());
+        }
+        "extract_audio" => {
+            let Some(url) = data["url"].as_str() else {
+                let msg = json!({
+                    "type": "extract_audio_error",
+                    "error": "Missing 'url' field",
+                });
+                let _ = client_tx.send(msg.to_string());
+                return;
+            };
+            // ダウンロードは長時間かかるため別タスクで行い、結果だけ返す
+            let state = state.clone();
+            let tx = client_tx.clone();
+            let url = url.to_string();
+            tokio::spawn(async move {
+                let result = match state.extract_audio(&url).await {
+                    Ok(track) => {
+                        state.broadcast_tracks().await;
+                        json!({ "type": "extract_audio_result", "track": track })
+                    }
+                    Err(e) => json!({ "type": "extract_audio_error", "error": e }),
+                };
+                let _ = tx.send(result.to_string());
+            });
+        }
+        "set_playback_mode" => {
+            if let Some(mode) = data["mode"].as_str()
+                && state.set_playback_mode(mode).await
+            {
+                state.broadcast_playback_mode(mode).await;
+            }
+        }
+        "rename_device" => {
+            if let (Some(did), Some(name)) = (data["device_id"].as_str(), data["name"].as_str()) {
+                state
+                    .update_device(did, DeviceUpdate::new().name(name))
+                    .await;
+                state.broadcast_devices().await;
+            }
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]

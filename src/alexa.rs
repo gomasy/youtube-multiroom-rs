@@ -67,30 +67,10 @@ async fn on_intent(state: &Arc<AppState>, body: &Value, device_id: &str, base_ur
             )
         }
 
-        "AMAZON.PauseIntent" => {
-            state
-                .update_device(device_id, DeviceUpdate::new().status("paused"))
-                .await;
-            json!({
-                "version": "1.0",
-                "response": {
-                    "directives": [{ "type": "AudioPlayer.Stop" }],
-                    "shouldEndSession": true
-                }
-            })
-        }
+        "AMAZON.PauseIntent" => stop_directive(state, device_id, "paused").await,
 
         "AMAZON.StopIntent" | "AMAZON.CancelIntent" => {
-            state
-                .update_device(device_id, DeviceUpdate::new().status("stopped"))
-                .await;
-            json!({
-                "version": "1.0",
-                "response": {
-                    "directives": [{ "type": "AudioPlayer.Stop" }],
-                    "shouldEndSession": true
-                }
-            })
+            stop_directive(state, device_id, "stopped").await
         }
 
         "AMAZON.ResumeIntent" => {
@@ -210,10 +190,26 @@ async fn on_audio_event(
         _ => {}
     }
 
-    json!({ "version": "1.0", "response": { "shouldEndSession": true } })
+    alexa_response(json!({ "shouldEndSession": true }))
 }
 
 // ── ヘルパー ──
+
+/// Alexa 応答共通のエンベロープ ("version" / "response") を被せる
+fn alexa_response(response: Value) -> Value {
+    json!({ "version": "1.0", "response": response })
+}
+
+/// デバイス状態を更新しつつ AudioPlayer.Stop ディレクティブを返す
+async fn stop_directive(state: &Arc<AppState>, device_id: &str, status: &str) -> Value {
+    state
+        .update_device(device_id, DeviceUpdate::new().status(status))
+        .await;
+    alexa_response(json!({
+        "directives": [{ "type": "AudioPlayer.Stop" }],
+        "shouldEndSession": true
+    }))
+}
 
 async fn play_directive(
     state: &Arc<AppState>,
@@ -266,27 +262,24 @@ fn play_response(
         "REPLACE_ALL"
     };
 
-    json!({
-        "version": "1.0",
-        "response": {
-            "directives": [{
-                "type": "AudioPlayer.Play",
-                "playBehavior": play_behavior,
-                "audioItem": {
-                    "stream": stream,
-                    "metadata": {
-                        "title": track.title,
-                        "subtitle": if track.channel.is_empty() {
-                            "YouTube MultiRoom".to_string()
-                        } else {
-                            track.channel.clone()
-                        }
+    alexa_response(json!({
+        "directives": [{
+            "type": "AudioPlayer.Play",
+            "playBehavior": play_behavior,
+            "audioItem": {
+                "stream": stream,
+                "metadata": {
+                    "title": track.title,
+                    "subtitle": if track.channel.is_empty() {
+                        "YouTube MultiRoom".to_string()
+                    } else {
+                        track.channel.clone()
                     }
                 }
-            }],
-            "shouldEndSession": true
-        }
-    })
+            }
+        }],
+        "shouldEndSession": true
+    }))
 }
 
 /// token は "{track_id}#{発行時刻ミリ秒}" 形式。
@@ -308,14 +301,11 @@ fn tail_chars(s: &str, n: usize) -> &str {
 }
 
 fn speech(text: &str, end_session: bool) -> Value {
-    json!({
-        "version": "1.0",
-        "response": {
-            "outputSpeech": {
-                "type": "PlainText",
-                "text": text
-            },
-            "shouldEndSession": end_session
-        }
-    })
+    alexa_response(json!({
+        "outputSpeech": {
+            "type": "PlainText",
+            "text": text
+        },
+        "shouldEndSession": end_session
+    }))
 }
