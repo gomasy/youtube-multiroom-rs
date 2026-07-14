@@ -12,6 +12,10 @@ export interface Device {
   name: string;
   status: "idle" | "playing" | "paused" | "stopped" | "queued" | "error";
   current_track?: Track;
+  /** 最後に確認できた再生位置 (ミリ秒) */
+  position_ms?: number;
+  /** デバイス状態の最終更新時刻 (UNIX 秒) */
+  last_update?: number;
 }
 
 export interface TracksPage {

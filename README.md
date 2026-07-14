@@ -28,6 +28,7 @@ youtube-multiroom-rs/
 │       ├── index.tsx
 │       ├── App.tsx
 │       ├── api.ts         # Auth-aware fetch wrapper
+│       ├── format.ts      # Shared time/duration formatters
 │       ├── hooks.ts       # WebSocket hook
 │       ├── types.ts       # Shared type definitions
 │       ├── parcel-env.d.ts # Ambient types for Parcel-specific imports
@@ -40,6 +41,7 @@ youtube-multiroom-rs/
 │           ├── NowPlaying.tsx
 │           ├── PlaybackModeSelector.tsx
 │           ├── ScrollingText.tsx
+│           ├── SeekBar.tsx
 │           ├── Toast.tsx
 │           └── UrlInput.tsx
 ├── alexa_interaction_model.json
@@ -184,6 +186,7 @@ The binary, `front/dist/`, `yt-dlp`, and `ffmpeg` are needed on the Pi.
     │  DELETE /api/devices/{id}       delete device         │
     │  POST   /api/play              queue to devices       │
     │  POST   /api/play-all          queue to all           │
+    │  POST   /api/devices/{id}/seek queue seek              │
     │  POST   /api/devices/{id}/stop stop device            │
     │  POST   /alexa                 Alexa webhook          │
     │  WS     /ws                    real-time sync         │
@@ -275,6 +278,7 @@ sudo systemctl enable --now yt-multiroom
 | DELETE | `/api/devices/{id}` | Yes | Delete a device |
 | POST | `/api/play` | Yes | Queue playback on selected devices |
 | POST | `/api/play-all` | Yes | Queue playback on all devices |
+| POST | `/api/devices/{id}/seek` | Yes | Queue playback of the device's current track from a position |
 | POST | `/api/devices/{id}/stop` | Yes | Stop a device |
 | POST | `/alexa` | Amazon signature | Alexa skill webhook |
 | WS | `/ws` | Yes | Real-time sync & audio extraction |
@@ -290,6 +294,14 @@ sudo systemctl enable --now yt-multiroom
 ```json
 { "track_id": "dQw4w9WgXcQ", "new_index": 3 }
 ```
+
+`POST /api/devices/{id}/seek` queues a play command for the device's current track at the given position (clamped to just before the end of the track; rejected for live streams):
+
+```json
+{ "position_ms": 63000 }
+```
+
+Since a custom Alexa skill cannot push directives to an Echo, the seek — like play — takes effect the next time the device contacts the skill: when the user says "Alexa, open YouTube Player", or automatically at the next track transition. The Web UI shows a per-device seek bar with the playback position estimated from the last reported offset.
 
 ## License
 

@@ -38,7 +38,7 @@ async fn on_launch(state: &Arc<AppState>, device_id: &str, base_url: &str) -> Va
         && cmd.action == "play"
     {
         tracing::info!("Auto-playing queued track on {}", tail_chars(device_id, 8));
-        return play_directive(state, &cmd.track, device_id, 0, base_url).await;
+        return play_directive(state, &cmd.track, device_id, cmd.offset_ms, base_url).await;
     }
 
     state
@@ -59,7 +59,7 @@ async fn on_intent(state: &Arc<AppState>, body: &Value, device_id: &str, base_ur
     match intent {
         "PlayFromWebIntent" => {
             if let Some(cmd) = state.take_pending(device_id).await {
-                return play_directive(state, &cmd.track, device_id, 0, base_url).await;
+                return play_directive(state, &cmd.track, device_id, cmd.offset_ms, base_url).await;
             }
             speech(
                 "再生する曲がキューされていません。Web 画面で曲を選んでください。",
@@ -112,17 +112,20 @@ async fn on_audio_event(
     match event_type {
         "AudioPlayer.PlaybackStarted" => {
             tracing::info!("Playback started: {}", tail_chars(device_id, 8));
-            // エンキューされた曲が始まった場合に備え、token から現在の曲を反映する
-            let mut upd = DeviceUpdate::new().status("playing");
+            // エンキューされた曲が始まった場合に備え、token から現在の曲を反映する。
+            // 開始位置も反映する (シーク付き ENQUEUE では 0 以外から始まる)
+            let mut upd = DeviceUpdate::new().status("playing").position(offset);
             if let Some(track) = state.get_track(track_id).await {
                 upd = upd.track(track);
             }
             state.update_device(device_id, upd).await;
-            // 始まったのが Web からキューされた曲なら、pending は役目を終えたので消す
+            // 始まったのが Web からキューされた曲なら、pending は役目を終えたので消す。
+            // 開始位置も比較し、ディレクティブ発行から再生開始までの間に届いた
+            // 新しいシーク指示 (開始位置が異なる) を誤って消さないようにする
             if state
                 .peek_pending(device_id)
                 .await
-                .is_some_and(|cmd| cmd.track.id == track_id)
+                .is_some_and(|cmd| cmd.track.id == track_id && cmd.offset_ms == offset)
             {
                 state.clear_pending(device_id).await;
             }
@@ -138,20 +141,16 @@ async fn on_audio_event(
                 .await;
         }
         "AudioPlayer.PlaybackNearlyFinished" => {
-            // Web からキューされた曲を優先し、なければ再生モードに従って次の曲を決める。
             // pending はここでは消費しない (再生開始を確認した PlaybackStarted で消す)。
             // ENQUEUE が破棄されても曲を失わず、イベントが再送されても同じ結果になる
-            let next = match state.peek_pending(device_id).await {
-                Some(cmd) if cmd.action == "play" => Some(cmd.track),
-                _ => state.auto_next_track(track_id).await,
-            };
-            if let Some(track) = next {
+            let next = queued_or_auto_next(state, device_id, track_id, true).await;
+            if let Some((track, offset_ms)) = next {
                 tracing::info!(
                     "Enqueueing next track '{}' on {}",
                     track.title,
                     tail_chars(device_id, 8)
                 );
-                return play_response(state, &track, base_url, 0, Some(token));
+                return play_response(state, &track, base_url, offset_ms, Some(token));
             }
         }
         "AudioPlayer.PlaybackFailed" => {
@@ -173,12 +172,9 @@ async fn on_audio_event(
                 // 失敗が連鎖するため、ライブ以外に限る。pending (Web からの
                 // 明示的な指示) は一度だけ試す (失敗しても pending は残り、
                 // 次回は同一トラック除外で止まるため無限には繰り返さない)
-                let next = match state.peek_pending(device_id).await {
-                    Some(cmd) if cmd.action == "play" => Some(cmd.track),
-                    _ => state.auto_next_track(track_id).await.filter(|t| !t.is_live),
-                };
-                if let Some(next) = next.filter(|t| t.id != track_id) {
-                    return play_directive(state, &next, device_id, 0, base_url).await;
+                let next = queued_or_auto_next(state, device_id, track_id, false).await;
+                if let Some((next, offset_ms)) = next.filter(|(t, _)| t.id != track_id) {
+                    return play_directive(state, &next, device_id, offset_ms, base_url).await;
                 }
             } else {
                 tracing::error!("Playback failed on {}: {:?}", tail_chars(device_id, 8), err);
@@ -194,6 +190,26 @@ async fn on_audio_event(
 }
 
 // ── ヘルパー ──
+
+/// Web からキューされたコマンドを優先し、なければ再生モードに従って
+/// 次に再生する曲を (トラック, 開始位置ミリ秒) で返す。
+/// allow_live_auto が false のとき自動選曲からライブ配信を除外する
+/// (Web からの明示的な指示は除外しない)
+async fn queued_or_auto_next(
+    state: &Arc<AppState>,
+    device_id: &str,
+    current_id: &str,
+    allow_live_auto: bool,
+) -> Option<(AudioTrack, u64)> {
+    match state.peek_pending(device_id).await {
+        Some(cmd) if cmd.action == "play" => Some((cmd.track, cmd.offset_ms)),
+        _ => state
+            .auto_next_track(current_id)
+            .await
+            .filter(|t| allow_live_auto || !t.is_live)
+            .map(|t| (t, 0)),
+    }
+}
 
 /// Alexa 応答共通のエンベロープ ("version" / "response") を被せる
 fn alexa_response(response: Value) -> Value {

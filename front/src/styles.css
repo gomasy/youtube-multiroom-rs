@@ -291,6 +291,54 @@ body {
   margin-top: 2px;
 }
 
+/* ── Seek bar ── */
+.seek-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  cursor: default;
+}
+.seek-time {
+  font-size: 10px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+.seek-bar input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 2px;
+  /* --seek-pct (SeekBar が設定する再生済み割合) までを塗る */
+  background: linear-gradient(90deg, var(--accent) var(--seek-pct, 0%), var(--surface-3) var(--seek-pct, 0%));
+  outline: none;
+  cursor: pointer;
+  /* ドラッグ中のページスクロールを抑止する */
+  touch-action: none;
+}
+.seek-bar input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--text);
+  border: none;
+  transition: transform 0.1s;
+}
+.seek-bar input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.2); }
+.seek-bar input[type="range"]::-moz-range-track { background: transparent; }
+.seek-bar input[type="range"]::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--text);
+  border: none;
+}
+
 .delete-btn {
   background: none;
   border: none;

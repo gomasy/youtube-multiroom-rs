@@ -1,12 +1,6 @@
 import { ScrollingText } from "./ScrollingText";
+import { formatDuration } from "../format";
 import type { Track } from "../types";
-
-function formatDuration(seconds?: number): string {
-  if (!seconds) return "--:--";
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return `${m}:${s.toString().padStart(2, "0")}`;
-}
 
 interface Props {
   track: Track | null;

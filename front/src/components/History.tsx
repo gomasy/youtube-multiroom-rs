@@ -1,14 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { authFetch, fetchTracks, reorderTrack, PER_PAGE } from "../api";
 import { ScrollingText } from "./ScrollingText";
+import { formatDuration } from "../format";
 import type { Track, TracksPage } from "../types";
-
-function formatDuration(seconds?: number): string {
-  if (!seconds) return "--:--";
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return `${m}:${s.toString().padStart(2, "0")}`;
-}
 
 // 総件数から最終ページ番号 (1 始まり) を求める
 function lastPage(total: number): number {

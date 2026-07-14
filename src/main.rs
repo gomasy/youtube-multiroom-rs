@@ -40,6 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/devices/{device_id}", delete(handlers::delete_device))
         .route("/api/play", post(handlers::play_on_devices))
         .route("/api/play-all", post(handlers::play_on_all))
+        .route("/api/devices/{device_id}/seek", post(handlers::seek_device))
         .route("/api/devices/{device_id}/stop", post(handlers::stop_device))
         .route("/alexa", post(handlers::alexa_webhook))
         .route("/ws", get(handlers::ws_upgrade))

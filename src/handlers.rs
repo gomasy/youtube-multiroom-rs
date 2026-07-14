@@ -1,6 +1,7 @@
 use crate::alexa::handle_alexa;
 use crate::state::{
-    AUDIO_MIME, AppState, AudioTrack, DeviceUpdate, PlayRequest, ReorderRequest, stderr_snippet,
+    AUDIO_MIME, AppState, AudioTrack, DeviceUpdate, PlayRequest, ReorderRequest, SeekRequest,
+    stderr_snippet,
 };
 use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message, WebSocket};
@@ -354,7 +355,7 @@ async fn queue_on_devices(
     device_ids: Vec<String>,
 ) -> AppResult<Json<Value>> {
     for did in &device_ids {
-        state.queue_play(did, track.clone()).await;
+        state.queue_play(did, track.clone(), 0).await;
     }
 
     state.broadcast_devices().await;
@@ -363,6 +364,45 @@ async fn queue_on_devices(
         "status": "queued",
         "devices": device_ids,
         "message": "Say 'Alexa, open YouTube Player' on each Echo device"
+    })))
+}
+
+/// POST /api/devices/:id/seek
+///
+/// デバイスの現在トラックを指定位置から再生するコマンドをキューする。
+/// Alexa スキルはサーバーからディレクティブをプッシュできないため、
+/// Echo がスキルに接続したタイミング (音声起動または曲の切り替わり) で反映される
+pub async fn seek_device(
+    State(state): State<Arc<AppState>>,
+    Path(device_id): Path<String>,
+    Json(req): Json<SeekRequest>,
+) -> AppResult<Json<Value>> {
+    let dev = state
+        .get_device(&device_id)
+        .await
+        .ok_or_else(|| AppError::not_found("Device not found"))?;
+    let track = dev
+        .current_track
+        .ok_or_else(|| AppError::bad_request("Device has no track to seek"))?;
+    if track.is_live {
+        return Err(AppError::bad_request("Cannot seek a live stream"));
+    }
+    // 長さ不明 (メタデータ再取得失敗など) だと丸め先が定まらない。
+    // 黙って先頭へ丸めるのではなく拒否する
+    if track.duration == 0 {
+        return Err(AppError::bad_request("Track duration is unknown"));
+    }
+
+    // 終端ちょうどにキューすると再生が即終了するため 1 秒手前までに丸める
+    let max_ms = track.duration.saturating_mul(1000).saturating_sub(1000);
+    let position_ms = req.position_ms.min(max_ms);
+    state.queue_play(&device_id, track, position_ms).await;
+    state.broadcast_devices().await;
+
+    Ok(Json(json!({
+        "status": "queued",
+        "position_ms": position_ms,
+        "message": "Say 'Alexa, open YouTube Player' on the Echo device to apply"
     })))
 }
 

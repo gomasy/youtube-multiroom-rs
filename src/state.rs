@@ -115,6 +115,9 @@ pub struct DeviceState {
 pub struct PendingCommand {
     pub action: String,
     pub track: AudioTrack,
+    /// 再生開始位置 (ミリ秒)。Web からのシークで 0 以外になる
+    #[serde(default)]
+    pub offset_ms: u64,
 }
 
 // API リクエスト
@@ -122,6 +125,12 @@ pub struct PendingCommand {
 pub struct PlayRequest {
     pub track_id: String,
     pub device_ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct SeekRequest {
+    /// シーク先の再生位置 (ミリ秒、トラック終端手前に丸める)
+    pub position_ms: u64,
 }
 
 #[derive(Deserialize)]
@@ -645,6 +654,20 @@ impl AppState {
         let Some(mut dev) = self.get_device(device_id).await else {
             return;
         };
+        let now = now_f64();
+        // position_ms は「last_update 時点の位置」を意味する。位置を伴わない
+        // 更新 (rename など) で last_update だけが進むと、クライアントの
+        // 推定位置が巻き戻るため、再生中は経過時間ぶん位置も進めて整合を保つ
+        if upd.position_ms.is_none() && dev.status == "playing" {
+            let elapsed_ms = ((now - dev.last_update).max(0.0) * 1000.0) as u64;
+            let max_ms = dev
+                .current_track
+                .as_ref()
+                .map(|t| t.duration.saturating_mul(1000))
+                .filter(|&d| d > 0)
+                .unwrap_or(u64::MAX);
+            dev.position_ms = dev.position_ms.saturating_add(elapsed_ms).min(max_ms);
+        }
         if let Some(s) = upd.status {
             dev.status = s;
         }
@@ -657,7 +680,7 @@ impl AppState {
         if let Some(n) = upd.name {
             dev.name = n;
         }
-        dev.last_update = now_f64();
+        dev.last_update = now;
         self.write_device(&dev).await;
     }
 
@@ -731,10 +754,11 @@ impl AppState {
 
     // ── コマンドキュー ──
 
-    pub async fn queue_play(&self, device_id: &str, track: AudioTrack) {
+    pub async fn queue_play(&self, device_id: &str, track: AudioTrack, offset_ms: u64) {
         let cmd = PendingCommand {
             action: "play".to_string(),
             track: track.clone(),
+            offset_ms,
         };
         let Ok(json_str) = serde_json::to_string(&cmd) else {
             return;
@@ -748,8 +772,15 @@ impl AppState {
             tracing::warn!("Redis error queueing play for {device_id}: {e}");
             return;
         }
-        self.update_device(device_id, DeviceUpdate::new().status("queued").track(track))
-            .await;
+        // position もキューした開始位置に合わせる (Resume や Web の表示が参照する)
+        self.update_device(
+            device_id,
+            DeviceUpdate::new()
+                .status("queued")
+                .track(track)
+                .position(offset_ms),
+        )
+        .await;
     }
 
     /// キューされたコマンドを取り出す (GETDEL でアトミックに取得+削除、失効は Redis の TTL 任せ)
@@ -935,6 +966,14 @@ mod tests {
         let restored = AudioTrack::from_redis_json(&track.to_redis_json()).unwrap();
         assert!(restored.is_live);
         assert!(restored.file_path.is_empty());
+    }
+
+    #[test]
+    fn pending_command_without_offset_defaults_to_zero() {
+        // offset_ms 導入前にキューされた pending コマンドも読めること
+        let legacy = r#"{"action":"play","track":{"id":"dQw4w9WgXcQ","title":"t"}}"#;
+        let cmd: PendingCommand = serde_json::from_str(legacy).unwrap();
+        assert_eq!(cmd.offset_ms, 0);
     }
 
     #[test]

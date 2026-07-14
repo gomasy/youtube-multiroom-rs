@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { authFetch } from "../api";
 import { ScrollingText } from "./ScrollingText";
+import { SeekBar } from "./SeekBar";
 import type { Device, Track } from "../types";
 
 const STATUS_LABELS: Record<string, string> = {
@@ -56,6 +57,23 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
       });
       onDeviceDeleted(deviceId);
       showToast("デバイスを削除しました");
+    } catch (e) {
+      showToast(`エラー: ${(e as Error).message}`);
+    }
+  }
+
+  async function seekDevice(deviceId: string, positionMs: number) {
+    try {
+      const res = await authFetch(
+        `/api/devices/${encodeURIComponent(deviceId)}/seek`,
+        {
+          method: "POST",
+          body: JSON.stringify({ position_ms: positionMs }),
+        },
+        onUnauthorized,
+      );
+      if (!res.ok) throw new Error("シークに失敗しました");
+      showToast("シークをキューしました。「アレクサ、YouTube プレーヤーを開いて」で反映されます");
     } catch (e) {
       showToast(`エラー: ${(e as Error).message}`);
     }
@@ -135,6 +153,10 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
                       text={`♪ ${dev.current_track.title}`}
                     />
                   )}
+                  <SeekBar
+                    device={dev}
+                    onSeek={(pos) => seekDevice(dev.device_id, pos)}
+                  />
                 </div>
                 <button
                   className="delete-btn"
