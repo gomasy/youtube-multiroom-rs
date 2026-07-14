@@ -136,9 +136,10 @@ async fn on_audio_event(
                 .await;
         }
         "AudioPlayer.PlaybackStopped" => {
-            state
-                .update_device(device_id, DeviceUpdate::new().position(offset))
-                .await;
+            // Stop ディレクティブへの応答のほか、別コンテンツの再生開始など
+            // 外部要因で止まったときも届く。playing のまま放置すると
+            // クライアントの推定位置が進み続けるため paused へ落とす
+            state.pause_if_playing(device_id, offset).await;
         }
         "AudioPlayer.PlaybackNearlyFinished" => {
             // pending はここでは消費しない (再生開始を確認した PlaybackStarted で消す)。

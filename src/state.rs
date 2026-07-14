@@ -111,6 +111,47 @@ pub struct DeviceState {
     pub last_update: f64,
 }
 
+impl DeviceState {
+    /// 更新内容を適用し、last_update を now に進める。
+    /// デバイス状態の変更は必ずこのメソッドを通すこと — position_ms は
+    /// 「last_update 時点の位置」を意味するため、last_update だけを進めると
+    /// クライアントの推定位置が巻き戻る
+    fn apply(&mut self, upd: DeviceUpdate, now: f64) {
+        // 位置を伴わない更新 (rename など) では経過時間ぶん位置を進めて整合を保つ
+        if upd.position_ms.is_none() {
+            self.advance_position(now);
+        }
+        if let Some(s) = upd.status {
+            self.status = s;
+        }
+        if let Some(t) = upd.current_track {
+            self.current_track = Some(t);
+        }
+        if let Some(p) = upd.position_ms {
+            self.position_ms = p;
+        }
+        if let Some(n) = upd.name {
+            self.name = n;
+        }
+        self.last_update = now;
+    }
+
+    /// 再生中なら last_update からの経過時間ぶん位置を進める (トラック終端でクランプ)
+    fn advance_position(&mut self, now: f64) {
+        if self.status != "playing" {
+            return;
+        }
+        let elapsed_ms = ((now - self.last_update).max(0.0) * 1000.0) as u64;
+        let max_ms = self
+            .current_track
+            .as_ref()
+            .map(|t| t.duration.saturating_mul(1000))
+            .filter(|&d| d > 0)
+            .unwrap_or(u64::MAX);
+        self.position_ms = self.position_ms.saturating_add(elapsed_ms).min(max_ms);
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingCommand {
     pub action: String,
@@ -632,6 +673,7 @@ impl AppState {
     }
 
     pub async fn register_device(&self, device_id: &str, name: &str) -> DeviceState {
+        let now = now_f64();
         let mut dev = self
             .get_device(device_id)
             .await
@@ -642,10 +684,10 @@ impl AppState {
                 current_track: None,
                 position_ms: 0,
                 connected: true,
-                last_update: now_f64(),
+                last_update: now,
             });
         dev.connected = true;
-        dev.last_update = now_f64();
+        dev.apply(DeviceUpdate::new(), now);
         self.write_device(&dev).await;
         dev
     }
@@ -654,33 +696,21 @@ impl AppState {
         let Some(mut dev) = self.get_device(device_id).await else {
             return;
         };
-        let now = now_f64();
-        // position_ms は「last_update 時点の位置」を意味する。位置を伴わない
-        // 更新 (rename など) で last_update だけが進むと、クライアントの
-        // 推定位置が巻き戻るため、再生中は経過時間ぶん位置も進めて整合を保つ
-        if upd.position_ms.is_none() && dev.status == "playing" {
-            let elapsed_ms = ((now - dev.last_update).max(0.0) * 1000.0) as u64;
-            let max_ms = dev
-                .current_track
-                .as_ref()
-                .map(|t| t.duration.saturating_mul(1000))
-                .filter(|&d| d > 0)
-                .unwrap_or(u64::MAX);
-            dev.position_ms = dev.position_ms.saturating_add(elapsed_ms).min(max_ms);
+        dev.apply(upd, now_f64());
+        self.write_device(&dev).await;
+    }
+
+    /// 再生停止の実測位置を記録し、playing のままなら paused へ落とす。
+    /// Pause/Stop インテントが先に設定した paused/stopped は上書きしない
+    pub async fn pause_if_playing(&self, device_id: &str, offset_ms: u64) {
+        let Some(mut dev) = self.get_device(device_id).await else {
+            return;
+        };
+        let mut upd = DeviceUpdate::new().position(offset_ms);
+        if dev.status == "playing" {
+            upd = upd.status("paused");
         }
-        if let Some(s) = upd.status {
-            dev.status = s;
-        }
-        if let Some(t) = upd.current_track {
-            dev.current_track = Some(t);
-        }
-        if let Some(p) = upd.position_ms {
-            dev.position_ms = p;
-        }
-        if let Some(n) = upd.name {
-            dev.name = n;
-        }
-        dev.last_update = now;
+        dev.apply(upd, now_f64());
         self.write_device(&dev).await;
     }
 
@@ -974,6 +1004,61 @@ mod tests {
         let legacy = r#"{"action":"play","track":{"id":"dQw4w9WgXcQ","title":"t"}}"#;
         let cmd: PendingCommand = serde_json::from_str(legacy).unwrap();
         assert_eq!(cmd.offset_ms, 0);
+    }
+
+    /// 長さ 10 秒のトラックを位置 5 秒・last_update 100.0 で再生中のデバイス
+    fn playing_device() -> DeviceState {
+        DeviceState {
+            device_id: "d".into(),
+            name: "n".into(),
+            status: "playing".into(),
+            current_track: Some(AudioTrack {
+                id: "dQw4w9WgXcQ".into(),
+                title: "t".into(),
+                thumbnail: String::new(),
+                duration: 10,
+                channel: String::new(),
+                is_live: false,
+                created_at: 0.0,
+                file_path: String::new(),
+            }),
+            position_ms: 5_000,
+            connected: true,
+            last_update: 100.0,
+        }
+    }
+
+    #[test]
+    fn advance_position_only_moves_while_playing_and_clamps_to_duration() {
+        let mut dev = playing_device();
+        dev.advance_position(102.0);
+        assert_eq!(dev.position_ms, 7_000);
+
+        // トラック終端でクランプ
+        dev.last_update = 102.0;
+        dev.advance_position(200.0);
+        assert_eq!(dev.position_ms, 10_000);
+
+        // 再生中以外は進めない
+        dev.status = "paused".into();
+        dev.position_ms = 1_000;
+        dev.advance_position(300.0);
+        assert_eq!(dev.position_ms, 1_000);
+    }
+
+    #[test]
+    fn apply_keeps_position_consistent_with_last_update() {
+        // 位置を伴わない更新でも推定位置 (position_ms + 経過時間) が巻き戻らない
+        let mut dev = playing_device();
+        dev.apply(DeviceUpdate::new(), 102.0);
+        assert_eq!(dev.position_ms, 7_000);
+        assert_eq!(dev.last_update, 102.0);
+
+        // 明示的な位置指定はそのまま採用される
+        let mut dev = playing_device();
+        dev.apply(DeviceUpdate::new().position(1_000), 102.0);
+        assert_eq!(dev.position_ms, 1_000);
+        assert_eq!(dev.last_update, 102.0);
     }
 
     #[test]
