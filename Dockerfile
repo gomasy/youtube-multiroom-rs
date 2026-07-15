@@ -40,7 +40,7 @@ RUN ./configure \
     && make -j"$(nproc)" \
     && make install
 
-FROM rust:1.97-alpine AS backend
+FROM rust:1-alpine AS backend
 # openssl クレート (Alexa 署名検証) のビルドに必要
 RUN apk add --no-cache musl-dev pkgconf openssl-dev
 # 動的リンクにして実行ステージの libssl を共有する (crt-static だと libssl とリンクできない)
