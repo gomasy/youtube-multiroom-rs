@@ -23,16 +23,18 @@ export function SeekBar({ device, onSeek }: Props) {
   const [dragValue, setDragValue] = useState<number | null>(null);
   const [, setTick] = useState(0);
 
-  // 再生中は 1 秒ごとに再描画して推定位置を進める
-  useEffect(() => {
-    if (device.status !== "playing") return;
-    const id = setInterval(() => setTick((t) => t + 1), 1000);
-    return () => clearInterval(id);
-  }, [device.status]);
-
   const track = device.current_track;
   const durationMs = (track?.duration ?? 0) * 1000;
-  if (!track || track.is_live || durationMs <= 0) return null;
+  const seekable = !!track && !track.is_live && durationMs > 0;
+
+  // 再生中は 1 秒ごとに再描画して推定位置を進める
+  useEffect(() => {
+    if (device.status !== "playing" || !seekable) return;
+    const id = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [device.status, seekable]);
+
+  if (!seekable) return null;
 
   const position = dragValue ?? estimatePosition(device, durationMs);
   const pct = (position / durationMs) * 100;
