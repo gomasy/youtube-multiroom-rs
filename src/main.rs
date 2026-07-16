@@ -26,9 +26,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let auth_enabled = api_token.is_some();
     let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| die("REDIS_URL must be set"));
     let listen_addr = std::env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8888".to_string());
-    let addr: SocketAddr = listen_addr
-        .parse()
-        .unwrap_or_else(|_| die(format!("LISTEN_ADDR is not a valid socket address: {listen_addr}")));
+    let addr: SocketAddr = listen_addr.parse().unwrap_or_else(|_| {
+        die(format!(
+            "LISTEN_ADDR is not a valid socket address: {listen_addr}"
+        ))
+    });
 
     let state = AppState::new(api_token, &redis_url)
         .await
@@ -37,6 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/api/audio/{audio_id}/stream", get(handlers::stream_audio))
         .route("/api/audio/{audio_id}/live", get(handlers::live_audio))
+        .route("/api/search", get(handlers::search_youtube))
         .route("/api/tracks", get(handlers::list_tracks))
         .route("/api/tracks/reorder", post(handlers::reorder_track))
         .route("/api/tracks/{track_id}", delete(handlers::delete_track))
@@ -44,6 +47,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/devices/{device_id}", delete(handlers::delete_device))
         .route("/api/play", post(handlers::play_on_devices))
         .route("/api/play-all", post(handlers::play_on_all))
+        .route("/api/queue", post(handlers::queue_next))
+        .route(
+            "/api/devices/{device_id}/queue",
+            delete(handlers::clear_queue),
+        )
+        .route(
+            "/api/devices/{device_id}/queue/{entry}",
+            delete(handlers::remove_queue_item),
+        )
         .route("/api/devices/{device_id}/seek", post(handlers::seek_device))
         .route("/api/devices/{device_id}/stop", post(handlers::stop_device))
         .route("/alexa", post(handlers::alexa_webhook))

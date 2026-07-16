@@ -1,4 +1,4 @@
-use crate::state::{AppState, AudioTrack, DeviceUpdate};
+use crate::state::{AppState, AudioTrack, DeviceUpdate, new_token, token_track_id};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -33,22 +33,60 @@ pub async fn handle_alexa(state: &Arc<AppState>, body: Value, base_url: &str) ->
 // ── Launch ──
 
 async fn on_launch(state: &Arc<AppState>, device_id: &str, base_url: &str) -> Value {
-    // 保留中コマンドがあれば即再生
-    if let Some(cmd) = state.take_pending(device_id).await
-        && cmd.action == "play"
-    {
-        tracing::info!("Auto-playing queued track on {}", tail_chars(device_id, 8));
-        return play_directive(state, &cmd.track, device_id, cmd.offset_ms, base_url).await;
+    // 保留中コマンドか「次に再生」キューがあれば即再生
+    if let Some(resp) = start_pending_or_queue(state, device_id, base_url).await {
+        return resp;
     }
 
-    state
-        .update_device(device_id, DeviceUpdate::new().status("idle"))
-        .await;
+    // 起動セッションで再生は中断されるため、playing のままにせず推定位置で
+    // paused へ落とす (Resume で続きから再生できる)。一時停止中もそのまま
+    // 維持し、それ以外は待機へ戻す
+    if let Some(dev) = state.get_device(device_id).await {
+        let status = if dev.playback_in_progress() {
+            "paused"
+        } else {
+            "idle"
+        };
+        state
+            .update_device(device_id, DeviceUpdate::new().status(status))
+            .await;
+    }
 
     speech(
         "YouTube マルチルームに接続しました。Web 画面から操作できます。",
         false,
     )
+}
+
+/// pending コマンド、なければ「次に再生」キューの先頭から再生を開始する。
+/// どちらも無ければ None。キューからの開始は何も再生していないときに限る
+/// (シーク反映などの起動で再生中・一時停止中の曲を破棄しないため)。
+/// キューエントリはそのまま token に使い、消費は再生開始を確認した
+/// PlaybackStarted が値一致で行う
+async fn start_pending_or_queue(
+    state: &Arc<AppState>,
+    device_id: &str,
+    base_url: &str,
+) -> Option<Value> {
+    if let Some(cmd) = state.take_pending(device_id).await
+        && cmd.action == "play"
+    {
+        tracing::info!("Auto-playing queued track on {}", tail_chars(device_id, 8));
+        let token = new_token(&cmd.track.id);
+        return Some(
+            play_directive(state, &cmd.track, device_id, cmd.offset_ms, base_url, token).await,
+        );
+    }
+
+    let in_progress = state
+        .get_device(device_id)
+        .await
+        .is_some_and(|d| d.playback_in_progress());
+    if !in_progress && let Some((entry, track)) = state.peek_queue(device_id).await {
+        tracing::info!("Starting next-up track on {}", tail_chars(device_id, 8));
+        return Some(play_directive(state, &track, device_id, 0, base_url, entry).await);
+    }
+    None
 }
 
 // ── Intents ──
@@ -58,8 +96,8 @@ async fn on_intent(state: &Arc<AppState>, body: &Value, device_id: &str, base_ur
 
     match intent {
         "PlayFromWebIntent" => {
-            if let Some(cmd) = state.take_pending(device_id).await {
-                return play_directive(state, &cmd.track, device_id, cmd.offset_ms, base_url).await;
+            if let Some(resp) = start_pending_or_queue(state, device_id, base_url).await {
+                return resp;
             }
             speech(
                 "再生する曲がキューされていません。Web 画面で曲を選んでください。",
@@ -77,7 +115,9 @@ async fn on_intent(state: &Arc<AppState>, body: &Value, device_id: &str, base_ur
             if let Some(dev) = state.get_device(device_id).await
                 && let Some(track) = dev.current_track
             {
-                return play_directive(state, &track, device_id, dev.position_ms, base_url).await;
+                let token = new_token(&track.id);
+                return play_directive(state, &track, device_id, dev.position_ms, base_url, token)
+                    .await;
             }
             speech("再生する曲がありません。", true)
         }
@@ -129,6 +169,12 @@ async fn on_audio_event(
             {
                 state.clear_pending(device_id).await;
             }
+            // 「次に再生」キューから始まった曲なら token がエントリとして
+            // 残っているので値一致で取り除く (pending や自動選曲の token は
+            // キューに存在しないため何も起きない)。ここまで消費を遅らせる
+            // ことで、ENQUEUE が破棄されても曲を失わず、イベントが再送
+            // されても二重に消費しない
+            state.remove_queue_entry(device_id, token).await;
         }
         "AudioPlayer.PlaybackFinished" => {
             state
@@ -144,18 +190,22 @@ async fn on_audio_event(
         "AudioPlayer.PlaybackNearlyFinished" => {
             // pending はここでは消費しない (再生開始を確認した PlaybackStarted で消す)。
             // ENQUEUE が破棄されても曲を失わず、イベントが再送されても同じ結果になる
-            let next = queued_or_auto_next(state, device_id, track_id, true).await;
-            if let Some((track, offset_ms)) = next {
+            let next = queued_or_auto_next(state, device_id, token, true).await;
+            if let Some((track, offset_ms, next_token)) = next {
                 tracing::info!(
                     "Enqueueing next track '{}' on {}",
                     track.title,
                     tail_chars(device_id, 8)
                 );
-                return play_response(state, &track, base_url, offset_ms, Some(token));
+                return play_response(state, &track, base_url, offset_ms, Some(token), next_token);
             }
         }
         "AudioPlayer.PlaybackFailed" => {
             let err = &body["request"]["error"];
+            // 失敗した再生が「次に再生」キュー由来ならエントリを消費し、
+            // 再生できない項目 (終了済みライブなど) がキュー先頭に残り続けて
+            // 後続の曲を塞がないようにする
+            state.remove_queue_entry(device_id, token).await;
             // ライブ配信は終了すると CDN の URL が解決できなくなり、Echo の
             // 再接続が失敗して PlaybackFailed が届く。これは正常な終わり方
             // なのでエラー扱いせず、通常の再生終了と同様に次の曲へ進める
@@ -173,9 +223,13 @@ async fn on_audio_event(
                 // 失敗が連鎖するため、ライブ以外に限る。pending (Web からの
                 // 明示的な指示) は一度だけ試す (失敗しても pending は残り、
                 // 次回は同一トラック除外で止まるため無限には繰り返さない)
-                let next = queued_or_auto_next(state, device_id, track_id, false).await;
-                if let Some((next, offset_ms)) = next.filter(|(t, _)| t.id != track_id) {
-                    return play_directive(state, &next, device_id, offset_ms, base_url).await;
+                let next = queued_or_auto_next(state, device_id, token, false).await;
+                if let Some((next, offset_ms, next_token)) = next.filter(|(t, ..)| t.id != track_id)
+                {
+                    return play_directive(
+                        state, &next, device_id, offset_ms, base_url, next_token,
+                    )
+                    .await;
                 }
             } else {
                 tracing::error!("Playback failed on {}: {:?}", tail_chars(device_id, 8), err);
@@ -192,24 +246,45 @@ async fn on_audio_event(
 
 // ── ヘルパー ──
 
-/// Web からキューされたコマンドを優先し、なければ再生モードに従って
-/// 次に再生する曲を (トラック, 開始位置ミリ秒) で返す。
+/// pending コマンド → 「次に再生」キュー → 再生モードの優先順で、
+/// 次に再生する曲を (トラック, 開始位置ミリ秒, AudioPlayer token) で返す。
+/// キュー由来の再生はエントリ自体を token に使い、PlaybackStarted /
+/// PlaybackFailed が値一致でエントリを消費できるようにする。
 /// allow_live_auto が false のとき自動選曲からライブ配信を除外する
-/// (Web からの明示的な指示は除外しない)
+/// (pending とキューは Web からの明示的な指示なので除外しない)
 async fn queued_or_auto_next(
     state: &Arc<AppState>,
     device_id: &str,
-    current_id: &str,
+    current_token: &str,
     allow_live_auto: bool,
-) -> Option<(AudioTrack, u64)> {
-    match state.peek_pending(device_id).await {
-        Some(cmd) if cmd.action == "play" => Some((cmd.track, cmd.offset_ms)),
-        _ => state
-            .auto_next_track(current_id)
-            .await
-            .filter(|t| allow_live_auto || !t.is_live)
-            .map(|t| (t, 0)),
+) -> Option<(AudioTrack, u64, String)> {
+    if let Some(cmd) = state.peek_pending(device_id).await
+        && cmd.action == "play"
+    {
+        let token = new_token(&cmd.track.id);
+        return Some((cmd.track, cmd.offset_ms, token));
     }
+
+    // 再生中の曲のエントリが先頭に残っていたら (PlaybackStarted での消費が
+    // Redis エラーで漏れた場合)、ここで取り除いてから次を見る
+    while let Some((entry, track)) = state.peek_queue(device_id).await {
+        if entry == current_token {
+            if !state.remove_queue_entry(device_id, &entry).await {
+                return None;
+            }
+            continue;
+        }
+        return Some((track, 0, entry));
+    }
+
+    state
+        .auto_next_track(token_track_id(current_token))
+        .await
+        .filter(|t| allow_live_auto || !t.is_live)
+        .map(|t| {
+            let token = new_token(&t.id);
+            (t, 0, token)
+        })
 }
 
 /// Alexa 応答共通のエンベロープ ("version" / "response") を被せる
@@ -234,6 +309,7 @@ async fn play_directive(
     device_id: &str,
     offset_ms: u64,
     base_url: &str,
+    token: String,
 ) -> Value {
     state
         .update_device(
@@ -245,11 +321,12 @@ async fn play_directive(
         )
         .await;
 
-    play_response(state, track, base_url, offset_ms, None)
+    play_response(state, track, base_url, offset_ms, None, token)
 }
 
 /// AudioPlayer.Play レスポンスを組み立てる。
 /// enqueue_after (直前の token) を渡すと ENQUEUE、なければ REPLACE_ALL。
+/// token はこの再生を識別する値 (キュー由来ならキューエントリそのもの)。
 /// エンキュー時のデバイス状態は更新しない (再生が始まると PlaybackStarted で反映される)
 fn play_response(
     state: &Arc<AppState>,
@@ -257,6 +334,7 @@ fn play_response(
     base_url: &str,
     offset_ms: u64,
     enqueue_after: Option<&str>,
+    token: String,
 ) -> Value {
     // Echo は認証ヘッダを付けられないため、署名付き URL でストリームを認証する。
     // ライブ配信はファイルがないため、CDN の音声を中継する /live を使う
@@ -269,7 +347,7 @@ fn play_response(
 
     let mut stream = json!({
         "url": stream_url,
-        "token": new_token(&track.id),
+        "token": token,
         "offsetInMilliseconds": offset_ms
     });
     let play_behavior = if let Some(prev) = enqueue_after {
@@ -297,18 +375,6 @@ fn play_response(
         }],
         "shouldEndSession": true
     }))
-}
-
-/// token は "{track_id}#{発行時刻ミリ秒}" 形式。
-/// Alexa は直前と同じ token の ENQUEUE を無視するため (1 曲ループ対策)、再生ごとに一意化する
-fn new_token(track_id: &str) -> String {
-    let millis = (crate::state::now_f64() * 1000.0) as u64;
-    format!("{track_id}#{millis}")
-}
-
-/// token からトラック ID 部分を取り出す (YouTube の ID に '#' は含まれない)
-fn token_track_id(token: &str) -> &str {
-    token.split('#').next().unwrap_or(token)
 }
 
 fn tail_chars(s: &str, n: usize) -> &str {

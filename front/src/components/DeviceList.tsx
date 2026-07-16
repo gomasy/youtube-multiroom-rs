@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { authFetch } from "../api";
+import { authFetch, playTracks, queueNext, removeQueueItem, clearQueue } from "../api";
 import { ScrollingText } from "./ScrollingText";
 import { SeekBar } from "./SeekBar";
 import type { Device, Track } from "../types";
@@ -24,6 +24,7 @@ interface Props {
 export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthorized, showToast }: Props) {
   const [selectedDevices, setSelectedDevices] = useState<Set<string>>(new Set());
   const [playing, setPlaying] = useState(false);
+  const [queueing, setQueueing] = useState(false);
   const entries = Object.values(devices);
 
   function toggleDevice(deviceId: string) {
@@ -79,36 +80,42 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
     }
   }
 
-  async function playOnSelected() {
+  // 選択デバイスへの操作 (再生 / 次に再生) の検証・busy 管理・結果トーストを共通化する
+  async function sendToSelected(
+    call: (
+      trackId: string,
+      deviceIds: string[],
+      onUnauthorized?: () => void,
+    ) => Promise<{ message?: string }>,
+    setBusy: (busy: boolean) => void,
+    fallbackMsg: string,
+  ) {
     if (!currentTrack) {
       showToast("先にトラックを取得してください");
       return;
     }
     if (selectedDevices.size === 0) {
-      showToast("再生するデバイスを選択してください");
+      showToast("デバイスを選択してください");
       return;
     }
 
-    setPlaying(true);
+    setBusy(true);
     try {
-      const res = await authFetch(
-        "/api/play",
-        {
-          method: "POST",
-          body: JSON.stringify({
-            track_id: currentTrack.id,
-            device_ids: Array.from(selectedDevices),
-          }),
-        },
-        onUnauthorized,
-      );
-      const data = await res.json();
-      showToast(data.message || "再生をキューしました");
+      const data = await call(currentTrack.id, Array.from(selectedDevices), onUnauthorized);
+      showToast(data.message || fallbackMsg);
     } catch (e) {
       showToast(`エラー: ${(e as Error).message}`);
     } finally {
-      setPlaying(false);
+      setBusy(false);
     }
+  }
+
+  const playOnSelected = () => sendToSelected(playTracks, setPlaying, "再生をキューしました");
+  const queueOnSelected = () => sendToSelected(queueNext, setQueueing, "次に再生に追加しました");
+
+  // 成功時の表示更新はサーバーが配る device_update に任せ、失敗だけ通知する
+  function catchToast(action: Promise<unknown>) {
+    action.catch((e) => showToast(`エラー: ${(e as Error).message}`));
   }
 
   const canPlay = !!currentTrack && selectedDevices.size > 0;
@@ -157,6 +164,36 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
                     device={dev}
                     onSeek={(pos) => seekDevice(dev.device_id, pos)}
                   />
+                  {dev.queue && dev.queue.length > 0 && (
+                    <div className="device-queue" onClick={(e) => e.stopPropagation()}>
+                      <div className="device-queue-header">
+                        <span>次に再生 ({dev.queue.length})</span>
+                        <button
+                          className="text-btn text-btn-danger"
+                          onClick={() => catchToast(clearQueue(dev.device_id, onUnauthorized))}
+                        >
+                          クリア
+                        </button>
+                      </div>
+                      {dev.queue.map((t, i) => (
+                        <div key={t.entry} className="device-queue-item">
+                          <span className="queue-item-index">{i + 1}</span>
+                          <span className="queue-item-title">{t.title}</span>
+                          <button
+                            className="delete-btn"
+                            title="キューから削除"
+                            onClick={() =>
+                              catchToast(removeQueueItem(dev.device_id, t.entry, onUnauthorized))
+                            }
+                          >
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M6 6l12 12M18 6L6 18" />
+                            </svg>
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <button
                   className="delete-btn"
@@ -177,6 +214,13 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
         <div className="controls">
           <button className="btn" onClick={playOnSelected} disabled={!canPlay || playing}>
             {playing ? <><span className="spinner" />キュー中</> : "▶ 選択デバイスで再生"}
+          </button>
+          <button
+            className="btn btn-outline"
+            onClick={queueOnSelected}
+            disabled={!canPlay || queueing}
+          >
+            {queueing ? <><span className="spinner" />追加中</> : "次に再生に追加"}
           </button>
           <button className="btn btn-outline btn-sm" onClick={selectAll}>
             全選択

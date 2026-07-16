@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { authFetch, fetchTracks, reorderTrack, PER_PAGE } from "../api";
-import { ScrollingText } from "./ScrollingText";
-import { formatDuration } from "../format";
+import { TrackRowInfo } from "./TrackRowInfo";
 import type { Track, TracksPage } from "../types";
 
 // 総件数から最終ページ番号 (1 始まり) を求める
@@ -245,24 +244,7 @@ export function History({ active, initialData, refreshKey, currentTrack, onSelec
                   </svg>
                 </span>
               )}
-              {t.thumbnail && (
-                <img
-                  className="history-thumb"
-                  src={t.thumbnail}
-                  alt=""
-                  draggable={false}
-                  onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
-                />
-              )}
-              <div className="history-info">
-                <ScrollingText className="history-title" text={t.title} />
-                <div className="history-meta">
-                  {t.channel ? `${t.channel} · ` : ""}
-                  {t.is_live
-                    ? <span className="live-badge">LIVE</span>
-                    : formatDuration(t.duration)}
-                </div>
-              </div>
+              <TrackRowInfo track={t} />
               <button
                 className="delete-btn"
                 title="トラックを削除"

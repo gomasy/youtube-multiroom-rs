@@ -1,4 +1,4 @@
-import type { TracksPage } from "./types";
+import type { Track, TracksPage } from "./types";
 
 export const PER_PAGE = 10;
 
@@ -63,6 +63,83 @@ export async function reorderTrack(
     onUnauthorized,
   );
   if (!res.ok) throw new Error("並べ替えに失敗しました");
+}
+
+// yt-dlp の ytsearch で YouTube を検索し、Track 互換の結果一覧を返す
+export async function searchYouTube(
+  query: string,
+  onUnauthorized?: () => void,
+): Promise<Track[]> {
+  const res = await authFetch(
+    `/api/search?q=${encodeURIComponent(query)}`,
+    {},
+    onUnauthorized,
+  );
+  if (!res.ok) throw new Error("検索に失敗しました");
+  const data = await res.json();
+  return data.results ?? [];
+}
+
+// トラックを選択デバイスで即時再生するようキューする
+export async function playTracks(
+  trackId: string,
+  deviceIds: string[],
+  onUnauthorized?: () => void,
+): Promise<{ message?: string }> {
+  const res = await authFetch(
+    "/api/play",
+    {
+      method: "POST",
+      body: JSON.stringify({ track_id: trackId, device_ids: deviceIds }),
+    },
+    onUnauthorized,
+  );
+  if (!res.ok) throw new Error("再生のキューに失敗しました");
+  return res.json();
+}
+
+// トラックを選択デバイスの「次に再生」キュー末尾へ追加する
+export async function queueNext(
+  trackId: string,
+  deviceIds: string[],
+  onUnauthorized?: () => void,
+): Promise<{ message?: string }> {
+  const res = await authFetch(
+    "/api/queue",
+    {
+      method: "POST",
+      body: JSON.stringify({ track_id: trackId, device_ids: deviceIds }),
+    },
+    onUnauthorized,
+  );
+  if (!res.ok) throw new Error("キューへの追加に失敗しました");
+  return res.json();
+}
+
+// キュー項目を一意なエントリ値の指定で 1 件削除する
+export async function removeQueueItem(
+  deviceId: string,
+  entry: string,
+  onUnauthorized?: () => void,
+): Promise<void> {
+  const res = await authFetch(
+    `/api/devices/${encodeURIComponent(deviceId)}/queue/${encodeURIComponent(entry)}`,
+    { method: "DELETE" },
+    onUnauthorized,
+  );
+  if (!res.ok) throw new Error("キューからの削除に失敗しました");
+}
+
+export async function clearQueue(
+  deviceId: string,
+  onUnauthorized?: () => void,
+): Promise<void> {
+  const res = await authFetch(
+    `/api/devices/${encodeURIComponent(deviceId)}/queue`,
+    { method: "DELETE" },
+    onUnauthorized,
+  );
+  if (!res.ok) throw new Error("キューのクリアに失敗しました");
 }
 
 // 認証確認を兼ねてトラック一覧の先頭ページを取得する。

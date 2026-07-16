@@ -23,6 +23,11 @@ const PLAYBACK_MODES: [&str; 3] = ["loop", "shuffle", "off"];
 const DEFAULT_PLAYBACK_MODE: &str = "off";
 /// pending コマンドのキー接頭辞 (デバイスごとに youtube:pending:{device_id})
 const REDIS_PENDING_PREFIX: &str = "youtube:pending";
+/// 「次に再生」キューのキー接頭辞 (デバイスごとに youtube:queue:{device_id})。
+/// 各要素は new_token 形式 "{track_id}#{millis}" の一意なエントリで、先頭が
+/// 次に再生される。エントリは AudioPlayer の token としてそのまま使われるため、
+/// 再生イベントの token と値一致で照合・消費できる
+const REDIS_QUEUE_PREFIX: &str = "youtube:queue";
 
 /// キューされた再生コマンドの有効期限 (秒) — Redis のキー TTL で失効する
 const PENDING_TTL_SECS: u64 = 600;
@@ -30,8 +35,9 @@ const PENDING_TTL_SECS: u64 = 600;
 /// YouTube 動画 ID の形式 (11 文字)
 const VIDEO_ID_PATTERN: &str = "[a-zA-Z0-9_-]{11}";
 
-/// audio_cache 復元時のメタデータ再取得 1 件あたりの制限時間 (秒)
-const REFETCH_TIMEOUT_SECS: u64 = 60;
+/// メタデータ取得 1 件あたりの制限時間 (秒)。yt-dlp が固まると
+/// 抽出やキャッシュ復元が止まったままになるため時間を区切る
+const METADATA_TIMEOUT_SECS: u64 = 30;
 
 /// キャッシュする音声フォーマットの拡張子。AUDIO_MIME と対で保つこと
 const AUDIO_EXT: &str = "m4a";
@@ -40,6 +46,24 @@ pub const AUDIO_MIME: &str = "audio/mp4";
 
 fn pending_key(device_id: &str) -> String {
     format!("{REDIS_PENDING_PREFIX}:{device_id}")
+}
+
+fn queue_key(device_id: &str) -> String {
+    format!("{REDIS_QUEUE_PREFIX}:{device_id}")
+}
+
+/// AudioPlayer token 兼キューエントリ "{track_id}#{発行時刻ミリ秒}" を生成する。
+/// Alexa は直前と同じ token の ENQUEUE を無視するため (1 曲ループ対策)、
+/// 再生ごとに一意化する
+pub fn new_token(track_id: &str) -> String {
+    let millis = (now_f64() * 1000.0) as u64;
+    format!("{track_id}#{millis}")
+}
+
+/// token / キューエントリからトラック ID 部分を取り出す
+/// (YouTube の ID に '#' は含まれない)
+pub fn token_track_id(token: &str) -> &str {
+    token.split('#').next().unwrap_or(token)
 }
 
 // ════════════════════════════════════════
@@ -136,6 +160,12 @@ impl DeviceState {
         self.last_update = now;
     }
 
+    /// 再生が進行中 (再生中または一時停止中) かどうか。
+    /// 起動時に「次に再生」キューを自動開始してよいかの判定などに使う
+    pub fn playback_in_progress(&self) -> bool {
+        matches!(self.status.as_str(), "playing" | "paused")
+    }
+
     /// 再生中なら last_update からの経過時間ぶん位置を進める (トラック終端でクランプ)
     fn advance_position(&mut self, now: f64) {
         if self.status != "playing" {
@@ -150,6 +180,24 @@ impl DeviceState {
             .unwrap_or(u64::MAX);
         self.position_ms = self.position_ms.saturating_add(elapsed_ms).min(max_ms);
     }
+}
+
+/// 「次に再生」キューの 1 項目 (API レスポンス用)
+#[derive(Serialize)]
+pub struct QueueItem {
+    /// キュー内で一意なエントリ ("{track_id}#{millis}")。削除時の指定に使う
+    pub entry: String,
+    #[serde(flatten)]
+    pub track: AudioTrack,
+}
+
+/// devices_json のワイヤ形式: デバイス状態に「次に再生」キューを添えたもの。
+/// DeviceState 自体に持たせると write_device が Redis へ保存してしまうため分ける
+#[derive(Serialize)]
+struct DeviceJson {
+    #[serde(flatten)]
+    device: DeviceState,
+    queue: Vec<QueueItem>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -371,9 +419,16 @@ impl AppState {
     }
 
     pub async fn get_track(&self, id: &str) -> Option<AudioTrack> {
+        self.try_get_track(id).await.ok().flatten()
+    }
+
+    /// トラックを取得する。Redis エラー (Err) と未登録 (Ok(None)) を区別して
+    /// 返すため、「見つからないなら消してよい」判断が必要な呼び出し元は
+    /// こちらを使うこと。パース不能なエントリは未登録扱い
+    async fn try_get_track(&self, id: &str) -> redis::RedisResult<Option<AudioTrack>> {
         let mut conn = self.redis.clone();
-        let json_str: String = conn.hget(REDIS_KEY_TRACKS, id).await.ok()?;
-        AudioTrack::from_redis_json(&json_str)
+        let json_str: Option<String> = conn.hget(REDIS_KEY_TRACKS, id).await?;
+        Ok(json_str.and_then(|s| AudioTrack::from_redis_json(&s)))
     }
 
     pub async fn remove_track(&self, id: &str) -> Option<AudioTrack> {
@@ -425,6 +480,12 @@ impl AppState {
         }
 
         for mut dev in self.all_devices().await.into_values() {
+            // 削除トラックを各デバイスの「次に再生」キューからも取り除く
+            let key = queue_key(&dev.device_id);
+            let entries: Vec<String> = conn.lrange(&key, 0, -1).await.unwrap_or_default();
+            for entry in entries.iter().filter(|e| token_track_id(e) == id) {
+                let _: Result<(), _> = conn.lrem(&key, 0, entry).await;
+            }
             if dev.current_track.as_ref().is_some_and(|t| t.id == id) {
                 dev.current_track = None;
                 dev.status = "idle".to_string();
@@ -548,20 +609,10 @@ impl AppState {
     /// 場合もファイル自体は再生できるため、ID をタイトルにした最小情報で返す
     async fn refetch_track_metadata(&self, video_id: &str, path: &Path) -> AudioTrack {
         let url = format!("https://www.youtube.com/watch?v={video_id}");
-        // yt-dlp が固まると復元全体が止まったままになるため時間を区切る
-        let meta = match time::timeout(
-            time::Duration::from_secs(REFETCH_TIMEOUT_SECS),
-            fetch_metadata(&url),
-        )
-        .await
-        {
-            Ok(Ok(meta)) => meta,
-            Ok(Err(e)) => {
+        let meta = match fetch_metadata(&url).await {
+            Ok(meta) => meta,
+            Err(e) => {
                 tracing::warn!("Metadata refetch failed for {video_id}: {e}");
-                Value::Null
-            }
-            Err(_) => {
-                tracing::warn!("Metadata refetch timed out for {video_id}");
                 Value::Null
             }
         };
@@ -719,11 +770,71 @@ impl AppState {
         let mut conn = self.redis.clone();
         let _: Result<(), _> = conn.hdel(REDIS_KEY_DEVICES, device_id).await;
         let _: Result<(), _> = conn.del(pending_key(device_id)).await;
+        let _: Result<(), _> = conn.del(queue_key(device_id)).await;
         Some(device)
     }
 
+    /// デバイス状態に「次に再生」キューの内容を添えて返す。
+    /// キューが参照するトラックは全デバイスぶんまとめて 1 回の HMGET で解決する
+    /// (Alexa の全 Webhook 応答経路で呼ばれるため往復回数を抑える)
     pub async fn devices_json(&self) -> Value {
-        json!(self.all_devices().await)
+        let devices = self.all_devices().await;
+
+        let mut queues: HashMap<String, Vec<String>> = HashMap::new();
+        for id in devices.keys() {
+            queues.insert(id.clone(), self.queue_entries(id).await);
+        }
+        let tracks = self.fetch_tracks_for(queues.values().flatten()).await;
+
+        let mut map = serde_json::Map::new();
+        for (id, dev) in devices {
+            let queue: Vec<QueueItem> = queues
+                .remove(&id)
+                .unwrap_or_default()
+                .into_iter()
+                // 参照先が見つからないエントリは表示から外す (peek_queue が後で片付ける)
+                .filter_map(|entry| {
+                    let track = tracks.get(token_track_id(&entry)).cloned()?;
+                    Some(QueueItem { entry, track })
+                })
+                .collect();
+            match serde_json::to_value(DeviceJson { device: dev, queue }) {
+                Ok(v) => {
+                    map.insert(id, v);
+                }
+                Err(e) => tracing::warn!("Failed to serialize device {id}: {e}"),
+            }
+        }
+        Value::Object(map)
+    }
+
+    /// キューエントリ群が参照するトラックを 1 回の HMGET でまとめて取得する
+    async fn fetch_tracks_for(
+        &self,
+        entries: impl Iterator<Item = &String>,
+    ) -> HashMap<String, AudioTrack> {
+        let mut ids: Vec<&str> = entries.map(|e| token_track_id(e)).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        if ids.is_empty() {
+            return HashMap::new();
+        }
+
+        let mut conn = self.redis.clone();
+        let vals: Vec<Option<String>> = match conn.hmget(REDIS_KEY_TRACKS, &ids).await {
+            Ok(vals) => vals,
+            Err(e) => {
+                tracing::warn!("Redis error resolving queue tracks: {e}");
+                return HashMap::new();
+            }
+        };
+        ids.into_iter()
+            .zip(vals)
+            .filter_map(|(id, v)| {
+                let track = v.and_then(|s| AudioTrack::from_redis_json(&s))?;
+                Some((id.to_string(), track))
+            })
+            .collect()
     }
 
     // ── ブロードキャスト ──
@@ -837,6 +948,82 @@ impl AppState {
         }
     }
 
+    // ── 「次に再生」キュー ──
+
+    /// トラックをデバイスの「次に再生」キュー末尾に追加する。Redis エラー時は false
+    pub async fn push_queue(&self, device_id: &str, track_id: &str) -> bool {
+        let mut conn = self.redis.clone();
+        match conn
+            .rpush::<_, _, ()>(queue_key(device_id), new_token(track_id))
+            .await
+        {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!("Redis error pushing queue for {device_id}: {e}");
+                false
+            }
+        }
+    }
+
+    /// デバイスのキューエントリ一覧を返す (トラックへの解決は devices_json が行う)
+    async fn queue_entries(&self, device_id: &str) -> Vec<String> {
+        let mut conn = self.redis.clone();
+        conn.lrange(queue_key(device_id), 0, -1)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("Redis error reading queue for {device_id}: {e}");
+                Vec::new()
+            })
+    }
+
+    /// キュー先頭の (エントリ, トラック) を消費せずに返す。
+    /// 参照先のトラックが削除済みと確認できたエントリだけを取り除いて次を見る。
+    /// Redis エラー時は安全側 (何も消さず None) に倒す
+    pub async fn peek_queue(&self, device_id: &str) -> Option<(String, AudioTrack)> {
+        let mut conn = self.redis.clone();
+        loop {
+            let front: Option<String> = match conn.lindex(queue_key(device_id), 0).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!("Redis error reading queue for {device_id}: {e}");
+                    return None;
+                }
+            };
+            let entry = front?;
+            match self.try_get_track(token_track_id(&entry)).await {
+                Ok(Some(track)) => return Some((entry, track)),
+                Ok(None) => {
+                    // 消せなかった場合はループしない (次回の peek で再試行)
+                    if !self.remove_queue_entry(device_id, &entry).await {
+                        return None;
+                    }
+                }
+                Err(_) => return None,
+            }
+        }
+    }
+
+    /// エントリを値一致 (LREM) で 1 件取り除く。見つからなければ false。
+    /// エントリは一意なので index 指定が不要で、並行する消費と競合しない
+    pub async fn remove_queue_entry(&self, device_id: &str, entry: &str) -> bool {
+        let mut conn = self.redis.clone();
+        match conn.lrem::<_, _, i64>(queue_key(device_id), 1, entry).await {
+            Ok(n) => n > 0,
+            Err(e) => {
+                tracing::warn!("Redis error removing queue entry for {device_id}: {e}");
+                false
+            }
+        }
+    }
+
+    /// キューを空にする
+    pub async fn clear_queue(&self, device_id: &str) {
+        let mut conn = self.redis.clone();
+        if let Err(e) = conn.del::<_, ()>(queue_key(device_id)).await {
+            tracing::warn!("Redis error clearing queue for {device_id}: {e}");
+        }
+    }
+
     fn parse_pending(
         device_id: &str,
         result: redis::RedisResult<Option<String>>,
@@ -871,22 +1058,31 @@ pub fn stderr_snippet(out: &std::process::Output) -> String {
         .collect()
 }
 
-/// yt-dlp でメタデータ JSON を取得する (ダウンロードなし)
-async fn fetch_metadata(url: &str) -> Result<Value, String> {
-    let out = Command::new("yt-dlp")
-        .args(["--dump-json", "--no-download", url])
-        .output()
+/// yt-dlp を実行し、時間内の正常終了時に stdout を返す。
+/// 失敗・タイムアウト時はエラーメッセージ (stderr の先頭を含む) を返す
+pub async fn run_yt_dlp(args: &[&str], timeout: time::Duration) -> Result<Vec<u8>, String> {
+    let cmd = Command::new("yt-dlp").args(args).output();
+    let out = time::timeout(timeout, cmd)
         .await
+        .map_err(|_| "yt-dlp timed out".to_string())?
         .map_err(|e| format!("Failed to run yt-dlp: {e}"))?;
 
     if !out.status.success() {
-        return Err(format!(
-            "Failed to fetch metadata: {}",
-            stderr_snippet(&out)
-        ));
+        return Err(format!("yt-dlp failed: {}", stderr_snippet(&out)));
     }
+    Ok(out.stdout)
+}
 
-    serde_json::from_slice(&out.stdout).map_err(|e| format!("Failed to parse metadata: {e}"))
+/// yt-dlp でメタデータ JSON を取得する (ダウンロードなし)
+async fn fetch_metadata(url: &str) -> Result<Value, String> {
+    let stdout = run_yt_dlp(
+        &["--dump-json", "--no-download", url],
+        time::Duration::from_secs(METADATA_TIMEOUT_SECS),
+    )
+    .await
+    .map_err(|e| format!("Failed to fetch metadata: {e}"))?;
+
+    serde_json::from_slice(&stdout).map_err(|e| format!("Failed to parse metadata: {e}"))
 }
 
 fn extract_video_id(url: &str) -> Option<String> {
@@ -996,6 +1192,36 @@ mod tests {
         let restored = AudioTrack::from_redis_json(&track.to_redis_json()).unwrap();
         assert!(restored.is_live);
         assert!(restored.file_path.is_empty());
+    }
+
+    #[test]
+    fn token_roundtrip_preserves_track_id() {
+        let token = new_token("dQw4w9WgXcQ");
+        assert_eq!(token_track_id(&token), "dQw4w9WgXcQ");
+        // '#' を含まない値 (旧形式やトラック ID そのもの) も受け付ける
+        assert_eq!(token_track_id("dQw4w9WgXcQ"), "dQw4w9WgXcQ");
+    }
+
+    #[test]
+    fn queue_item_serializes_flattened() {
+        let item = QueueItem {
+            entry: "dQw4w9WgXcQ#123".into(),
+            track: AudioTrack {
+                id: "dQw4w9WgXcQ".into(),
+                title: "t".into(),
+                thumbnail: String::new(),
+                duration: 10,
+                channel: String::new(),
+                is_live: false,
+                created_at: 0.0,
+                file_path: "/tmp/a.m4a".into(),
+            },
+        };
+        let v = serde_json::to_value(&item).unwrap();
+        // entry とトラックのフィールドが同じ階層に並ぶ (file_path は露出しない)
+        assert_eq!(v["entry"], "dQw4w9WgXcQ#123");
+        assert_eq!(v["id"], "dQw4w9WgXcQ");
+        assert!(v.get("file_path").is_none());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use crate::alexa::handle_alexa;
 use crate::state::{
     AUDIO_MIME, AppState, AudioTrack, DeviceUpdate, PlayRequest, ReorderRequest, SeekRequest,
-    stderr_snippet,
+    run_yt_dlp,
 };
 use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message, WebSocket};
@@ -135,9 +135,10 @@ pub async fn live_audio(
     // ffmpeg が扱いやすい HLS を最優先する。ライブ配信は音声のみの
     // フォーマットが提供されないことが多く、その場合は最低ビットレートの
     // muxed HLS (映像+音声) にフォールバックする。
-    // acodec も一緒に取得し、AAC 以外を掴んだ場合の再エンコード判定に使う
-    let cmd = tokio::process::Command::new("yt-dlp")
-        .args([
+    // acodec も一緒に取得し、AAC 以外を掴んだ場合の再エンコード判定に使う。
+    // Echo はレスポンスを長く待てないため制限時間は短めに取る
+    let stdout = run_yt_dlp(
+        &[
             "--print",
             "urls",
             "--print",
@@ -146,24 +147,14 @@ pub async fn live_audio(
             "bestaudio[protocol^=m3u8]/worst[protocol^=m3u8]/bestaudio/worst",
             "--no-playlist",
             &url,
-        ])
-        .output();
-
-    // Echo はレスポンスを長く待てないため、yt-dlp が固まった場合に備える
-    let out = tokio::time::timeout(std::time::Duration::from_secs(15), cmd)
-        .await
-        .map_err(|_| AppError::internal("yt-dlp timed out fetching live URL"))?
-        .map_err(|e| AppError::internal(format!("Failed to run yt-dlp: {e}")))?;
-
-    if !out.status.success() {
-        return Err(AppError::internal(format!(
-            "Failed to get live stream URL: {}",
-            stderr_snippet(&out)
-        )));
-    }
+        ],
+        std::time::Duration::from_secs(15),
+    )
+    .await
+    .map_err(|e| AppError::internal(format!("Failed to get live stream URL: {e}")))?;
 
     // 出力は URL (DASH では複数行) → acodec の順。先頭の URL のみ使う
-    let stdout_str = String::from_utf8_lossy(&out.stdout);
+    let stdout_str = String::from_utf8_lossy(&stdout);
     let lines: Vec<&str> = stdout_str
         .lines()
         .map(str::trim)
@@ -256,6 +247,64 @@ fn parse_byte_range(header: &str, total: usize) -> Option<(usize, usize)> {
     } else {
         None
     }
+}
+
+#[derive(Deserialize)]
+pub struct SearchQuery {
+    q: String,
+    limit: Option<usize>,
+}
+
+/// GET /api/search?q=...&limit=8
+///
+/// yt-dlp の ytsearch で YouTube を検索し、/api/tracks と同じ形の軽量な
+/// メタデータ一覧を返す。--flat-playlist で各動画ページの解決を省き、
+/// 応答を数秒に収める
+pub async fn search_youtube(Query(query): Query<SearchQuery>) -> AppResult<Json<Value>> {
+    let q = query.q.trim();
+    if q.is_empty() {
+        return Err(AppError::bad_request("Search query is empty"));
+    }
+    let limit = query.limit.unwrap_or(8).clamp(1, 20);
+
+    let target = format!("ytsearch{limit}:{q}");
+    let stdout = run_yt_dlp(
+        &["--dump-json", "--flat-playlist", &target],
+        std::time::Duration::from_secs(30),
+    )
+    .await
+    .map_err(|e| AppError::internal(format!("Search failed: {e}")))?;
+
+    // 出力は 1 行 1 動画の JSON
+    let results: Vec<AudioTrack> = String::from_utf8_lossy(&stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|v| search_entry(&v))
+        .collect();
+
+    Ok(Json(json!({ "results": results })))
+}
+
+/// yt-dlp の flat-playlist エントリを検索結果用の AudioTrack に変換する。
+/// AudioTrack を経由することで /api/tracks とのワイヤ形式の一致を
+/// コンパイラに保証させる (file_path は serde(skip) なので露出しない)
+fn search_entry(v: &Value) -> Option<AudioTrack> {
+    let id = v["id"].as_str()?;
+    Some(AudioTrack {
+        id: id.to_string(),
+        title: v["title"].as_str().unwrap_or(id).to_string(),
+        // flat エントリのサムネイルは有無・形式が揺れるため既知の URL 形式で組み立てる
+        thumbnail: format!("https://i.ytimg.com/vi/{id}/mqdefault.jpg"),
+        duration: v["duration"].as_f64().unwrap_or(0.0) as u64,
+        channel: v["channel"]
+            .as_str()
+            .or(v["uploader"].as_str())
+            .unwrap_or("")
+            .to_string(),
+        is_live: v["live_status"].as_str() == Some("is_live"),
+        created_at: 0.0,
+        file_path: String::new(),
+    })
 }
 
 #[derive(Deserialize)]
@@ -365,6 +414,64 @@ async fn queue_on_devices(
         "devices": device_ids,
         "message": "Say 'Alexa, open YouTube Player' on each Echo device"
     })))
+}
+
+/// POST /api/queue
+///
+/// トラックを選択デバイスの「次に再生」キュー末尾に追加する。
+/// 現在の曲が終わるとき (PlaybackNearlyFinished) に先頭から消費される
+pub async fn queue_next(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PlayRequest>,
+) -> AppResult<Json<Value>> {
+    let track = track_or_404(&state, &req.track_id).await?;
+    let mut queued = Vec::new();
+    for did in &req.device_ids {
+        // 未登録デバイスに積むと参照されないキーが残るため登録済みに限る
+        if state.get_device(did).await.is_none() {
+            continue;
+        }
+        if state.push_queue(did, &track.id).await {
+            queued.push(did.clone());
+        }
+    }
+    if queued.is_empty() {
+        return Err(AppError::bad_request("No valid devices"));
+    }
+    state.broadcast_devices().await;
+
+    Ok(Json(json!({
+        "status": "ok",
+        "devices": queued,
+        "message": format!("「{}」を次に再生に追加しました", track.title),
+    })))
+}
+
+/// DELETE /api/devices/:id/queue/:entry
+///
+/// エントリ値の一致でキュー項目を 1 件削除する。エントリは一意なので、
+/// デバイス側の消費と競合しても別の曲を消すことはない
+pub async fn remove_queue_item(
+    State(state): State<Arc<AppState>>,
+    Path((device_id, entry)): Path<(String, String)>,
+) -> AppResult<Json<Value>> {
+    let removed = state.remove_queue_entry(&device_id, &entry).await;
+    // 見つからない場合もクライアントの表示が古い可能性があるため最新状態を配る
+    state.broadcast_devices().await;
+    if !removed {
+        return Err(AppError::not_found("Queue item not found"));
+    }
+    Ok(Json(json!({ "status": "ok" })))
+}
+
+/// DELETE /api/devices/:id/queue
+pub async fn clear_queue(
+    State(state): State<Arc<AppState>>,
+    Path(device_id): Path<String>,
+) -> Json<Value> {
+    state.clear_queue(&device_id).await;
+    state.broadcast_devices().await;
+    Json(json!({ "status": "ok" }))
 }
 
 /// POST /api/devices/:id/seek
@@ -597,7 +704,49 @@ async fn handle_ws_message(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_byte_range;
+    use super::{parse_byte_range, search_entry};
+    use serde_json::json;
+
+    #[test]
+    fn search_entry_maps_flat_playlist_fields() {
+        let v = json!({
+            "id": "dQw4w9WgXcQ",
+            "title": "Song",
+            "duration": 212.0,
+            "channel": "Ch",
+            "live_status": "not_live",
+        });
+        let entry = serde_json::to_value(search_entry(&v).unwrap()).unwrap();
+        assert_eq!(entry["id"], "dQw4w9WgXcQ");
+        assert_eq!(entry["title"], "Song");
+        assert_eq!(entry["duration"], 212);
+        assert_eq!(entry["channel"], "Ch");
+        assert_eq!(entry["is_live"], false);
+        assert_eq!(
+            entry["thumbnail"],
+            "https://i.ytimg.com/vi/dQw4w9WgXcQ/mqdefault.jpg"
+        );
+        // 内部用の file_path はワイヤ形式に露出しない
+        assert!(entry.get("file_path").is_none());
+    }
+
+    #[test]
+    fn search_entry_fills_missing_fields() {
+        // duration 無し (ライブなど)・channel の代わりに uploader
+        let v = json!({
+            "id": "dQw4w9WgXcQ",
+            "uploader": "Up",
+            "live_status": "is_live",
+        });
+        let entry = search_entry(&v).unwrap();
+        assert_eq!(entry.title, "dQw4w9WgXcQ");
+        assert_eq!(entry.duration, 0);
+        assert_eq!(entry.channel, "Up");
+        assert!(entry.is_live);
+
+        // id が無いエントリは捨てる
+        assert!(search_entry(&json!({ "title": "x" })).is_none());
+    }
 
     #[test]
     fn parses_byte_ranges() {

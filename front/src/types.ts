@@ -16,6 +16,14 @@ export interface Device {
   position_ms?: number;
   /** デバイス状態の最終更新時刻 (UNIX 秒) */
   last_update?: number;
+  /** 「次に再生」キュー (先頭が次に再生される) */
+  queue?: QueueItem[];
+}
+
+/** 「次に再生」キューの 1 項目 */
+export interface QueueItem extends Track {
+  /** キュー内で一意なエントリ。削除時の指定に使う */
+  entry: string;
 }
 
 export interface TracksPage {

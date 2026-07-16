@@ -156,12 +156,13 @@ The binary, `front/dist/`, `yt-dlp`, and `ffmpeg` are needed on the Pi.
 ## Usage
 
 1. Open `http://localhost:8888`
-2. Paste a YouTube URL (auto-extracts on paste)
+2. Paste a YouTube URL (auto-extracts on paste), or type keywords and press 検索 to search YouTube and pick a result
 3. Say to your Echo: **「アレクサ、YouTube プレーヤーを開いて」**
 4. Select devices in the Web UI and click play
 5. Say to each Echo again: **「アレクサ、YouTube プレーヤーを開いて」** to start playback
 6. Optionally pick a playback mode (off / loop / shuffle) in the Web UI to auto-play the next track
 7. Drag the grip handle (⋮⋮) on a track row to rearrange the library order (also used by loop playback); hold the drag over the prev/next pagination button to flip pages and drop the track on another page
+8. Use 「次に再生に追加」 to append the selected track to the play-next queue of the selected devices; queued tracks play after the current one (before the loop/shuffle mode kicks in) and can be reviewed/removed on each device card
 
 ## Architecture
 
@@ -172,7 +173,8 @@ The binary, `front/dist/`, `yt-dlp`, and `ffmpeg` are needed on the Pi.
     │    ├── youtube:tracks_order          # track display/playback order (list)
     │    ├── youtube:devices               # Echo device states (hash)
     │    ├── youtube:playback_mode         # auto-play mode ("off" | "loop" | "shuffle")
-    │    └── youtube:pending:{device_id}   # queued play command (10 min TTL)
+    │    ├── youtube:pending:{device_id}   # queued play command (10 min TTL)
+    │    └── youtube:queue:{device_id}     # play-next queue (list of unique entries)
     └── tx: broadcast::Sender      # real-time sync
          │
     ┌────┴─────────────────────────────────────────────────┐
@@ -180,6 +182,7 @@ The binary, `front/dist/`, `yt-dlp`, and `ffmpeg` are needed on the Pi.
     ├──────────────────────────────────────────────────────┤
     │  GET    /api/audio/{id}/stream  m4a streaming        │
     │  GET    /api/audio/{id}/live    live audio relay      │
+    │  GET    /api/search             YouTube search        │
     │  GET    /api/tracks             track list (paged)    │
     │  POST   /api/tracks/reorder     move a track          │
     │  DELETE /api/tracks/{id}        delete track          │
@@ -187,6 +190,9 @@ The binary, `front/dist/`, `yt-dlp`, and `ffmpeg` are needed on the Pi.
     │  DELETE /api/devices/{id}       delete device         │
     │  POST   /api/play              queue to devices       │
     │  POST   /api/play-all          queue to all           │
+    │  POST   /api/queue             add to play-next queue │
+    │  DELETE /api/devices/{id}/queue          clear queue  │
+    │  DELETE /api/devices/{id}/queue/{entry}  remove item  │
     │  POST   /api/devices/{id}/seek queue seek              │
     │  POST   /api/devices/{id}/stop stop device            │
     │  POST   /alexa                 Alexa webhook          │
@@ -197,6 +203,8 @@ The binary, `front/dist/`, `yt-dlp`, and `ffmpeg` are needed on the Pi.
 
 All state lives in Redis, so tracks, devices, and queued play commands survive server restarts.
 Queued play commands are stored per device with a native Redis TTL (10 minutes) and consumed atomically via `GETDEL`.
+
+The play-next queue is a per-device Redis list of unique entries (`{track_id}#{millis}`, the same format as AudioPlayer tokens). A queued playback uses its entry as the AudioPlayer token, so consumption is an exact value match (`LREM`): the entry is removed once playback is confirmed (`AudioPlayer.PlaybackStarted`) or fails (`AudioPlayer.PlaybackFailed`, so an unplayable item never jams the queue). A discarded ENQUEUE directive or a re-delivered event never loses or double-consumes a track, and removing an item from the Web UI can never delete the wrong one. When a track finishes, the next track is chosen in priority order: pending play command → play-next queue → playback mode (loop/shuffle). Saying 「アレクサ、YouTube プレーヤーを開いて」 on a device that isn't playing or paused also starts the queue.
 
 If the track metadata hash is ever lost (e.g. Redis was wiped), the next `GET /api/tracks` detects the missing key and rebuilds it in the background from the m4a filenames in `audio_cache/`, re-fetching metadata via yt-dlp (file mtime is used as the registration time to preserve ordering; a `tracks_update` is broadcast when done). The custom track order itself cannot be recovered this way — tracks fall back to newest-first.
 

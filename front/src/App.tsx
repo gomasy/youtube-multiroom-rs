@@ -96,6 +96,7 @@ export function App() {
         <UrlInput
           ref={urlInputRef}
           extracting={extracting}
+          onUnauthorized={onUnauthorized}
           onExtract={(url) => {
             if (sendMessage({ type: "extract_audio", url })) {
               setExtracting(true);

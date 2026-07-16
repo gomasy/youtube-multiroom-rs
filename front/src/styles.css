@@ -131,6 +131,43 @@ body {
 .btn-outline:hover { border-color: var(--text-dim); background: var(--surface-2); }
 .btn-sm { padding: 8px 14px; font-size: 13px; }
 
+/* ── Text button (枠なしの小さな操作ボタン) ── */
+.text-btn {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+.text-btn:hover { color: var(--text); }
+.text-btn-danger:hover { color: var(--accent); }
+
+/* ── Search results ── */
+.search-results {
+  margin-top: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+/* 見出しの文字装飾は .section-label を併用する */
+.search-results-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0;
+}
+.search-empty {
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 13px;
+  padding: 12px 0;
+}
+
 /* ── Now Playing ── */
 .now-playing {
   background: var(--surface);
@@ -339,6 +376,42 @@ body {
   border: none;
 }
 
+/* ── Device queue (次に再生) ── */
+.device-queue {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  cursor: default;
+}
+.device-queue-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+.device-queue-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 2px 0;
+  min-width: 0;
+}
+.queue-item-index {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+.queue-item-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .delete-btn {
   background: none;
   border: none;
@@ -394,6 +467,7 @@ body {
 /* ── Controls ── */
 .controls {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 20px;
 }
