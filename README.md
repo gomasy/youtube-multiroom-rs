@@ -76,6 +76,7 @@ cargo build --release
 |---|---|---|
 | `REDIS_URL` | Yes | Redis connection URL (e.g. `redis://127.0.0.1/`) |
 | `API_TOKEN` | No | Bearer token for API authentication |
+| `LISTEN_ADDR` | No | Address and port to listen on (default: `0.0.0.0:8888`) |
 
 Variables can also be placed in a `.env` file in the working directory (loaded automatically at startup; real environment variables take precedence). See `.env.example`.
 

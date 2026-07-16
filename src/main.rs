@@ -25,6 +25,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_token = std::env::var("API_TOKEN").ok().filter(|s| !s.is_empty());
     let auth_enabled = api_token.is_some();
     let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| die("REDIS_URL must be set"));
+    let listen_addr = std::env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8888".to_string());
+    let addr: SocketAddr = listen_addr
+        .parse()
+        .unwrap_or_else(|_| die(format!("LISTEN_ADDR is not a valid socket address: {listen_addr}")));
 
     let state = AppState::new(api_token, &redis_url)
         .await
@@ -51,15 +55,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .fallback_service(ServeDir::new("front/dist"))
         .with_state(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 8888));
-
     println!("══════════════════════════════════════════");
     println!("  YouTube MultiRoom Server (Rust)");
     if dotenv_loaded {
         println!("  Config   → loaded .env");
     }
     println!("  Redis    = {}", redact_url(&redis_url));
-    println!("  Web UI   → http://localhost:8888");
+    println!("  Web UI   → http://localhost:{}", addr.port());
     println!("  Alexa    → POST /alexa");
     if auth_enabled {
         println!("  Auth     → API_TOKEN is set");
