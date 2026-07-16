@@ -4,7 +4,7 @@ version = "1.1.2"
 edition = "2024"
 
 [dependencies]
-axum = { version = "0.8", features = ["ws"] }
+axum = { version = "0.8.9", features = ["ws"] }
 base64 = "0.22"
 dotenvy = "0.15"
 hmac = "0.13"
