@@ -46,9 +46,14 @@ RUN apk add --no-cache musl-dev pkgconf openssl-dev
 # 動的リンクにして実行ステージの libssl を共有する (crt-static だと libssl とリンクできない)
 ENV RUSTFLAGS="-C target-feature=-crt-static"
 WORKDIR /app
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock build.rs ./
 RUN mkdir src && echo 'fn main() {}' > src/main.rs && cargo build --release && rm -rf src
 COPY src/ src/
+# ホスト側で求めた git 情報を渡す (.git はイメージに含めないため build.rs が
+# 自力で取得できない)。未指定なら build.rs 側で "unknown" になる。
+ARG GIT_HASH
+ARG BUILD_DATE
+ENV GIT_HASH=${GIT_HASH} BUILD_DATE=${BUILD_DATE}
 RUN touch src/main.rs && cargo build --release
 
 FROM alpine:latest

@@ -36,6 +36,8 @@ jobs:
           echo "PLATFORM_PAIR=${{ matrix.arch }}" >> $GITHUB_ENV
           image_names=${PUSH_TO_IMAGES//$'\n'/,}
           echo "IMAGE_NAMES=${image_names%,}" >> $GITHUB_ENV
+          echo "GIT_HASH=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+          echo "BUILD_DATE=$(git log -1 --format=%cs)" >> $GITHUB_ENV
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
       - name: Log in to the Github Container registry
@@ -61,6 +63,9 @@ jobs:
         with:
           context: .
           provenance: false
+          build-args: |
+            GIT_HASH=${{ env.GIT_HASH }}
+            BUILD_DATE=${{ env.BUILD_DATE }}
           push: ${{ github.event_name != 'pull_request' }}
           outputs: type=image,"name=${{ env.IMAGE_NAMES }}",push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
       - name: Export digest
