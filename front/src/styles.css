@@ -168,6 +168,66 @@ body {
   padding: 12px 0;
 }
 
+/* ── Downloads (取得の進捗) ── */
+.downloads-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 24px;
+}
+.download-item {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+}
+.download-item.error { border-color: rgba(229, 57, 53, 0.5); }
+.download-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+.download-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.download-status {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+.download-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+.download-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+/* 情報取得中・変換中は割合が定まらないため流れるバーで示す */
+.download-bar.indeterminate .download-bar-fill {
+  width: 40%;
+  animation: download-indeterminate 1.2s ease-in-out infinite;
+}
+@keyframes download-indeterminate {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
+}
+.download-error-text {
+  font-size: 11px;
+  color: #e53935;
+  overflow-wrap: anywhere;
+}
+
 /* ── Now Playing ── */
 .now-playing {
   background: var(--surface);

@@ -35,10 +35,24 @@ export interface TracksPage {
 
 export type PlaybackMode = "loop" | "shuffle" | "off";
 
+/** 進行中ダウンロードの進捗 (サーバー側で管理され、全クライアントへ配られる) */
+export interface DownloadProgress {
+  id: string;
+  /** メタデータ取得前は動画 ID が入る */
+  title: string;
+  status: "metadata" | "downloading" | "processing" | "error";
+  /** ダウンロード済み割合 (0–100) */
+  percent: number;
+  error?: string;
+  /** 開始時刻 (UNIX 秒) */
+  started_at: number;
+}
+
 export interface WSInitMessage {
   type: "init";
   devices: Record<string, Device>;
   playback_mode?: PlaybackMode;
+  downloads?: DownloadProgress[];
 }
 
 export interface WSDeviceUpdateMessage {
@@ -65,10 +79,16 @@ export interface WSExtractAudioErrorMessage {
   error: string;
 }
 
+export interface WSDownloadsUpdateMessage {
+  type: "downloads_update";
+  downloads: DownloadProgress[];
+}
+
 export type WSMessage =
   | WSInitMessage
   | WSDeviceUpdateMessage
   | WSTracksUpdateMessage
   | WSPlaybackModeUpdateMessage
   | WSExtractAudioResultMessage
-  | WSExtractAudioErrorMessage;
+  | WSExtractAudioErrorMessage
+  | WSDownloadsUpdateMessage;

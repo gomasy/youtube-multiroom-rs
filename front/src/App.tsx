@@ -5,12 +5,13 @@ import { Header } from "./components/Header";
 import { UrlInput } from "./components/UrlInput";
 import type { UrlInputHandle } from "./components/UrlInput";
 import { NowPlaying } from "./components/NowPlaying";
+import { DownloadList } from "./components/DownloadList";
 import { DeviceList } from "./components/DeviceList";
 import { PlaybackModeSelector } from "./components/PlaybackModeSelector";
 import { History } from "./components/History";
 import { AuthModal } from "./components/AuthModal";
 import { ToastContainer, useToast } from "./components/Toast";
-import type { Device, PlaybackMode, Track, TracksPage } from "./types";
+import type { Device, DownloadProgress, PlaybackMode, Track, TracksPage } from "./types";
 
 export function App() {
   const [showAuth, setShowAuth] = useState(false);
@@ -22,6 +23,7 @@ export function App() {
   const [initialTracks, setInitialTracks] = useState<TracksPage | null>(null);
   const [currentTrack, setCurrentTrack] = useState<Track | null>(null);
   const [playbackMode, setPlaybackMode] = useState<PlaybackMode>("off");
+  const [downloads, setDownloads] = useState<DownloadProgress[]>([]);
   const { toasts, showToast } = useToast();
   const urlInputRef = useRef<UrlInputHandle>(null);
 
@@ -62,6 +64,7 @@ export function App() {
     onPlaybackMode: setPlaybackMode,
     onExtractResult: handleExtractResult,
     onExtractError: handleExtractError,
+    onDownloadsUpdate: setDownloads,
   });
 
   function handleTrackDeleted(trackId: string) {
@@ -106,6 +109,7 @@ export function App() {
           }}
           showToast={showToast}
         />
+        <DownloadList downloads={downloads} />
         <div className="main-grid">
           <div className="main-left">
             <NowPlaying track={currentTrack} />

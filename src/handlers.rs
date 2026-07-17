@@ -589,11 +589,18 @@ pub async fn ws_upgrade(State(state): State<Arc<AppState>>, ws: WebSocketUpgrade
 async fn ws_handler(mut socket: WebSocket, state: Arc<AppState>) {
     tracing::info!("WebSocket client connected");
 
-    // 初期状態を送信 (トラック一覧は REST でページ取得させる)
+    // broadcast チャンネルはスナップショット作成前に購読する。後から購読すると
+    // 作成中に流れた更新 (ダウンロード完了による一覧からの除去など) を
+    // 取りこぼし、init の内容が古いまま二度と補正されない
+    let mut rx = state.tx.subscribe();
+
+    // 初期状態を送信 (トラック一覧は REST でページ取得させる)。
+    // 進行中ダウンロードを含めることで、リロード後もすぐ進捗表示が復元される
     let init_msg = json!({
         "type": "init",
         "devices": state.devices_json().await,
         "playback_mode": state.playback_mode().await,
+        "downloads": state.downloads_json().await,
     });
     if socket
         .send(Message::Text(init_msg.to_string().into()))
@@ -602,9 +609,6 @@ async fn ws_handler(mut socket: WebSocket, state: Arc<AppState>) {
     {
         return;
     }
-
-    // broadcast チャンネルを購読
-    let mut rx = state.tx.subscribe();
 
     // クライアント固有メッセージ用チャンネル (extract 結果など)
     let (client_tx, mut client_rx) = tokio::sync::mpsc::unbounded_channel::<String>();

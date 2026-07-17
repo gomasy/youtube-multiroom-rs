@@ -5,9 +5,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{Mutex, broadcast};
 use tokio::time;
@@ -31,6 +33,13 @@ const REDIS_QUEUE_PREFIX: &str = "youtube:queue";
 
 /// キューされた再生コマンドの有効期限 (秒) — Redis のキー TTL で失効する
 const PENDING_TTL_SECS: u64 = 600;
+
+/// 失敗したダウンロードの進捗表示を残す時間 (秒)。リロード直後の
+/// クライアントにもエラーが見えるよう、即座には消さない
+const DOWNLOAD_ERROR_TTL_SECS: u64 = 60;
+
+/// yt-dlp の進捗行を他の出力と区別するための接頭辞 (--progress-template で付与)
+const PROGRESS_PREFIX: &str = "__progress__ ";
 
 /// 再生失敗を「連続」とみなす間隔 (秒)。前回の失敗からこれ以上空いていれば
 /// 別件として 1 から数え直す。再試行の失敗は直後 (数秒) に届くため十分長い値
@@ -245,6 +254,36 @@ struct DeviceJson {
     queue: Vec<QueueItem>,
 }
 
+/// ダウンロードの進行段階。ワイヤ形式 (小文字) はフロントの
+/// DownloadProgress["status"] union と一致させること
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DownloadStatus {
+    /// メタデータ取得中 (タイトル・ライブ判定の解決前)
+    Metadata,
+    Downloading,
+    /// yt-dlp の後処理 (m4a への変換) 中
+    Processing,
+    Error,
+}
+
+/// 進行中ダウンロードの進捗。プロセス内のみで保持し、変化を WebSocket で
+/// 全クライアントへ配ることで、開始したブラウザ以外 (リロード後を含む) でも
+/// 進捗を追えるようにする
+#[derive(Debug, Clone, Serialize)]
+pub struct DownloadProgress {
+    pub id: String,
+    /// メタデータ取得前は動画 ID で埋める
+    pub title: String,
+    pub status: DownloadStatus,
+    /// ダウンロード済み割合 (0.0–100.0)
+    pub percent: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// 開始時刻 (UNIX 秒)。表示順と、エラー片付け時の同一性確認に使う
+    pub started_at: f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingCommand {
     pub action: String,
@@ -326,6 +365,9 @@ pub struct AppState {
     /// 同一動画の並行ダウンロードが同じ出力ファイルへ同時に書き込まないよう
     /// 直列化する動画 ID ごとのロック
     extract_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// 進行中ダウンロードの進捗 (動画 ID → 進捗)。プロセス内のみ保持し、
+    /// 再起動で消える (クライアントは init の一覧で同期し直す)
+    downloads: Mutex<HashMap<String, DownloadProgress>>,
     /// デバイス×トラックごとの再生失敗の連続記録 (record_playback_failure を参照)。
     /// トラック別に数えることで、再生中の曲と ENQUEUE 済みの次曲の失敗が
     /// 交互に届いてもカウントが互いをリセットしない
@@ -356,13 +398,14 @@ impl AppState {
             restoring: AtomicBool::new(false),
             order_lock: Mutex::new(()),
             extract_locks: Mutex::new(HashMap::new()),
+            downloads: Mutex::new(HashMap::new()),
             playback_failures: Mutex::new(HashMap::new()),
         }))
     }
 
     // ── 音声取得 ──
 
-    pub async fn extract_audio(&self, url: &str) -> Result<AudioTrack, String> {
+    pub async fn extract_audio(self: &Arc<Self>, url: &str) -> Result<AudioTrack, String> {
         let video_id = extract_video_id(url).ok_or("Could not recognize YouTube URL")?;
 
         // 同一動画の並行リクエストを直列化する。後続の呼び出しはロック獲得後の
@@ -387,7 +430,11 @@ impl AppState {
         result
     }
 
-    async fn extract_audio_locked(&self, video_id: &str, url: &str) -> Result<AudioTrack, String> {
+    async fn extract_audio_locked(
+        self: &Arc<Self>,
+        video_id: &str,
+        url: &str,
+    ) -> Result<AudioTrack, String> {
         // Redis キャッシュ確認。旧フォーマット (mp3 など) のパスを指す
         // エントリは AUDIO_MIME と食い違うため無視して取り直す
         if let Some(track) = self.get_track(video_id).await {
@@ -402,13 +449,30 @@ impl AppState {
             }
         }
 
+        // 進捗を全クライアントへ配りながら取得する。完了 (成功) で一覧から
+        // 外し、失敗はしばらくエラー表示として残す
+        self.begin_download(video_id).await;
+        let result = self.fetch_and_register(video_id, url).await;
+        match &result {
+            Ok(_) => self.finish_download(video_id).await,
+            Err(e) => self.fail_download(video_id, e).await,
+        }
+        result
+    }
+
+    /// メタデータ取得 → (ライブ以外は) ダウンロード → Redis 登録を行う。
+    /// 途中経過は downloads の進捗エントリへ反映する
+    async fn fetch_and_register(&self, video_id: &str, url: &str) -> Result<AudioTrack, String> {
         // メタデータ取得
         tracing::info!("Fetching metadata: {}", video_id);
         let meta = fetch_metadata(url).await?;
+        let title = meta["title"].as_str().unwrap_or(video_id).to_string();
+        let is_live = meta["is_live"].as_bool().unwrap_or(false);
+        self.set_download_meta(video_id, &title, is_live).await;
 
         // ライブ配信はファイルとして保存できないため、メタデータのみ登録し
         // 再生時に CDN URL を都度解決する (handlers::live_audio)
-        let track = if meta["is_live"].as_bool().unwrap_or(false) {
+        let track = if is_live {
             tracing::info!("Live stream detected, skipping download: {}", video_id);
             AudioTrack::from_meta(video_id, &meta, now_f64(), String::new())
         } else {
@@ -416,38 +480,12 @@ impl AppState {
             let output_str = output_path.to_string_lossy().to_string();
 
             // 音声ダウンロード
-            tracing::info!(
-                "Downloading: {}",
-                meta["title"].as_str().unwrap_or(video_id)
-            );
-
-            // AAC ソースを優先して選べば AUDIO_EXT へは再エンコード不要 (remux のみ)
-            let format_spec = format!("bestaudio[ext={AUDIO_EXT}]/bestaudio");
-            let dl_out = Command::new("yt-dlp")
-                .args([
-                    "-f",
-                    &format_spec,
-                    "-x",
-                    "--audio-format",
-                    AUDIO_EXT,
-                    "-o",
-                    &output_str,
-                    "--no-playlist",
-                    "--no-part",
-                    url,
-                ])
-                .output()
-                .await
-                .map_err(|e| format!("Download error: {e}"))?;
-
-            if !dl_out.status.success() {
+            tracing::info!("Downloading: {}", title);
+            if let Err(e) = self.run_download(video_id, url, &output_str).await {
                 // --no-part のため書きかけのファイルが最終名で残る。復元時に
                 // 壊れたトラックとして登録されないよう消しておく
                 let _ = tokio::fs::remove_file(&output_path).await;
-                return Err(format!(
-                    "Failed to download audio: {}",
-                    stderr_snippet(&dl_out)
-                ));
+                return Err(e);
             }
 
             AudioTrack::from_meta(video_id, &meta, now_f64(), output_str)
@@ -466,6 +504,202 @@ impl AppState {
 
         tracing::info!("Ready: {} ({}s)", track.title, track.duration);
         Ok(track)
+    }
+
+    /// yt-dlp で音声をダウンロードする。stdout の進捗行を読み取り、
+    /// パーセンテージを進捗エントリへ反映しながら完了を待つ
+    async fn run_download(&self, video_id: &str, url: &str, output_str: &str) -> Result<(), String> {
+        // AAC ソースを優先して選べば AUDIO_EXT へは再エンコード不要 (remux のみ)
+        let format_spec = format!("bestaudio[ext={AUDIO_EXT}]/bestaudio");
+        // 進捗を 1 行 1 更新の機械可読な形式で stdout に流させる
+        let progress_template = format!("download:{PROGRESS_PREFIX}%(progress._percent_str)s");
+        let mut child = Command::new("yt-dlp")
+            .args([
+                "-f",
+                &format_spec,
+                "-x",
+                "--audio-format",
+                AUDIO_EXT,
+                "-o",
+                output_str,
+                "--no-playlist",
+                "--no-part",
+                "--newline",
+                "--progress-template",
+                &progress_template,
+                url,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Download error: {e}"))?;
+
+        // stderr は別タスクで読み切り、パイプ詰まりで yt-dlp が
+        // 止まらないようにする (エラー時のメッセージにのみ使う)
+        let stderr = child.stderr.take();
+        let stderr_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut stderr) = stderr {
+                let _ = stderr.read_to_end(&mut buf).await;
+            }
+            buf
+        });
+
+        // 進捗行はバイト列で読んで損失変換する。lines() は UTF-8 でない行で
+        // エラーになって読み取りが止まり、パイプが閉じて yt-dlp 自体が
+        // EPIPE で落ちてしまう
+        if let Some(stdout) = child.stdout.take() {
+            let mut reader = BufReader::new(stdout);
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                match reader.read_until(b'\n', &mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        let line = String::from_utf8_lossy(&buf);
+                        if let Some(percent) = parse_progress_percent(line.trim_end()) {
+                            self.set_download_percent(video_id, percent).await;
+                        }
+                    }
+                }
+            }
+        }
+
+        let status = child
+            .wait()
+            .await
+            .map_err(|e| format!("Download error: {e}"))?;
+        if !status.success() {
+            let stderr_buf = stderr_task.await.unwrap_or_default();
+            return Err(format!(
+                "Failed to download audio: {}",
+                snippet(&String::from_utf8_lossy(&stderr_buf))
+            ));
+        }
+        Ok(())
+    }
+
+    // ── ダウンロード進捗 ──
+
+    /// 進捗一覧を変更し、変更があれば全クライアントへ通知する。
+    /// f は通知が必要な変更を加えたかどうかを返す。ペイロードはロックを
+    /// 保持したまま構築し、変更と通知内容のずれや二重ロックを避ける
+    async fn update_downloads(
+        &self,
+        f: impl FnOnce(&mut HashMap<String, DownloadProgress>) -> bool,
+    ) {
+        let payload = {
+            let mut downloads = self.downloads.lock().await;
+            if !f(&mut downloads) {
+                return;
+            }
+            Self::downloads_payload(&downloads)
+        };
+        self.broadcast(json!({ "type": "downloads_update", "downloads": payload }));
+    }
+
+    /// エントリを 1 件変更する (未登録なら何もしない)。
+    /// f は通知が必要な変更を加えたかどうかを返す
+    async fn update_download(&self, video_id: &str, f: impl FnOnce(&mut DownloadProgress) -> bool) {
+        self.update_downloads(|downloads| downloads.get_mut(video_id).is_some_and(f))
+            .await;
+    }
+
+    /// ダウンロードを進捗一覧に登録して通知する (タイトル判明前は動画 ID で表示)
+    async fn begin_download(&self, video_id: &str) {
+        self.update_downloads(|downloads| {
+            downloads.insert(
+                video_id.to_string(),
+                DownloadProgress {
+                    id: video_id.to_string(),
+                    title: video_id.to_string(),
+                    status: DownloadStatus::Metadata,
+                    percent: 0.0,
+                    error: None,
+                    started_at: now_f64(),
+                },
+            );
+            true
+        })
+        .await;
+    }
+
+    /// メタデータ取得後にタイトルを反映する。ライブ配信はダウンロードしない
+    /// (直後に登録完了で一覧から外れる) ため metadata のまま進めない
+    async fn set_download_meta(&self, video_id: &str, title: &str, is_live: bool) {
+        self.update_download(video_id, |d| {
+            d.title = title.to_string();
+            if !is_live {
+                d.status = DownloadStatus::Downloading;
+            }
+            true
+        })
+        .await;
+    }
+
+    /// パーセンテージを更新する。yt-dlp は進捗行を高頻度に出すため、
+    /// 通知は整数部が変わったときだけ行う。100% 到達後は変換
+    /// (yt-dlp の後処理) 中とみなす
+    async fn set_download_percent(&self, video_id: &str, percent: f64) {
+        self.update_download(video_id, |d| {
+            let before = d.percent as u64;
+            d.percent = percent.clamp(0.0, 100.0);
+            if d.percent >= 100.0 {
+                d.status = DownloadStatus::Processing;
+            }
+            d.percent as u64 != before
+        })
+        .await;
+    }
+
+    /// 完了したダウンロードを進捗一覧から外して通知する
+    async fn finish_download(&self, video_id: &str) {
+        self.update_downloads(|downloads| downloads.remove(video_id).is_some())
+            .await;
+    }
+
+    /// 失敗した進捗エントリをエラー表示へ切り替え、TTL 経過後に片付ける
+    async fn fail_download(self: &Arc<Self>, video_id: &str, error: &str) {
+        let mut started_at = None;
+        self.update_download(video_id, |d| {
+            d.status = DownloadStatus::Error;
+            d.error = Some(error.to_string());
+            started_at = Some(d.started_at);
+            true
+        })
+        .await;
+        let Some(started_at) = started_at else {
+            return;
+        };
+
+        let state = self.clone();
+        let video_id = video_id.to_string();
+        tokio::spawn(async move {
+            time::sleep(time::Duration::from_secs(DOWNLOAD_ERROR_TTL_SECS)).await;
+            state
+                .update_downloads(|downloads| {
+                    // 再試行で上書きされた新しいエントリは消さない (started_at で識別)
+                    match downloads.get(&video_id) {
+                        Some(d) if d.started_at == started_at => {
+                            downloads.remove(&video_id).is_some()
+                        }
+                        _ => false,
+                    }
+                })
+                .await;
+        });
+    }
+
+    /// 進行中ダウンロードの一覧を開始順で返す (init / downloads_update のワイヤ形式)
+    pub async fn downloads_json(&self) -> Value {
+        Self::downloads_payload(&*self.downloads.lock().await)
+    }
+
+    fn downloads_payload(downloads: &HashMap<String, DownloadProgress>) -> Value {
+        let mut list: Vec<&DownloadProgress> = downloads.values().collect();
+        list.sort_by(|a, b| a.started_at.total_cmp(&b.started_at));
+        json!(list)
     }
 
     pub async fn get_track(&self, id: &str) -> Option<AudioTrack> {
@@ -1148,10 +1382,25 @@ impl AppState {
 
 /// コマンドの stderr をエラーメッセージ用に先頭 300 文字へ切り詰める
 pub fn stderr_snippet(out: &std::process::Output) -> String {
-    String::from_utf8_lossy(&out.stderr)
-        .chars()
-        .take(300)
-        .collect()
+    snippet(&String::from_utf8_lossy(&out.stderr))
+}
+
+/// エラーメッセージ用に先頭 300 文字へ切り詰める
+fn snippet(s: &str) -> String {
+    s.chars().take(300).collect()
+}
+
+/// yt-dlp の進捗行 (PROGRESS_PREFIX + " 23.4%" など) からパーセント値を
+/// 取り出す。進捗以外の行や割合が未確定 ("N/A" / 非有限値) の行は None
+/// (f64::parse は "nan"/"inf" を受理し、NaN は JSON で null になってしまう)
+fn parse_progress_percent(line: &str) -> Option<f64> {
+    let rest = line.strip_prefix(PROGRESS_PREFIX)?;
+    rest.trim()
+        .strip_suffix('%')?
+        .trim()
+        .parse()
+        .ok()
+        .filter(|p: &f64| p.is_finite())
 }
 
 /// yt-dlp を実行し、時間内の正常終了時に stdout を返す。
@@ -1410,6 +1659,37 @@ mod tests {
 
         // 前回から FAILURE_RESET_SECS を超えて空いた失敗も数え直す
         assert_eq!(rec.record(0, 120.0 + FAILURE_RESET_SECS + 1.0), 1);
+    }
+
+    #[test]
+    fn parses_progress_lines() {
+        assert_eq!(
+            parse_progress_percent(&format!("{PROGRESS_PREFIX} 23.4%")),
+            Some(23.4)
+        );
+        assert_eq!(
+            parse_progress_percent(&format!("{PROGRESS_PREFIX}100.0%")),
+            Some(100.0)
+        );
+        // 割合が未確定の行や進捗以外の出力は無視する
+        assert_eq!(parse_progress_percent(&format!("{PROGRESS_PREFIX}N/A")), None);
+        assert_eq!(parse_progress_percent("[download] Destination: x.m4a"), None);
+        // f64::parse が受理する非有限値は弾く (JSON で null になるため)
+        assert_eq!(parse_progress_percent(&format!("{PROGRESS_PREFIX}nan%")), None);
+        assert_eq!(parse_progress_percent(&format!("{PROGRESS_PREFIX}inf%")), None);
+    }
+
+    #[test]
+    fn download_status_serializes_lowercase() {
+        // フロント (types.ts) の status union と一致するワイヤ形式を固定する
+        for (status, expected) in [
+            (DownloadStatus::Metadata, "metadata"),
+            (DownloadStatus::Downloading, "downloading"),
+            (DownloadStatus::Processing, "processing"),
+            (DownloadStatus::Error, "error"),
+        ] {
+            assert_eq!(serde_json::to_value(status).unwrap(), json!(expected));
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback } from "react";
 import { getToken } from "./api";
-import type { Device, PlaybackMode, Track, WSMessage } from "./types";
+import type { Device, DownloadProgress, PlaybackMode, Track, WSMessage } from "./types";
 
 interface WSCallbacks {
   onInit: (devices: Record<string, Device>) => void;
@@ -9,6 +9,7 @@ interface WSCallbacks {
   onPlaybackMode: (mode: PlaybackMode) => void;
   onExtractResult: (track: Track) => void;
   onExtractError: (error: string) => void;
+  onDownloadsUpdate: (downloads: DownloadProgress[]) => void;
   onConnectedChange: (connected: boolean) => void;
 }
 
@@ -46,6 +47,8 @@ export function useWebSocket(active: boolean, callbacks: WSCallbacks) {
       if (data.type === "init") {
         cbRef.current.onInit(data.devices || {});
         if (data.playback_mode) cbRef.current.onPlaybackMode(data.playback_mode);
+        // リロード・再接続時に進行中ダウンロードの表示を同期し直す
+        cbRef.current.onDownloadsUpdate(data.downloads || []);
       } else if (data.type === "device_update") {
         cbRef.current.onDeviceUpdate(data.devices || {});
       } else if (data.type === "tracks_update") {
@@ -56,6 +59,8 @@ export function useWebSocket(active: boolean, callbacks: WSCallbacks) {
         cbRef.current.onExtractResult(data.track);
       } else if (data.type === "extract_audio_error") {
         cbRef.current.onExtractError(data.error);
+      } else if (data.type === "downloads_update") {
+        cbRef.current.onDownloadsUpdate(data.downloads || []);
       }
     };
 
