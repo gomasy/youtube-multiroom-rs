@@ -13,6 +13,7 @@ RUN npm run build
 #   - yt-dlp の m4a 抽出/fixup: mov/matroska 入力、ipod/mp4 出力、aac_adtstoasc
 FROM alpine:latest AS ffmpeg
 RUN apk add --no-cache build-base pkgconf nasm curl tar xz openssl-dev zlib-dev
+# renovate: datasource=github-tags depName=FFmpeg/FFmpeg extractVersion=^n(?<version>\d+\.\d+(\.\d+)?)$
 ARG FFMPEG_VERSION=8.1.2
 RUN curl -fsSL "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" | tar -xJ
 WORKDIR /ffmpeg-${FFMPEG_VERSION}
