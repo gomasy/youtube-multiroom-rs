@@ -4,6 +4,16 @@ mod auth;
 mod handlers;
 mod state;
 
+pub const VERSION: &str = concat!(
+    "v",
+    env!("CARGO_PKG_VERSION"),
+    "-",
+    env!("GIT_HASH"),
+    " (",
+    env!("BUILD_DATE"),
+    ")",
+);
+
 use axum::Router;
 use axum::middleware;
 use axum::routing::{delete, get, post};
@@ -68,7 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_state(state);
 
     println!("══════════════════════════════════════════");
-    println!("  YouTube MultiRoom Server (Rust)");
+    println!("  YouTube MultiRoom Server {VERSION}");
     if dotenv_loaded {
         println!("  Config   → loaded .env");
     }

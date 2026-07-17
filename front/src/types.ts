@@ -50,6 +50,7 @@ export interface DownloadProgress {
 
 export interface WSInitMessage {
   type: "init";
+  version?: string;
   devices: Record<string, Device>;
   playback_mode?: PlaybackMode;
   downloads?: DownloadProgress[];

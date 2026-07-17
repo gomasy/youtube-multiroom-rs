@@ -3,6 +3,7 @@ import { getToken } from "./api";
 import type { Device, DownloadProgress, PlaybackMode, Track, WSMessage } from "./types";
 
 interface WSCallbacks {
+  onVersion: (version: string) => void;
   onInit: (devices: Record<string, Device>) => void;
   onDeviceUpdate: (devices: Record<string, Device>) => void;
   onTracksUpdate: () => void;
@@ -45,6 +46,7 @@ export function useWebSocket(active: boolean, callbacks: WSCallbacks) {
     ws.onmessage = (event) => {
       const data: WSMessage = JSON.parse(event.data);
       if (data.type === "init") {
+        if (data.version) cbRef.current.onVersion(data.version);
         cbRef.current.onInit(data.devices || {});
         if (data.playback_mode) cbRef.current.onPlaybackMode(data.playback_mode);
         // リロード・再接続時に進行中ダウンロードの表示を同期し直す

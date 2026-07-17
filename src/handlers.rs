@@ -598,6 +598,7 @@ async fn ws_handler(mut socket: WebSocket, state: Arc<AppState>) {
     // 進行中ダウンロードを含めることで、リロード後もすぐ進捗表示が復元される
     let init_msg = json!({
         "type": "init",
+        "version": crate::VERSION,
         "devices": state.devices_json().await,
         "playback_mode": state.playback_mode().await,
         "downloads": state.downloads_json().await,

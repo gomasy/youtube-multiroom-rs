@@ -17,6 +17,7 @@ export function App() {
   const [showAuth, setShowAuth] = useState(false);
   const [wsActive, setWsActive] = useState(false);
   const [connected, setConnected] = useState(false);
+  const [version, setVersion] = useState<string | null>(null);
   const [devices, setDevices] = useState<Record<string, Device>>({});
   const [tracksVersion, setTracksVersion] = useState(0);
   // 認証確認時に取得した 1 ページ目のスナップショット。History が一度だけ消費する
@@ -54,6 +55,7 @@ export function App() {
   }, [showToast]);
 
   const { sendMessage } = useWebSocket(wsActive, {
+    onVersion: setVersion,
     onConnectedChange: (c) => {
       setConnected(c);
       if (!c) setExtracting(false);
@@ -95,7 +97,7 @@ export function App() {
   return (
     <>
       <div className="app">
-        <Header connected={connected} />
+        <Header connected={connected} version={version} />
         <UrlInput
           ref={urlInputRef}
           extracting={extracting}
