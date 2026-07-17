@@ -1,6 +1,12 @@
-use crate::state::{AppState, AudioTrack, DeviceUpdate, new_token, token_track_id};
+use crate::state::{
+    AppState, AudioTrack, DeviceUpdate, auto_token, is_auto_token, new_token, token_track_id,
+};
 use serde_json::{Value, json};
 use std::sync::Arc;
+
+/// PlaybackFailed 時に同じ曲を再試行する最大回数。これを超えて連続で
+/// 失敗した場合のみ error 状態にする
+const MAX_PLAYBACK_RETRIES: u32 = 3;
 
 /// Alexa スキルリクエストを処理し、レスポンス JSON を返す
 pub async fn handle_alexa(state: &Arc<AppState>, body: Value, base_url: &str) -> Value {
@@ -115,6 +121,9 @@ async fn on_intent(state: &Arc<AppState>, body: &Value, device_id: &str, base_ur
             if let Some(dev) = state.get_device(device_id).await
                 && let Some(track) = dev.current_track
             {
+                // 明示的な再開指示なので、失敗の連続記録をリセットして
+                // 再試行の余地を戻す (error 直後の再開が即 error に戻らないように)
+                state.clear_playback_failures(device_id).await;
                 let token = new_token(&track.id);
                 return play_directive(state, &track, device_id, dev.position_ms, base_url, token)
                     .await;
@@ -151,6 +160,18 @@ async fn on_audio_event(
 
     match event_type {
         "AudioPlayer.PlaybackStarted" => {
+            // 自動選曲 (ループ/シャッフル) で ENQUEUE した曲は、開始までに
+            // モードが「オフ」へ戻されていたら続けない。NearlyFinished は
+            // 再生開始直後に届くことが多く、ENQUEUE 時点のモード判定だけでは
+            // 曲中のモード変更が反映されないため、開始時に再確認して止める
+            // (playback_mode_is_off は Redis エラー時に止めない側へ倒れる)
+            if is_auto_token(token) && state.playback_mode_is_off().await {
+                tracing::info!(
+                    "Stopping auto-continued track on {} (playback mode is off)",
+                    tail_chars(device_id, 8)
+                );
+                return stop_directive(state, device_id, "idle").await;
+            }
             tracing::info!("Playback started: {}", tail_chars(device_id, 8));
             // エンキューされた曲が始まった場合に備え、token から現在の曲を反映する。
             // 開始位置も反映する (シーク付き ENQUEUE では 0 以外から始まる)
@@ -177,6 +198,8 @@ async fn on_audio_event(
             state.remove_queue_entry(device_id, token).await;
         }
         "AudioPlayer.PlaybackFinished" => {
+            // 最後まで再生できたので失敗の連続記録をリセットする
+            state.clear_playback_failures(device_id).await;
             state
                 .update_device(device_id, DeviceUpdate::new().status("idle").position(0))
                 .await;
@@ -206,10 +229,11 @@ async fn on_audio_event(
             // 再生できない項目 (終了済みライブなど) がキュー先頭に残り続けて
             // 後続の曲を塞がないようにする
             state.remove_queue_entry(device_id, token).await;
+            let track = state.get_track(track_id).await;
             // ライブ配信は終了すると CDN の URL が解決できなくなり、Echo の
             // 再接続が失敗して PlaybackFailed が届く。これは正常な終わり方
             // なのでエラー扱いせず、通常の再生終了と同様に次の曲へ進める
-            if let Some(track) = state.get_track(track_id).await.filter(|t| t.is_live) {
+            if let Some(track) = track.as_ref().filter(|t| t.is_live) {
                 tracing::info!(
                     "Live stream '{}' ended on {} ({:?})",
                     track.title,
@@ -232,6 +256,13 @@ async fn on_audio_event(
                     .await;
                 }
             } else {
+                // ネットワーク断などの一時的な失敗に備えて数回まで再生し直し、
+                // 再試行できない・し尽くした場合のみエラー扱いにする
+                if let Some(resp) =
+                    retry_playback(state, body, device_id, base_url, token, track, err).await
+                {
+                    return resp;
+                }
                 tracing::error!("Playback failed on {}: {:?}", tail_chars(device_id, 8), err);
                 state
                     .update_device(device_id, DeviceUpdate::new().status("error"))
@@ -282,9 +313,85 @@ async fn queued_or_auto_next(
         .await
         .filter(|t| allow_live_auto || !t.is_live)
         .map(|t| {
-            let token = new_token(&t.id);
+            let token = auto_token(&t.id);
             (t, 0, token)
         })
+}
+
+/// PlaybackFailed への再試行ディレクティブを組み立てる。トラックを解決
+/// できない、再試行すべき状況でない、連続失敗が MAX_PLAYBACK_RETRIES を
+/// 超えた、のいずれかなら None (呼び出し元がエラー扱いにする)
+async fn retry_playback(
+    state: &Arc<AppState>,
+    body: &Value,
+    device_id: &str,
+    base_url: &str,
+    token: &str,
+    track: Option<AudioTrack>,
+    err: &Value,
+) -> Option<Value> {
+    let track = track?;
+    let cps = &body["request"]["currentPlaybackState"];
+    let failed_current = cps["token"].as_str() == Some(token);
+
+    // 失敗したのが ENQUEUE 済みの次曲 (failed_current でない) で、いま何も
+    // 再生していない場合は再試行しない。一時停止・停止中に REPLACE_ALL で
+    // 再生し直すと、利用者が止めた再生を勝手に再開してしまう
+    if !failed_current && cps["playerActivity"].as_str() != Some("PLAYING") {
+        return None;
+    }
+
+    // 再開位置は失敗した再生の実測位置。まだ始まっていなかった曲 (ENQUEUE
+    // の失敗など) は pending の開始位置 (Web からのシーク指定) を引き継ぎ、
+    // シーク位置の喪失と PlaybackStarted での pending 取りこぼしを防ぐ
+    let offset_ms = if failed_current {
+        cps["offsetInMilliseconds"].as_u64().unwrap_or(0)
+    } else {
+        state
+            .peek_pending(device_id)
+            .await
+            .filter(|cmd| cmd.action == "play" && cmd.track.id == track.id)
+            .map_or(0, |cmd| cmd.offset_ms)
+    };
+
+    let failures = state
+        .record_playback_failure(device_id, &track.id, offset_ms)
+        .await;
+    if failures > MAX_PLAYBACK_RETRIES {
+        return None;
+    }
+
+    tracing::warn!(
+        "Playback failed on {} (attempt {failures}/{MAX_PLAYBACK_RETRIES}), \
+         retrying '{}' from {offset_ms}ms: {:?}",
+        tail_chars(device_id, 8),
+        track.title,
+        err
+    );
+
+    // 自動選曲由来の印は、まだ再生が進んでいない場合のみ引き継ぐ。途中まで
+    // 聴いていた曲の復帰は新たな自動継続ではないので、モードが「オフ」に
+    // 変わっていても開始時に止めない
+    let retry_token = if is_auto_token(token) && offset_ms == 0 {
+        auto_token(&track.id)
+    } else {
+        new_token(&track.id)
+    };
+
+    // 別の曲を再生中に ENQUEUE 済みの次曲が失敗した場合は、再生中の曲を
+    // 中断しないよう ENQUEUE のまま再試行する
+    if !failed_current {
+        let current = cps["token"].as_str()?;
+        return Some(play_response(
+            state,
+            &track,
+            base_url,
+            offset_ms,
+            Some(current),
+            retry_token,
+        ));
+    }
+    Some(play_directive(state, &track, device_id, offset_ms, base_url, retry_token).await)
 }
 
 /// Alexa 応答共通のエンベロープ ("version" / "response") を被せる

@@ -32,6 +32,10 @@ const REDIS_QUEUE_PREFIX: &str = "youtube:queue";
 /// キューされた再生コマンドの有効期限 (秒) — Redis のキー TTL で失効する
 const PENDING_TTL_SECS: u64 = 600;
 
+/// 再生失敗を「連続」とみなす間隔 (秒)。前回の失敗からこれ以上空いていれば
+/// 別件として 1 から数え直す。再試行の失敗は直後 (数秒) に届くため十分長い値
+const FAILURE_RESET_SECS: f64 = 60.0;
+
 /// YouTube 動画 ID の形式 (11 文字)
 const VIDEO_ID_PATTERN: &str = "[a-zA-Z0-9_-]{11}";
 
@@ -64,6 +68,21 @@ pub fn new_token(track_id: &str) -> String {
 /// (YouTube の ID に '#' は含まれない)
 pub fn token_track_id(token: &str) -> &str {
     token.split('#').next().unwrap_or(token)
+}
+
+/// 自動選曲由来の token に付ける接尾辞 (auto_token / is_auto_token で対に使う)
+const AUTO_TOKEN_SUFFIX: &str = "#auto";
+
+/// 自動選曲 (ループ/シャッフル) 由来の再生を示す token を生成する。
+/// ENQUEUE 後に再生モードが「オフ」へ戻された場合、ディレクティブは
+/// 取り消せないため、再生開始イベントで自動選曲由来と判別して停止する
+pub fn auto_token(track_id: &str) -> String {
+    format!("{}{AUTO_TOKEN_SUFFIX}", new_token(track_id))
+}
+
+/// token が自動選曲由来かどうか
+pub fn is_auto_token(token: &str) -> bool {
+    token.ends_with(AUTO_TOKEN_SUFFIX)
 }
 
 // ════════════════════════════════════════
@@ -182,6 +201,32 @@ impl DeviceState {
     }
 }
 
+/// トラックごとの再生失敗の連続記録。PlaybackFailed の再試行を打ち切る
+/// 判定に使う (プロセス内のみ保持し、再起動でリセットされる)
+#[derive(Debug, Default)]
+struct FailureRecord {
+    count: u32,
+    last_failure: f64,
+    /// 前回失敗した再生位置 (ミリ秒)。位置が前進していれば再試行後の
+    /// 再生が成功していた証拠なので「連続失敗」とみなさない
+    last_offset: u64,
+}
+
+impl FailureRecord {
+    /// 失敗を記録し、今回を含む連続失敗回数を返す。前回から
+    /// FAILURE_RESET_SECS 以上空いた失敗と、前回より先の位置まで
+    /// 進んでから起きた失敗は 1 から数え直す
+    fn record(&mut self, offset_ms: u64, now: f64) -> u32 {
+        if now - self.last_failure > FAILURE_RESET_SECS || offset_ms > self.last_offset {
+            self.count = 0;
+        }
+        self.count += 1;
+        self.last_failure = now;
+        self.last_offset = offset_ms;
+        self.count
+    }
+}
+
 /// 「次に再生」キューの 1 項目 (API レスポンス用)
 #[derive(Serialize)]
 pub struct QueueItem {
@@ -281,6 +326,10 @@ pub struct AppState {
     /// 同一動画の並行ダウンロードが同じ出力ファイルへ同時に書き込まないよう
     /// 直列化する動画 ID ごとのロック
     extract_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// デバイス×トラックごとの再生失敗の連続記録 (record_playback_failure を参照)。
+    /// トラック別に数えることで、再生中の曲と ENQUEUE 済みの次曲の失敗が
+    /// 交互に届いてもカウントが互いをリセットしない
+    playback_failures: Mutex<HashMap<String, HashMap<String, FailureRecord>>>,
 }
 
 impl AppState {
@@ -307,6 +356,7 @@ impl AppState {
             restoring: AtomicBool::new(false),
             order_lock: Mutex::new(()),
             extract_locks: Mutex::new(HashMap::new()),
+            playback_failures: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -771,7 +821,31 @@ impl AppState {
         let _: Result<(), _> = conn.hdel(REDIS_KEY_DEVICES, device_id).await;
         let _: Result<(), _> = conn.del(pending_key(device_id)).await;
         let _: Result<(), _> = conn.del(queue_key(device_id)).await;
+        self.clear_playback_failures(device_id).await;
         Some(device)
+    }
+
+    /// 再生失敗を失敗時点の位置とともに記録し、同一トラックの連続失敗回数
+    /// (今回を含む) を返す
+    pub async fn record_playback_failure(
+        &self,
+        device_id: &str,
+        track_id: &str,
+        offset_ms: u64,
+    ) -> u32 {
+        self.playback_failures
+            .lock()
+            .await
+            .entry(device_id.to_string())
+            .or_default()
+            .entry(track_id.to_string())
+            .or_default()
+            .record(offset_ms, now_f64())
+    }
+
+    /// デバイスの再生失敗の記録を破棄する (次の失敗は 1 回目から数える)
+    pub async fn clear_playback_failures(&self, device_id: &str) {
+        self.playback_failures.lock().await.remove(device_id);
     }
 
     /// デバイス状態に「次に再生」キューの内容を添えて返す。
@@ -858,15 +932,34 @@ impl AppState {
 
     // ── 再生モード ──
 
-    /// 再生終了時の挙動を返す。未設定・不正値・Redis エラー時はデフォルト
-    pub async fn playback_mode(&self) -> String {
+    /// 保存済みの再生モードを返す (未設定・不正値はデフォルトへ正規化、
+    /// Redis エラーは Err のまま返して呼び出し元に安全側の判断を委ねる)
+    async fn try_playback_mode(&self) -> redis::RedisResult<String> {
         let mut conn = self.redis.clone();
-        match conn.get::<_, Option<String>>(REDIS_KEY_PLAYBACK_MODE).await {
-            Ok(Some(m)) if PLAYBACK_MODES.contains(&m.as_str()) => m,
-            Ok(_) => DEFAULT_PLAYBACK_MODE.to_string(),
+        let mode: Option<String> = conn.get(REDIS_KEY_PLAYBACK_MODE).await?;
+        Ok(mode
+            .filter(|m| PLAYBACK_MODES.contains(&m.as_str()))
+            .unwrap_or_else(|| DEFAULT_PLAYBACK_MODE.to_string()))
+    }
+
+    /// 再生終了時の挙動を返す。Redis エラー時はデフォルト
+    pub async fn playback_mode(&self) -> String {
+        self.try_playback_mode().await.unwrap_or_else(|e| {
+            tracing::warn!("Redis error reading playback mode: {e}");
+            DEFAULT_PLAYBACK_MODE.to_string()
+        })
+    }
+
+    /// 再生モードが「オフ」だと確認できた場合のみ true。進行中の再生を
+    /// 止める判定に使うため、Redis エラーで確認できないときは止めない側
+    /// (false) に倒す (デフォルトが "off" なので playback_mode の値では
+    /// 一時的なエラーと本当のオフを区別できない)
+    pub async fn playback_mode_is_off(&self) -> bool {
+        match self.try_playback_mode().await {
+            Ok(mode) => mode == "off",
             Err(e) => {
                 tracing::warn!("Redis error reading playback mode: {e}");
-                DEFAULT_PLAYBACK_MODE.to_string()
+                false
             }
         }
     }
@@ -896,6 +989,9 @@ impl AppState {
     // ── コマンドキュー ──
 
     pub async fn queue_play(&self, device_id: &str, track: AudioTrack, offset_ms: u64) {
+        // Web からの明示的な再生指示なので、失敗の連続記録をリセットして
+        // 再試行の余地を戻す
+        self.clear_playback_failures(device_id).await;
         let cmd = PendingCommand {
             action: "play".to_string(),
             track: track.clone(),
@@ -1203,6 +1299,16 @@ mod tests {
     }
 
     #[test]
+    fn auto_token_is_detectable_and_preserves_track_id() {
+        let token = auto_token("dQw4w9WgXcQ");
+        assert!(is_auto_token(&token));
+        assert_eq!(token_track_id(&token), "dQw4w9WgXcQ");
+        // 通常の token やキューエントリは自動選曲由来と判定されない
+        assert!(!is_auto_token(&new_token("dQw4w9WgXcQ")));
+        assert!(!is_auto_token("dQw4w9WgXcQ"));
+    }
+
+    #[test]
     fn queue_item_serializes_flattened() {
         let item = QueueItem {
             entry: "dQw4w9WgXcQ#123".into(),
@@ -1285,6 +1391,25 @@ mod tests {
         dev.apply(DeviceUpdate::new().position(1_000), 102.0);
         assert_eq!(dev.position_ms, 1_000);
         assert_eq!(dev.last_update, 102.0);
+    }
+
+    #[test]
+    fn failure_record_counts_consecutive_failures() {
+        let mut rec = FailureRecord::default();
+
+        // 同じ位置で失敗し続ける限り連続として数える
+        assert_eq!(rec.record(5_000, 100.0), 1);
+        assert_eq!(rec.record(5_000, 105.0), 2);
+        assert_eq!(rec.record(5_000, 110.0), 3);
+
+        // 位置が前進した失敗は数え直す (間の再試行が成功していた証拠)
+        assert_eq!(rec.record(30_000, 115.0), 1);
+
+        // 位置が進んでいない失敗 (再始動の失敗など) は連続として数える
+        assert_eq!(rec.record(0, 120.0), 2);
+
+        // 前回から FAILURE_RESET_SECS を超えて空いた失敗も数え直す
+        assert_eq!(rec.record(0, 120.0 + FAILURE_RESET_SECS + 1.0), 1);
     }
 
     #[test]
