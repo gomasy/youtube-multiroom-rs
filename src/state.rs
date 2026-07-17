@@ -508,7 +508,12 @@ impl AppState {
 
     /// yt-dlp で音声をダウンロードする。stdout の進捗行を読み取り、
     /// パーセンテージを進捗エントリへ反映しながら完了を待つ
-    async fn run_download(&self, video_id: &str, url: &str, output_str: &str) -> Result<(), String> {
+    async fn run_download(
+        &self,
+        video_id: &str,
+        url: &str,
+        output_str: &str,
+    ) -> Result<(), String> {
         // AAC ソースを優先して選べば AUDIO_EXT へは再エンコード不要 (remux のみ)
         let format_spec = format!("bestaudio[ext={AUDIO_EXT}]/bestaudio");
         // 進捗を 1 行 1 更新の機械可読な形式で stdout に流させる
@@ -1672,11 +1677,23 @@ mod tests {
             Some(100.0)
         );
         // 割合が未確定の行や進捗以外の出力は無視する
-        assert_eq!(parse_progress_percent(&format!("{PROGRESS_PREFIX}N/A")), None);
-        assert_eq!(parse_progress_percent("[download] Destination: x.m4a"), None);
+        assert_eq!(
+            parse_progress_percent(&format!("{PROGRESS_PREFIX}N/A")),
+            None
+        );
+        assert_eq!(
+            parse_progress_percent("[download] Destination: x.m4a"),
+            None
+        );
         // f64::parse が受理する非有限値は弾く (JSON で null になるため)
-        assert_eq!(parse_progress_percent(&format!("{PROGRESS_PREFIX}nan%")), None);
-        assert_eq!(parse_progress_percent(&format!("{PROGRESS_PREFIX}inf%")), None);
+        assert_eq!(
+            parse_progress_percent(&format!("{PROGRESS_PREFIX}nan%")),
+            None
+        );
+        assert_eq!(
+            parse_progress_percent(&format!("{PROGRESS_PREFIX}inf%")),
+            None
+        );
     }
 
     #[test]
