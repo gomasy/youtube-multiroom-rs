@@ -10,8 +10,11 @@ youtube-multiroom-rs/
 ├── Cargo.toml
 ├── Dockerfile
 ├── .github/
+│   ├── renovate.json          # Renovate dependency updates
 │   └── workflows/
-│       └── build-image.yml   # Container image build (ghcr.io)
+│       ├── build-image.yml    # Container image build (ghcr.io)
+│       ├── lint.yml           # rustfmt check
+│       └── release.yml        # Binary release build (GitHub Releases)
 ├── src/
 │   ├── main.rs        # Entry point & router
 │   ├── state.rs       # Shared state, audio & device management
@@ -36,6 +39,7 @@ youtube-multiroom-rs/
 │       └── components/
 │           ├── AuthModal.tsx
 │           ├── DeviceList.tsx
+│           ├── DownloadList.tsx
 │           ├── Header.tsx
 │           ├── History.tsx
 │           ├── NowPlaying.tsx
@@ -43,6 +47,7 @@ youtube-multiroom-rs/
 │           ├── ScrollingText.tsx
 │           ├── SeekBar.tsx
 │           ├── Toast.tsx
+│           ├── TrackRowInfo.tsx
 │           └── UrlInput.tsx
 ├── alexa_interaction_model.json
 └── README.md
@@ -134,6 +139,18 @@ docker run -d -p 8888:8888 \
 
 To build locally: `docker build -t youtube-multiroom .`
 
+### GitHub Releases
+
+Pre-built binaries (with `front/dist/` bundled) for x86_64 and aarch64 Linux are published to GitHub Releases on version tags. Download and extract:
+
+```bash
+tar xzf youtube-multiroom-aarch64-unknown-linux-gnu.tar.gz
+cd youtube-multiroom
+./youtube-multiroom
+```
+
+`yt-dlp`, `ffmpeg`, and Redis are still needed on the host.
+
 ### Cross-compilation for Raspberry Pi
 
 ```bash
@@ -175,6 +192,7 @@ The binary, `front/dist/`, `yt-dlp`, and `ffmpeg` are needed on the Pi.
     │    ├── youtube:playback_mode         # auto-play mode ("off" | "loop" | "shuffle")
     │    ├── youtube:pending:{device_id}   # queued play command (10 min TTL)
     │    └── youtube:queue:{device_id}     # play-next queue (list of unique entries)
+    ├── downloads: Mutex<HashMap>   # in-memory download progress
     └── tx: broadcast::Sender      # real-time sync
          │
     ┌────┴─────────────────────────────────────────────────┐
@@ -208,6 +226,10 @@ The play-next queue is a per-device Redis list of unique entries (`{track_id}#{m
 
 If the track metadata hash is ever lost (e.g. Redis was wiped), the next `GET /api/tracks` detects the missing key and rebuilds it in the background from the m4a filenames in `audio_cache/`, re-fetching metadata via yt-dlp (file mtime is used as the registration time to preserve ordering; a `tracks_update` is broadcast when done). The custom track order itself cannot be recovered this way — tracks fall back to newest-first.
 
+### Download Progress
+
+Download progress is tracked server-side in memory and broadcast to all WebSocket clients via `downloads_update` messages. This means every connected browser (including tabs opened after a download started) sees the same real-time progress. The progress goes through four stages: `metadata` (resolving title and format), `downloading` (with a percentage), `processing` (yt-dlp post-processing / m4a conversion), and on failure `error` (displayed for 60 seconds then cleared). Progress is not persisted to Redis — it resets on server restart.
+
 ### Track Ordering
 
 Tracks are listed and auto-played in a user-defined order persisted in the `youtube:tracks_order` Redis list. Rows in the Web UI can be rearranged by dragging the grip handle (works with both mouse and touch via Pointer Events). Reordering works across pages: hovering the prev/next pagination button mid-drag auto-flips pages (one page per 650 ms) so the track can be dropped anywhere in the library. Newly extracted tracks are placed at the top; tracks not present in the order list (data from before this feature) are appended newest-first.
@@ -238,15 +260,16 @@ On Alexa's `AudioPlayer.PlaybackNearlyFinished` event, the server picks the next
 
 Audio extraction is handled via WebSocket to avoid reverse proxy read timeouts.
 The client sends `{ "type": "extract_audio", "url": "..." }` and receives `extract_audio_result` or `extract_audio_error`.
-The client can also send `{ "type": "set_playback_mode", "mode": "off" | "loop" | "shuffle" }` and `{ "type": "ping" }` (answered with `pong`).
+The client can also send `{ "type": "set_playback_mode", "mode": "off" | "loop" | "shuffle" }`, `{ "type": "rename_device", "device_id": "...", "name": "..." }`, and `{ "type": "ping" }` (answered with `pong`).
 
-On connect, the server sends an `init` message containing the current device map and playback mode
+On connect, the server sends an `init` message containing the current device map, playback mode, and in-progress downloads
 (the track list is fetched separately via `GET /api/tracks`).
 
 State changes are broadcast to all WebSocket clients via `tokio::sync::broadcast`:
 - `device_update` — device status, track assignment, connection changes (full device map)
 - `tracks_update` — notification that the track list changed; clients refetch their current page via `GET /api/tracks`
 - `playback_mode_update` — the playback mode was changed by a client
+- `downloads_update` — download progress changed (new download started, progress updated, completed, or failed)
 
 ## systemd Service
 
@@ -280,6 +303,7 @@ sudo systemctl enable --now yt-multiroom
 |---|---|---|---|
 | GET | `/api/audio/{id}/stream` | Signed URL | Stream m4a audio (supports Range requests) |
 | GET | `/api/audio/{id}/live` | Signed URL | Relay live stream audio as ADTS AAC via ffmpeg |
+| GET | `/api/search` | Yes | Search YouTube (`q`, optional `limit`) |
 | GET | `/api/tracks` | Yes | List extracted tracks in library order (paginated) |
 | POST | `/api/tracks/reorder` | Yes | Move a track within the library order |
 | DELETE | `/api/tracks/{id}` | Yes | Delete a track and its cached file |
@@ -287,6 +311,9 @@ sudo systemctl enable --now yt-multiroom
 | DELETE | `/api/devices/{id}` | Yes | Delete a device |
 | POST | `/api/play` | Yes | Queue playback on selected devices |
 | POST | `/api/play-all` | Yes | Queue playback on all devices |
+| POST | `/api/queue` | Yes | Add a track to selected devices' play-next queue |
+| DELETE | `/api/devices/{id}/queue` | Yes | Clear a device's play-next queue |
+| DELETE | `/api/devices/{id}/queue/{entry}` | Yes | Remove one item from a device's play-next queue |
 | POST | `/api/devices/{id}/seek` | Yes | Queue playback of the device's current track from a position |
 | POST | `/api/devices/{id}/stop` | Yes | Stop a device |
 | POST | `/alexa` | Amazon signature | Alexa skill webhook |
