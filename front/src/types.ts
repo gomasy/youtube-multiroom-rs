@@ -33,6 +33,15 @@ export interface TracksPage {
   per_page: number;
 }
 
+/** 名前付きプレイリスト (収録曲数付きのワイヤ形式) */
+export interface Playlist {
+  id: string;
+  name: string;
+  /** 作成時刻 (UNIX 秒)。一覧はこの昇順で並ぶ */
+  created_at?: number;
+  count: number;
+}
+
 export type PlaybackMode = "loop" | "shuffle" | "off";
 
 /** 進行中ダウンロードの進捗 (サーバー側で管理され、全クライアントへ配られる) */
@@ -54,6 +63,9 @@ export interface WSInitMessage {
   devices: Record<string, Device>;
   playback_mode?: PlaybackMode;
   downloads?: DownloadProgress[];
+  playlists?: Playlist[];
+  /** ループ/シャッフルの選曲範囲プレイリスト ID (null はライブラリ全体) */
+  active_playlist?: string | null;
 }
 
 export interface WSDeviceUpdateMessage {
@@ -85,6 +97,24 @@ export interface WSDownloadsUpdateMessage {
   downloads: DownloadProgress[];
 }
 
+export interface WSPlaylistsUpdateMessage {
+  type: "playlists_update";
+  playlists: Playlist[];
+}
+
+export interface WSActivePlaylistUpdateMessage {
+  type: "active_playlist_update";
+  /** null はライブラリ全体 */
+  playlist: string | null;
+}
+
+/** プレイリスト URL の一括インポートが始まったことへの応答 (取り込みは裏で進む) */
+export interface WSPlaylistImportResultMessage {
+  type: "playlist_import_result";
+  name: string;
+  total: number;
+}
+
 export type WSMessage =
   | WSInitMessage
   | WSDeviceUpdateMessage
@@ -92,4 +122,7 @@ export type WSMessage =
   | WSPlaybackModeUpdateMessage
   | WSExtractAudioResultMessage
   | WSExtractAudioErrorMessage
-  | WSDownloadsUpdateMessage;
+  | WSDownloadsUpdateMessage
+  | WSPlaylistsUpdateMessage
+  | WSActivePlaylistUpdateMessage
+  | WSPlaylistImportResultMessage;

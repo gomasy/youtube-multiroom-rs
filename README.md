@@ -36,7 +36,10 @@ youtube-multiroom-rs/
 │       ├── types.ts       # Shared type definitions
 │       ├── parcel-env.d.ts # Ambient types for Parcel-specific imports
 │       ├── styles.css
+│       ├── manifest.webmanifest # PWA manifest
+│       ├── icons/         # PWA icons (SVG sources + generated PNGs)
 │       └── components/
+│           ├── AddToPlaylistMenu.tsx
 │           ├── AuthModal.tsx
 │           ├── DeviceList.tsx
 │           ├── DownloadList.tsx
@@ -44,11 +47,13 @@ youtube-multiroom-rs/
 │           ├── History.tsx
 │           ├── NowPlaying.tsx
 │           ├── PlaybackModeSelector.tsx
+│           ├── PreviewPlayer.tsx
 │           ├── ScrollingText.tsx
 │           ├── SeekBar.tsx
 │           ├── Toast.tsx
 │           ├── TrackRowInfo.tsx
-│           └── UrlInput.tsx
+│           ├── UrlInput.tsx
+│           └── icons.tsx      # Shared inline SVG icons
 ├── alexa_interaction_model.json
 └── README.md
 ```
@@ -170,16 +175,24 @@ The binary, `front/dist/`, `yt-dlp`, and `ffmpeg` are needed on the Pi.
 5. Endpoint > HTTPS > `https://<your-tunnel-url>/alexa`
 6. Test > Set to **Development**
 
+When upgrading from an older version, re-paste `alexa_interaction_model.json` and rebuild the model — `AMAZON.NextIntent` / `AMAZON.PreviousIntent` (voice skip) were added.
+
+## PWA
+
+The Web UI ships a web app manifest and icons, so it can be installed to the home screen (Android/Chrome 「アプリをインストール」, iOS Safari 「ホーム画面に追加」) and runs standalone in a dark themed window. Installation requires serving over HTTPS (the tunnel URL works). Icon PNGs are generated from the SVG sources in `front/src/icons/` (regenerate with `rsvg-convert` if you change them).
+
 ## Usage
 
 1. Open `http://localhost:8888`
-2. Paste a YouTube URL (auto-extracts on paste), or type keywords and press 検索 to search YouTube and pick a result
+2. Paste a YouTube URL (auto-extracts on paste), or type keywords and press 検索 to search YouTube and pick a result. Pasting a playlist URL (`playlist?list=...`) bulk-imports its videos (see Playlists below)
 3. Say to your Echo: **「アレクサ、YouTube プレーヤーを開いて」**
 4. Select devices in the Web UI and click play
 5. Say to each Echo again: **「アレクサ、YouTube プレーヤーを開いて」** to start playback
-6. Optionally pick a playback mode (off / loop / shuffle) in the Web UI to auto-play the next track
+6. Optionally pick a playback mode (off / loop / shuffle) in the Web UI to auto-play the next track, and narrow the selection scope to a playlist with 再生範囲
 7. Drag the grip handle (⋮⋮) on a track row to rearrange the library order (also used by loop playback); hold the drag over the prev/next pagination button to flip pages and drop the track on another page
 8. Use 「次に再生に追加」 to append the selected track to the play-next queue of the selected devices; queued tracks play after the current one (before the loop/shuffle mode kicks in) and can be reviewed/removed on each device card
+9. Say 「アレクサ、次の曲」 / 「アレクサ、前の曲」 while playing to skip (play-next queue and playback mode are honored; on Echo Show the on-screen prev/next buttons work too)
+10. Use the ▶ button under 選択中のトラック (Now Playing) to preview the selected track in the browser before sending it to the Echos
 
 ## Architecture
 
@@ -190,6 +203,9 @@ The binary, `front/dist/`, `yt-dlp`, and `ffmpeg` are needed on the Pi.
     │    ├── youtube:tracks_order          # track display/playback order (list)
     │    ├── youtube:devices               # Echo device states (hash)
     │    ├── youtube:playback_mode         # auto-play mode ("off" | "loop" | "shuffle")
+    │    ├── youtube:playlists             # named playlist metadata (hash)
+    │    ├── youtube:playlist:{id}         # playlist track ids in order (list)
+    │    ├── youtube:active_playlist       # loop/shuffle selection scope (playlist id)
     │    ├── youtube:pending:{device_id}   # queued play command (10 min TTL)
     │    └── youtube:queue:{device_id}     # play-next queue (list of unique entries)
     ├── downloads: Mutex<HashMap>   # in-memory download progress
@@ -200,10 +216,16 @@ The binary, `front/dist/`, `yt-dlp`, and `ffmpeg` are needed on the Pi.
     ├──────────────────────────────────────────────────────┤
     │  GET    /api/audio/{id}/stream  m4a streaming        │
     │  GET    /api/audio/{id}/live    live audio relay      │
+    │  GET    /api/audio/{id}/url     signed preview URL    │
     │  GET    /api/search             YouTube search        │
     │  GET    /api/tracks             track list (paged)    │
     │  POST   /api/tracks/reorder     move a track          │
     │  DELETE /api/tracks/{id}        delete track          │
+    │  GET    /api/playlists          playlist list         │
+    │  POST   /api/playlists          create playlist       │
+    │  DELETE /api/playlists/{id}     delete playlist       │
+    │  POST   /api/playlists/{id}/tracks       add track    │
+    │  DELETE /api/playlists/{id}/tracks/{tid} remove track │
     │  GET    /api/devices            device list           │
     │  DELETE /api/devices/{id}       delete device         │
     │  POST   /api/play              queue to devices       │
@@ -251,25 +273,45 @@ Caveats:
 Auto-play behavior when a track finishes is controlled by a global playback mode (selectable in the Web UI, persisted in Redis, default `off`):
 
 - `off` — stop after the current track
-- `loop` — continue with the next track in library order (see Track Ordering above), wrapping to the top
+- `loop` — continue with the next track in order, wrapping to the top
 - `shuffle` — continue with a random track other than the current one
 
 On Alexa's `AudioPlayer.PlaybackNearlyFinished` event, the server picks the next track according to the mode and enqueues it via an `ENQUEUE` directive.
 
+The selection scope defaults to the whole library (see Track Ordering above) and can be narrowed to a named playlist with the 再生範囲 selector (persisted in `youtube:active_playlist`). If the scoped playlist is deleted, the scope falls back to the whole library; if it is empty, auto-play stops.
+
+### Playlists
+
+Tracks can be organized into named playlists (created from the Web UI, or automatically by a playlist import). A playlist stores an ordered list of track ids in `youtube:playlist:{id}`; the track files themselves are shared with the library, so adding/removing playlist entries never touches the cache. Rows in a playlist view can be reordered by dragging, same as the library. Deleting a track from the library also removes it from every playlist.
+
+Pasting a YouTube playlist URL (`youtube.com/playlist?list=...`, or any YouTube URL with `list=` but no `v=`) bulk-imports it: the playlist is expanded with `yt-dlp --flat-playlist` (capped at 100 entries), a local playlist with the same name is created (or appended to, when re-importing), and each video is downloaded sequentially in the background with the usual per-track progress display. Videos that fail to download are skipped. A watch URL that contains both `v=` and `list=` is treated as a single video, as before.
+
+### Voice Skip & Playback Controls
+
+`AMAZON.NextIntent` (「アレクサ、次の曲」) switches to the next track immediately: a pending play command from the Web is honored first, then the play-next queue, then the playback-mode selection (shuffle picks a random track; loop/off advance in order within the current scope — an explicit "next" moves on even when the mode is off). `AMAZON.PreviousIntent` goes back one track in scope order, wrapping from the first track to the last. Both reset the playback-failure retry counter, like an explicit resume.
+
+`PlaybackController.*` requests (touch controls on an Echo Show, or physical remote buttons) are mapped to the same handlers: play → resume, pause → pause, next/previous → skip. Per the Alexa spec these responses carry only `AudioPlayer` directives and no speech.
+
+### Browser Preview
+
+The Now Playing card has a small preview player to check a track in the browser before sending it to the Echos. Since `<audio>` elements cannot send an `Authorization` header, the client first calls `GET /api/audio/{id}/url` (Bearer-authenticated) to obtain a signed stream URL — the same HMAC scheme used for Echo playback — and feeds that to the audio element. Live tracks are relayed through `/live` and play without seeking.
+
 ### WebSocket Protocol
 
 Audio extraction is handled via WebSocket to avoid reverse proxy read timeouts.
-The client sends `{ "type": "extract_audio", "url": "..." }` and receives `extract_audio_result` or `extract_audio_error`.
-The client can also send `{ "type": "set_playback_mode", "mode": "off" | "loop" | "shuffle" }`, `{ "type": "rename_device", "device_id": "...", "name": "..." }`, and `{ "type": "ping" }` (answered with `pong`).
+The client sends `{ "type": "extract_audio", "url": "..." }` and receives `extract_audio_result` or `extract_audio_error`; a playlist URL instead answers with `playlist_import_result` (`name`, `total`) once the background import has started.
+The client can also send `{ "type": "set_playback_mode", "mode": "off" | "loop" | "shuffle" }`, `{ "type": "set_active_playlist", "playlist": "<id>" | null }`, and `{ "type": "ping" }` (answered with `pong`).
 
-On connect, the server sends an `init` message containing the current device map, playback mode, and in-progress downloads
+On connect, the server sends an `init` message containing the current device map, playback mode, in-progress downloads, playlists, and the active playlist
 (the track list is fetched separately via `GET /api/tracks`).
 
 State changes are broadcast to all WebSocket clients via `tokio::sync::broadcast`:
 - `device_update` — device status, track assignment, connection changes (full device map)
-- `tracks_update` — notification that the track list changed; clients refetch their current page via `GET /api/tracks`
+- `tracks_update` — notification that the track list (or a playlist's contents) changed; clients refetch their current page via `GET /api/tracks`
 - `playback_mode_update` — the playback mode was changed by a client
 - `downloads_update` — download progress changed (new download started, progress updated, completed, or failed)
+- `playlists_update` — playlist list or contents changed (full playlist list with counts)
+- `active_playlist_update` — the loop/shuffle selection scope changed
 
 ## systemd Service
 
@@ -303,10 +345,16 @@ sudo systemctl enable --now yt-multiroom
 |---|---|---|---|
 | GET | `/api/audio/{id}/stream` | Signed URL | Stream m4a audio (supports Range requests) |
 | GET | `/api/audio/{id}/live` | Signed URL | Relay live stream audio as ADTS AAC via ffmpeg |
+| GET | `/api/audio/{id}/url` | Yes | Get a signed stream URL for browser preview |
 | GET | `/api/search` | Yes | Search YouTube (`q`, optional `limit`) |
-| GET | `/api/tracks` | Yes | List extracted tracks in library order (paginated) |
-| POST | `/api/tracks/reorder` | Yes | Move a track within the library order |
+| GET | `/api/tracks` | Yes | List tracks in order (paginated, optional `playlist`) |
+| POST | `/api/tracks/reorder` | Yes | Move a track within the library or a playlist order |
 | DELETE | `/api/tracks/{id}` | Yes | Delete a track and its cached file |
+| GET | `/api/playlists` | Yes | List playlists with track counts |
+| POST | `/api/playlists` | Yes | Create a playlist (`name`) |
+| DELETE | `/api/playlists/{id}` | Yes | Delete a playlist (tracks are kept) |
+| POST | `/api/playlists/{id}/tracks` | Yes | Add a track to a playlist (`track_id`) |
+| DELETE | `/api/playlists/{id}/tracks/{track_id}` | Yes | Remove a track from a playlist |
 | GET | `/api/devices` | Yes | List connected devices |
 | DELETE | `/api/devices/{id}` | Yes | Delete a device |
 | POST | `/api/play` | Yes | Queue playback on selected devices |

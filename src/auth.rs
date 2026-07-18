@@ -72,6 +72,20 @@ pub fn stream_query(secret: &str, audio_id: &str) -> String {
     format!("exp={exp}&sig={sig}")
 }
 
+/// トラックのストリーム再生パスを組み立てる (認証有効時は署名クエリ付き)。
+/// Echo もブラウザの audio 要素も Authorization ヘッダを付けられないため、
+/// 再生 URL はこの署名で認証する。ライブ配信はファイルがなく、CDN の音声を
+/// 中継する /live を使う
+pub fn stream_path(api_token: Option<&str>, audio_id: &str, is_live: bool) -> String {
+    let endpoint = if is_live { "live" } else { "stream" };
+    let mut path = format!("/api/audio/{audio_id}/{endpoint}");
+    if let Some(secret) = api_token {
+        path.push('?');
+        path.push_str(&stream_query(secret, audio_id));
+    }
+    path
+}
+
 fn verify_stream_query(secret: &str, audio_id: &str, query: Option<&str>) -> bool {
     let Some(exp) = query_param(query, "exp").and_then(|v| v.parse::<u64>().ok()) else {
         return false;
@@ -182,6 +196,22 @@ mod tests {
         let future = now_secs() + 100;
         let q = format!("exp={future}&sig={}", sign("secret", "abc123", exp));
         assert!(!verify_stream_query("secret", "abc123", Some(&q)));
+    }
+
+    #[test]
+    fn stream_path_matches_endpoint_and_auth() {
+        // 認証無効時は素のパス
+        assert_eq!(
+            stream_path(None, "abc123", false),
+            "/api/audio/abc123/stream"
+        );
+        assert_eq!(stream_path(None, "abc123", true), "/api/audio/abc123/live");
+
+        // 認証有効時は署名クエリ付きで、そのまま検証を通る
+        let path = stream_path(Some("secret"), "abc123", false);
+        let (base, query) = path.split_once('?').unwrap();
+        assert_eq!(base, "/api/audio/abc123/stream");
+        assert!(verify_stream_query("secret", "abc123", Some(query)));
     }
 
     #[test]

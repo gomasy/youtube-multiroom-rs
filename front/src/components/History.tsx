@@ -1,7 +1,18 @@
 import { useEffect, useRef, useState } from "react";
-import { authFetch, fetchTracks, reorderTrack, PER_PAGE } from "../api";
+import {
+  addToPlaylist,
+  authFetch,
+  createPlaylist,
+  deletePlaylist,
+  fetchTracks,
+  removeFromPlaylist,
+  reorderTrack,
+  PER_PAGE,
+} from "../api";
 import { TrackRowInfo } from "./TrackRowInfo";
-import type { Track, TracksPage } from "../types";
+import { AddToPlaylistMenu } from "./AddToPlaylistMenu";
+import { AddToListIcon, CloseIcon, TrashIcon } from "./icons";
+import type { Playlist, Track, TracksPage } from "../types";
 
 // 総件数から最終ページ番号 (1 始まり) を求める
 function lastPage(total: number): number {
@@ -14,16 +25,25 @@ interface Props {
   initialData: TracksPage | null;
   refreshKey: number;
   currentTrack: Track | null;
+  playlists: Playlist[];
+  /** REST での作成に成功したとき、親の一覧へ楽観的に反映させる */
+  onPlaylistCreated: (playlist: Playlist) => void;
   onSelectTrack: (track: Track) => void;
   onTrackDeleted: (trackId: string) => void;
   onUnauthorized: () => void;
   showToast: (msg: string) => void;
 }
 
-export function History({ active, initialData, refreshKey, currentTrack, onSelectTrack, onTrackDeleted, onUnauthorized, showToast }: Props) {
+export function History({ active, initialData, refreshKey, currentTrack, playlists, onPlaylistCreated, onSelectTrack, onTrackDeleted, onUnauthorized, showToast }: Props) {
   const [page, setPage] = useState(1);
   const [tracks, setTracks] = useState<Track[]>([]);
   const [total, setTotal] = useState(0);
+  // 表示中のプレイリスト ID (null はライブラリ全体)
+  const [viewPlaylist, setViewPlaylist] = useState<string | null>(null);
+  // プレイリスト新規作成の入力欄 (null は非表示)
+  const [newName, setNewName] = useState<string | null>(null);
+  // 「プレイリストに追加」メニューを開いているトラック ID
+  const [menuTrackId, setMenuTrackId] = useState<string | null>(null);
   // WS 切断中でも REST 操作後にリストを更新できるようにするローカルカウンター
   const [localVersion, setLocalVersion] = useState(0);
   // 消費済みの initialData を識別し、再認証などで新しいスナップショットが
@@ -46,10 +66,18 @@ export function History({ active, initialData, refreshKey, currentTrack, onSelec
   const nextBtnRef = useRef<HTMLButtonElement>(null);
 
   const totalPages = lastPage(total);
+  const viewingPlaylist = playlists.find((p) => p.id === viewPlaylist) ?? null;
+
+  // 表示中のプレイリストが削除されたらライブラリ表示へ戻す
+  useEffect(() => {
+    if (viewPlaylist && !playlists.some((p) => p.id === viewPlaylist)) {
+      switchView(null);
+    }
+  }, [playlists, viewPlaylist]);
 
   useEffect(() => {
     if (!active) return;
-    if (initialData && consumedInitial.current !== initialData) {
+    if (!viewPlaylist && initialData && consumedInitial.current !== initialData) {
       consumedInitial.current = initialData;
       // 表示中のページと一致する場合のみ採用。ずれていれば通常のフェッチへ
       if (page === initialData.page) {
@@ -60,7 +88,7 @@ export function History({ active, initialData, refreshKey, currentTrack, onSelec
       }
     }
     let cancelled = false;
-    fetchTracks(page, PER_PAGE, onUnauthorized)
+    fetchTracks(page, PER_PAGE, onUnauthorized, undefined, viewPlaylist)
       .then((data) => {
         if (cancelled) return;
         setTracks(data.tracks);
@@ -74,7 +102,7 @@ export function History({ active, initialData, refreshKey, currentTrack, onSelec
     return () => {
       cancelled = true;
     };
-  }, [active, initialData, page, refreshKey, localVersion, onUnauthorized]);
+  }, [active, initialData, page, refreshKey, localVersion, viewPlaylist, onUnauthorized]);
 
   // ドラッグ中のかざし方向に従って一定間隔でページを送る。端に達したら
   // 止めてハイライトも消す。クリーンアップがタイマーの停止を兼ねる
@@ -88,7 +116,15 @@ export function History({ active, initialData, refreshKey, currentTrack, onSelec
     return () => clearInterval(timer);
   }, [flipDir, page, totalPages]);
 
-  if (total === 0) return null;
+  // ライブラリが空でプレイリストも無いうちはセクションごと隠す
+  if (total === 0 && !viewPlaylist && playlists.length === 0) return null;
+
+  function switchView(playlistId: string | null) {
+    setViewPlaylist(playlistId);
+    setPage(1);
+    setMenuTrackId(null);
+    resetDrag();
+  }
 
   // ポインタ位置から挿入インデックスを求める (各行の中央を境に前後を判定)
   function updateDropIndex(clientY: number) {
@@ -176,7 +212,7 @@ export function History({ active, initialData, refreshKey, currentTrack, onSelec
     setTracks(next.slice(0, PER_PAGE));
 
     try {
-      await reorderTrack(id, newIndex, onUnauthorized);
+      await reorderTrack(id, newIndex, onUnauthorized, viewPlaylist);
     } catch (e) {
       showToast(`エラー: ${(e as Error).message}`);
     } finally {
@@ -202,9 +238,132 @@ export function History({ active, initialData, refreshKey, currentTrack, onSelec
     }
   }
 
+  // プレイリスト表示での行の削除ボタン: トラック自体は残して収録から外す
+  async function removeTrackFromView(trackId: string) {
+    if (!viewPlaylist) return;
+    try {
+      await removeFromPlaylist(viewPlaylist, trackId, onUnauthorized);
+      setLocalVersion((v) => v + 1);
+      showToast("プレイリストから外しました");
+    } catch (e) {
+      showToast(`エラー: ${(e as Error).message}`);
+    }
+  }
+
+  async function submitNewPlaylist() {
+    const name = (newName ?? "").trim();
+    if (!name) {
+      setNewName(null);
+      return;
+    }
+    try {
+      const playlist = await createPlaylist(name, onUnauthorized);
+      setNewName(null);
+      showToast(`プレイリスト「${playlist.name}」を作成しました`);
+      // 親の一覧へ先に反映してから切り替える。playlists_update を待つと、
+      // その間「存在しないプレイリスト」としてライブラリへ弾き返されてしまう
+      onPlaylistCreated(playlist);
+      switchView(playlist.id);
+    } catch (e) {
+      showToast(`エラー: ${(e as Error).message}`);
+    }
+  }
+
+  async function deleteViewingPlaylist() {
+    if (!viewingPlaylist) return;
+    try {
+      await deletePlaylist(viewingPlaylist.id, onUnauthorized);
+      showToast(`プレイリスト「${viewingPlaylist.name}」を削除しました`);
+      switchView(null);
+    } catch (e) {
+      showToast(`エラー: ${(e as Error).message}`);
+    }
+  }
+
+  async function addTrackToPlaylist(playlistId: string, trackId: string) {
+    setMenuTrackId(null);
+    try {
+      const data = await addToPlaylist(playlistId, trackId, onUnauthorized);
+      showToast(data.message || "プレイリストに追加しました");
+    } catch (e) {
+      showToast(`エラー: ${(e as Error).message}`);
+    }
+  }
+
   return (
     <div className="history-section">
-      <div className="section-label">取得済みトラック ({total})</div>
+      <div className="playlist-bar">
+        <button
+          className={`playlist-tab${viewPlaylist === null ? " active" : ""}`}
+          onClick={() => switchView(null)}
+        >
+          ライブラリ
+        </button>
+        {playlists.map((p) => (
+          <button
+            key={p.id}
+            className={`playlist-tab${viewPlaylist === p.id ? " active" : ""}`}
+            onClick={() => switchView(p.id)}
+          >
+            {p.name} <span className="playlist-tab-count">{p.count}</span>
+          </button>
+        ))}
+        {newName === null ? (
+          <button
+            className="playlist-tab playlist-tab-add"
+            title="プレイリストを作成"
+            onClick={() => setNewName("")}
+          >
+            ＋
+          </button>
+        ) : (
+          <span className="playlist-new">
+            <input
+              type="text"
+              className="playlist-new-input"
+              placeholder="プレイリスト名"
+              autoFocus
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") submitNewPlaylist();
+                if (e.key === "Escape") setNewName(null);
+              }}
+            />
+            <button className="btn btn-sm" onClick={submitNewPlaylist}>
+              作成
+            </button>
+            <button className="text-btn" onClick={() => setNewName(null)}>
+              キャンセル
+            </button>
+          </span>
+        )}
+      </div>
+
+      <div className="section-label history-header">
+        <span>
+          {viewingPlaylist
+            ? `${viewingPlaylist.name} (${total})`
+            : `取得済みトラック (${total})`}
+        </span>
+        {viewingPlaylist && (
+          <button
+            className="text-btn text-btn-danger"
+            onClick={deleteViewingPlaylist}
+          >
+            プレイリストを削除
+          </button>
+        )}
+      </div>
+
+      {total === 0 && (
+        <div className="history-empty">
+          {viewPlaylist
+            ? "このプレイリストは空です。ライブラリの ♪＋ ボタンで追加できます"
+            : "トラックがありません"}
+        </div>
+      )}
+
       <div
         className="history-list"
         ref={listRef}
@@ -245,14 +404,35 @@ export function History({ active, initialData, refreshKey, currentTrack, onSelec
                 </span>
               )}
               <TrackRowInfo track={t} />
+              {!viewPlaylist && (
+                <span className="playlist-menu-anchor" onClick={(e) => e.stopPropagation()}>
+                  <button
+                    className="delete-btn add-btn"
+                    title="プレイリストに追加"
+                    onClick={() => setMenuTrackId(menuTrackId === t.id ? null : t.id)}
+                  >
+                    <AddToListIcon />
+                  </button>
+                  {menuTrackId === t.id && (
+                    <AddToPlaylistMenu
+                      playlists={playlists}
+                      onAdd={(pid) => addTrackToPlaylist(pid, t.id)}
+                      onClose={() => setMenuTrackId(null)}
+                    />
+                  )}
+                </span>
+              )}
+              {/* プレイリスト表示では収録から外すだけで、トラック自体は消さない */}
               <button
                 className="delete-btn"
-                title="トラックを削除"
-                onClick={(e) => { e.stopPropagation(); deleteTrack(t.id); }}
+                title={viewPlaylist ? "プレイリストから外す" : "トラックを削除"}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (viewPlaylist) removeTrackFromView(t.id);
+                  else deleteTrack(t.id);
+                }}
               >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6h14" />
-                </svg>
+                {viewPlaylist ? <CloseIcon /> : <TrashIcon />}
               </button>
             </div>
           );

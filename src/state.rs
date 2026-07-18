@@ -30,6 +30,20 @@ const REDIS_PENDING_PREFIX: &str = "youtube:pending";
 /// 次に再生される。エントリは AudioPlayer の token としてそのまま使われるため、
 /// 再生イベントの token と値一致で照合・消費できる
 const REDIS_QUEUE_PREFIX: &str = "youtube:queue";
+/// 名前付きプレイリストのメタデータ (hash: playlist_id → JSON)
+const REDIS_KEY_PLAYLISTS: &str = "youtube:playlists";
+/// プレイリスト収録トラック ID リストのキー接頭辞 (youtube:playlist:{id})
+const REDIS_PLAYLIST_PREFIX: &str = "youtube:playlist";
+/// ループ/シャッフルの選曲範囲にするプレイリスト ID (未設定はライブラリ全体)
+const REDIS_KEY_ACTIVE_PLAYLIST: &str = "youtube:active_playlist";
+
+/// プレイリスト名の最大文字数 (表示崩れ・巨大値の保存を防ぐ)
+const PLAYLIST_NAME_MAX_CHARS: usize = 100;
+/// プレイリスト一括インポートで取り込む最大件数 (ミックスリストなどの
+/// 実質無限のプレイリストを際限なく展開しないための上限)
+const PLAYLIST_IMPORT_MAX: usize = 100;
+/// プレイリストのフラット展開 (メタデータ一覧取得) の制限時間 (秒)
+const PLAYLIST_FLAT_TIMEOUT_SECS: u64 = 60;
 
 /// キューされた再生コマンドの有効期限 (秒) — Redis のキー TTL で失効する
 const PENDING_TTL_SECS: u64 = 600;
@@ -63,6 +77,10 @@ fn pending_key(device_id: &str) -> String {
 
 fn queue_key(device_id: &str) -> String {
     format!("{REDIS_QUEUE_PREFIX}:{device_id}")
+}
+
+fn playlist_key(playlist_id: &str) -> String {
+    format!("{REDIS_PLAYLIST_PREFIX}:{playlist_id}")
 }
 
 /// AudioPlayer token 兼キューエントリ "{track_id}#{発行時刻ミリ秒}" を生成する。
@@ -152,6 +170,36 @@ impl AudioTrack {
     }
 }
 
+/// 名前付きプレイリスト。収録トラック ID は別リスト (youtube:playlist:{id}) に持つ
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Playlist {
+    pub id: String,
+    pub name: String,
+    pub created_at: f64,
+}
+
+/// playlists_json のワイヤ形式: メタデータに収録曲数を添えたもの
+#[derive(Serialize)]
+struct PlaylistJson {
+    #[serde(flatten)]
+    playlist: Playlist,
+    count: usize,
+}
+
+/// プレイリスト一括インポートの開始時情報 (取り込みはバックグラウンドで進む)
+pub struct PlaylistImportInfo {
+    pub name: String,
+    pub total: usize,
+}
+
+/// reorder_track の結果。並びに無い (未収録・競合する削除) と
+/// Redis エラーを呼び出し元が区別できるように分ける
+pub enum ReorderOutcome {
+    Moved,
+    NotInList,
+    Failed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceState {
     pub device_id: String,
@@ -169,7 +217,7 @@ impl DeviceState {
     /// 「last_update 時点の位置」を意味するため、last_update だけを進めると
     /// クライアントの推定位置が巻き戻る
     fn apply(&mut self, upd: DeviceUpdate, now: f64) {
-        // 位置を伴わない更新 (rename など) では経過時間ぶん位置を進めて整合を保つ
+        // 位置を伴わない更新 (再登録など) では経過時間ぶん位置を進めて整合を保つ
         if upd.position_ms.is_none() {
             self.advance_position(now);
         }
@@ -181,9 +229,6 @@ impl DeviceState {
         }
         if let Some(p) = upd.position_ms {
             self.position_ms = p;
-        }
-        if let Some(n) = upd.name {
-            self.name = n;
         }
         self.last_update = now;
     }
@@ -311,6 +356,9 @@ pub struct ReorderRequest {
     pub track_id: String,
     /// 移動先の全体インデックス (0 始まり、範囲外は末尾に丸める)
     pub new_index: usize,
+    /// 並べ替え対象のプレイリスト ID (未指定はライブラリ全体の並び)
+    #[serde(default)]
+    pub playlist: Option<String>,
 }
 
 // ════════════════════════════════════════
@@ -322,7 +370,6 @@ pub struct DeviceUpdate {
     status: Option<String>,
     current_track: Option<AudioTrack>,
     position_ms: Option<u64>,
-    name: Option<String>,
 }
 
 impl DeviceUpdate {
@@ -339,10 +386,6 @@ impl DeviceUpdate {
     }
     pub fn position(mut self, p: u64) -> Self {
         self.position_ms = Some(p);
-        self
-    }
-    pub fn name(mut self, n: impl Into<String>) -> Self {
-        self.name = Some(n.into());
         self
     }
 }
@@ -733,8 +776,22 @@ impl AppState {
         let mut conn = self.redis.clone();
         let _: Result<(), _> = conn.hdel(REDIS_KEY_TRACKS, id).await;
         {
+            // reorder の全置換 (読み→書き) と交錯すると削除がなかったことに
+            // なるため、並び順とプレイリストからの除去も直列化する
             let _guard = self.order_lock.lock().await;
             let _: Result<(), _> = conn.lrem(REDIS_KEY_TRACKS_ORDER, 0, id).await;
+
+            // 全プレイリストの収録リストからも 1 往復でまとめて取り除く
+            let playlists = self.playlists().await;
+            if !playlists.is_empty() {
+                let mut pipe = redis::pipe();
+                for playlist in &playlists {
+                    pipe.lrem(playlist_key(&playlist.id), 0, id).ignore();
+                }
+                if let Err(e) = pipe.query_async::<()>(&mut conn).await {
+                    tracing::warn!("Redis error removing track {id} from playlists: {e}");
+                }
+            }
         }
 
         // 削除トラックをキューしている pending コマンドを除去
@@ -817,29 +874,38 @@ impl AppState {
         tracks
     }
 
-    /// トラックを全体の並びの new_index (0 始まり) に移動して保存する。
-    /// 成功時は true、Redis エラー時は false
-    pub async fn reorder_track(&self, track_id: &str, new_index: usize) -> bool {
+    /// トラックを並びの new_index (0 始まり) に移動して保存する。
+    /// playlist_id を指定するとそのプレイリスト内の並び、なければライブラリ全体
+    pub async fn reorder_track(
+        &self,
+        playlist_id: Option<&str>,
+        track_id: &str,
+        new_index: usize,
+    ) -> ReorderOutcome {
         // 読み→全置換の間に他の変更が割り込むと失われるため直列化する
         let _guard = self.order_lock.lock().await;
-        let mut ids: Vec<String> = self.list_tracks().await.into_iter().map(|t| t.id).collect();
+        let (key, mut ids) = match playlist_id {
+            Some(pid) => (playlist_key(pid), self.playlist_track_ids(pid).await),
+            None => (
+                REDIS_KEY_TRACKS_ORDER.to_string(),
+                self.list_tracks().await.into_iter().map(|t| t.id).collect(),
+            ),
+        };
         let Some(pos) = ids.iter().position(|id| id == track_id) else {
-            return false;
+            return ReorderOutcome::NotInList;
         };
         let id = ids.remove(pos);
         ids.insert(new_index.min(ids.len()), id);
 
         // 並び順リスト全体を書き換える (件数は高々数百なので都度全置換で十分)
         let mut pipe = redis::pipe();
-        pipe.atomic()
-            .del(REDIS_KEY_TRACKS_ORDER)
-            .rpush(REDIS_KEY_TRACKS_ORDER, &ids);
+        pipe.atomic().del(&key).rpush(&key, &ids);
         let mut conn = self.redis.clone();
         match pipe.query_async::<()>(&mut conn).await {
-            Ok(()) => true,
+            Ok(()) => ReorderOutcome::Moved,
             Err(e) => {
                 tracing::warn!("Redis error writing track order: {e}");
-                false
+                ReorderOutcome::Failed
             }
         }
     }
@@ -915,46 +981,55 @@ impl AppState {
         )
     }
 
-    /// 再生モードに従い、再生終了後に続ける曲を返す ("off" なら None)
+    /// 選曲・一覧の範囲を返す。プレイリスト指定があればその収録順、
+    /// なければライブラリ全体の並び順
+    pub async fn scoped_tracks(&self, playlist_id: Option<&str>) -> Vec<AudioTrack> {
+        match playlist_id {
+            Some(pid) => self.list_playlist_tracks(pid).await,
+            None => self.list_tracks().await,
+        }
+    }
+
+    /// 選曲範囲 (アクティブプレイリスト、なければライブラリ全体) のトラックを返す
+    async fn active_scope_tracks(&self) -> Vec<AudioTrack> {
+        let scope = self.active_playlist().await;
+        self.scoped_tracks(scope.as_deref()).await
+    }
+
+    /// 再生モードに従い、再生終了後に続ける曲を返す ("off" なら None)。
+    /// 選曲はアクティブプレイリストの範囲内で行う
     pub async fn auto_next_track(&self, current_id: &str) -> Option<AudioTrack> {
         match self.playback_mode().await.as_str() {
-            "loop" => self.next_track(current_id).await,
-            "shuffle" => self.random_track(current_id).await,
+            "loop" => neighbor_track(&self.active_scope_tracks().await, current_id, 1),
+            "shuffle" => random_track_from(self.active_scope_tracks().await, current_id),
             _ => None, // "off": 自動再生しない
         }
     }
 
-    /// 保存済みの並び順で現在トラックの次を返す。
-    /// 末尾なら先頭に戻り、現在トラックが見つからない (削除済みなど) 場合も先頭を返す
-    async fn next_track(&self, current_id: &str) -> Option<AudioTrack> {
-        let tracks = self.list_tracks().await;
-        let next = match tracks.iter().position(|t| t.id == current_id) {
-            Some(i) => tracks.get(i + 1).or_else(|| tracks.first()),
-            None => tracks.first(),
-        };
-        next.cloned()
+    /// 「次の曲」の明示指示で再生する曲を返す。シャッフル中はランダム、
+    /// それ以外は範囲内の並び順で次 (モードが「オフ」でも明示指示なので進む)
+    pub async fn skip_next_track(&self, current_id: &str) -> Option<AudioTrack> {
+        if self.playback_mode().await == "shuffle" {
+            random_track_from(self.active_scope_tracks().await, current_id)
+        } else {
+            neighbor_track(&self.active_scope_tracks().await, current_id, 1)
+        }
     }
 
-    /// シャッフル用に現在トラック以外からランダムに 1 曲返す (1 曲しかなければその曲)
-    async fn random_track(&self, current_id: &str) -> Option<AudioTrack> {
-        let mut tracks = self.list_tracks().await;
-        if tracks.len() > 1 {
-            tracks.retain(|t| t.id != current_id);
-        }
-        if tracks.is_empty() {
-            return None;
-        }
-        // 選曲のばらつき程度で十分なので時刻のナノ秒を乱数代わりに使う
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos() as usize;
-        Some(tracks.swap_remove(nanos % tracks.len()))
+    /// 「前の曲」の明示指示で再生する曲を返す (範囲内の並び順で前、先頭は末尾へ折り返し)
+    pub async fn skip_prev_track(&self, current_id: &str) -> Option<AudioTrack> {
+        neighbor_track(&self.active_scope_tracks().await, current_id, -1)
     }
 
-    /// 指定ページのトラックと総件数を返す (page は 1 始まり)
-    pub async fn list_tracks_page(&self, page: usize, per_page: usize) -> (Vec<AudioTrack>, usize) {
-        let tracks = self.list_tracks().await;
+    /// 指定ページのトラックと総件数を返す (page は 1 始まり)。
+    /// playlist_id を指定するとそのプレイリストの収録順で返す
+    pub async fn list_tracks_page(
+        &self,
+        playlist_id: Option<&str>,
+        page: usize,
+        per_page: usize,
+    ) -> (Vec<AudioTrack>, usize) {
+        let tracks = self.scoped_tracks(playlist_id).await;
         let total = tracks.len();
         let start = page.saturating_sub(1).saturating_mul(per_page);
         let items = tracks.into_iter().skip(start).take(per_page).collect();
@@ -1169,6 +1244,22 @@ impl AppState {
         self.broadcast(json!({ "type": "tracks_update" }));
     }
 
+    /// プレイリストの一覧・収録内容の変更を全クライアントへ通知する
+    pub async fn broadcast_playlists(&self) {
+        self.broadcast(json!({
+            "type": "playlists_update",
+            "playlists": self.playlists_json().await,
+        }));
+    }
+
+    /// 選曲範囲 (アクティブプレイリスト) の変更を全クライアントへ通知する
+    pub async fn broadcast_active_playlist(&self) {
+        self.broadcast(json!({
+            "type": "active_playlist_update",
+            "playlist": self.active_playlist().await,
+        }));
+    }
+
     // ── 再生モード ──
 
     /// 保存済みの再生モードを返す (未設定・不正値はデフォルトへ正規化、
@@ -1359,6 +1450,313 @@ impl AppState {
         }
     }
 
+    // ── プレイリスト ──
+
+    /// プレイリストを作成する。名前は前後空白を除いた 1〜PLAYLIST_NAME_MAX_CHARS
+    /// 文字。不正な名前・Redis エラー時は None
+    pub async fn create_playlist(&self, name: &str) -> Option<Playlist> {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > PLAYLIST_NAME_MAX_CHARS {
+            return None;
+        }
+        let playlist = Playlist {
+            id: new_playlist_id(),
+            name: name.to_string(),
+            created_at: now_f64(),
+        };
+        let json_str = serde_json::to_string(&playlist).expect("Playlist serializes to JSON");
+        let mut conn = self.redis.clone();
+        match conn
+            .hset::<_, _, _, ()>(REDIS_KEY_PLAYLISTS, &playlist.id, json_str)
+            .await
+        {
+            Ok(()) => Some(playlist),
+            Err(e) => {
+                tracing::warn!("Redis error creating playlist: {e}");
+                None
+            }
+        }
+    }
+
+    pub async fn get_playlist(&self, playlist_id: &str) -> Option<Playlist> {
+        let mut conn = self.redis.clone();
+        match conn
+            .hget::<_, _, Option<String>>(REDIS_KEY_PLAYLISTS, playlist_id)
+            .await
+        {
+            Ok(s) => s.and_then(|s| serde_json::from_str(&s).ok()),
+            Err(e) => {
+                tracing::warn!("Redis error reading playlist {playlist_id}: {e}");
+                None
+            }
+        }
+    }
+
+    /// 全プレイリストを作成順で返す
+    pub async fn playlists(&self) -> Vec<Playlist> {
+        let mut conn = self.redis.clone();
+        let all: HashMap<String, String> =
+            conn.hgetall(REDIS_KEY_PLAYLISTS).await.unwrap_or_else(|e| {
+                tracing::warn!("Redis error listing playlists: {e}");
+                HashMap::new()
+            });
+        let mut playlists: Vec<Playlist> = all
+            .values()
+            .filter_map(|s| serde_json::from_str(s).ok())
+            .collect();
+        playlists.sort_by(|a, b| {
+            a.created_at
+                .total_cmp(&b.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        playlists
+    }
+
+    /// プレイリストを削除する。収録リストと、選曲範囲になっていればその指定も
+    /// 片付ける (トラック自体は消えない)。見つからなければ false
+    pub async fn delete_playlist(&self, playlist_id: &str) -> bool {
+        let mut conn = self.redis.clone();
+        let removed: i64 = match conn.hdel(REDIS_KEY_PLAYLISTS, playlist_id).await {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!("Redis error deleting playlist {playlist_id}: {e}");
+                return false;
+            }
+        };
+        if removed == 0 {
+            return false;
+        }
+        let _: Result<(), _> = conn.del(playlist_key(playlist_id)).await;
+        // 選曲範囲に指定されていたらライブラリ全体へ戻す
+        if self.raw_active_playlist().await.as_deref() == Some(playlist_id) {
+            let _: Result<(), _> = conn.del(REDIS_KEY_ACTIVE_PLAYLIST).await;
+        }
+        true
+    }
+
+    /// トラックをプレイリスト末尾に追加する (収録済みなら末尾へ移動)。
+    /// Redis エラー時は false
+    pub async fn add_playlist_track(&self, playlist_id: &str, track_id: &str) -> bool {
+        // 重複を避けるため一旦除去してから追加する。reorder の全置換 (読み→書き)
+        // と交錯しないよう直列化する
+        let _guard = self.order_lock.lock().await;
+        let key = playlist_key(playlist_id);
+        let mut pipe = redis::pipe();
+        pipe.atomic()
+            .lrem(&key, 0, track_id)
+            .ignore()
+            .rpush(&key, track_id);
+        let mut conn = self.redis.clone();
+        match pipe.query_async::<()>(&mut conn).await {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!("Redis error adding track to playlist {playlist_id}: {e}");
+                false
+            }
+        }
+    }
+
+    /// トラックをプレイリストから外す。収録されていなければ false
+    pub async fn remove_playlist_track(&self, playlist_id: &str, track_id: &str) -> bool {
+        // reorder の全置換 (読み→書き) の間に割り込むと、置換の書き戻しで
+        // 外したはずのトラックが復活してしまうため直列化する
+        let _guard = self.order_lock.lock().await;
+        let mut conn = self.redis.clone();
+        match conn
+            .lrem::<_, _, i64>(playlist_key(playlist_id), 0, track_id)
+            .await
+        {
+            Ok(n) => n > 0,
+            Err(e) => {
+                tracing::warn!("Redis error removing track from playlist {playlist_id}: {e}");
+                false
+            }
+        }
+    }
+
+    async fn playlist_track_ids(&self, playlist_id: &str) -> Vec<String> {
+        let mut conn = self.redis.clone();
+        conn.lrange(playlist_key(playlist_id), 0, -1)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("Redis error reading playlist {playlist_id}: {e}");
+                Vec::new()
+            })
+    }
+
+    /// プレイリストの収録トラックを収録順で返す (削除済みトラックは飛ばす)
+    pub async fn list_playlist_tracks(&self, playlist_id: &str) -> Vec<AudioTrack> {
+        let ids = self.playlist_track_ids(playlist_id).await;
+        let mut by_id = self.fetch_tracks_for(ids.iter()).await;
+        ids.iter().filter_map(|id| by_id.remove(id)).collect()
+    }
+
+    /// 全プレイリストのメタデータと収録曲数を作成順で返す (API / WS のワイヤ形式)
+    pub async fn playlists_json(&self) -> Value {
+        let playlists = self.playlists().await;
+        if playlists.is_empty() {
+            return json!([]);
+        }
+
+        // 収録曲数は 1 往復でまとめて取得する
+        let mut pipe = redis::pipe();
+        for playlist in &playlists {
+            pipe.llen(playlist_key(&playlist.id));
+        }
+        let mut conn = self.redis.clone();
+        let counts: Vec<usize> = match pipe.query_async(&mut conn).await {
+            Ok(counts) => counts,
+            Err(e) => {
+                tracing::warn!("Redis error reading playlist counts: {e}");
+                vec![0; playlists.len()]
+            }
+        };
+
+        let list: Vec<PlaylistJson> = playlists
+            .into_iter()
+            .zip(counts)
+            .map(|(playlist, count)| PlaylistJson { playlist, count })
+            .collect();
+        json!(list)
+    }
+
+    /// 保存されている選曲範囲プレイリスト ID (存在チェックなし)
+    async fn raw_active_playlist(&self) -> Option<String> {
+        let mut conn = self.redis.clone();
+        match conn
+            .get::<_, Option<String>>(REDIS_KEY_ACTIVE_PLAYLIST)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("Redis error reading active playlist: {e}");
+                None
+            }
+        }
+    }
+
+    /// ループ/シャッフルの選曲範囲プレイリスト ID。未設定、または削除済みの
+    /// プレイリストを指している場合は None (ライブラリ全体)
+    pub async fn active_playlist(&self) -> Option<String> {
+        let id = self.raw_active_playlist().await?;
+        if self.get_playlist(&id).await.is_some() {
+            Some(id)
+        } else {
+            None
+        }
+    }
+
+    /// 選曲範囲を設定する (None でライブラリ全体へ戻す)。
+    /// 存在しないプレイリスト・Redis エラー時は false
+    pub async fn set_active_playlist(&self, playlist_id: Option<&str>) -> bool {
+        let mut conn = self.redis.clone();
+        let result = match playlist_id {
+            Some(pid) => {
+                if self.get_playlist(pid).await.is_none() {
+                    return false;
+                }
+                conn.set::<_, _, ()>(REDIS_KEY_ACTIVE_PLAYLIST, pid).await
+            }
+            None => conn.del::<_, ()>(REDIS_KEY_ACTIVE_PLAYLIST).await,
+        };
+        match result {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!("Redis error writing active playlist: {e}");
+                false
+            }
+        }
+    }
+
+    /// YouTube プレイリストをフラット展開し、同名のローカルプレイリスト
+    /// (なければ作成) への取り込みをバックグラウンドで開始する。戻り値は
+    /// 開始時点の情報 (プレイリスト名と対象件数)。各動画のダウンロード進捗は
+    /// extract_audio と同じ downloads_update で全クライアントへ配られる
+    pub async fn import_playlist(
+        self: &Arc<Self>,
+        list_id: &str,
+    ) -> Result<PlaylistImportInfo, String> {
+        let url = format!("https://www.youtube.com/playlist?list={list_id}");
+        let items = format!("1:{PLAYLIST_IMPORT_MAX}");
+        let stdout = run_yt_dlp(
+            &[
+                "--dump-single-json",
+                "--flat-playlist",
+                "--playlist-items",
+                &items,
+                &url,
+            ],
+            time::Duration::from_secs(PLAYLIST_FLAT_TIMEOUT_SECS),
+        )
+        .await
+        .map_err(|e| format!("Failed to expand playlist: {e}"))?;
+        let meta: Value = serde_json::from_slice(&stdout)
+            .map_err(|e| format!("Failed to parse playlist metadata: {e}"))?;
+
+        // 動画以外のエントリや重複 (同じ動画が複数回入ったプレイリスト) は除く
+        let mut video_ids: Vec<String> = Vec::new();
+        for entry in meta["entries"].as_array().map_or(&[][..], |v| v) {
+            if let Some(id) = entry["id"].as_str()
+                && is_video_id(id)
+                && !video_ids.iter().any(|v| v == id)
+            {
+                video_ids.push(id.to_string());
+            }
+        }
+        if video_ids.is_empty() {
+            return Err("Playlist has no importable videos".to_string());
+        }
+
+        // プレイリスト名は作成の制限内に丸める (タイトル不明なら list ID)
+        let name: String = meta["title"]
+            .as_str()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .unwrap_or(list_id)
+            .chars()
+            .take(PLAYLIST_NAME_MAX_CHARS)
+            .collect();
+
+        // 同名プレイリストがあればそこへ追記する (再インポートで重複させない)
+        let playlist = match self.playlists().await.into_iter().find(|p| p.name == name) {
+            Some(p) => p,
+            None => {
+                let p = self
+                    .create_playlist(&name)
+                    .await
+                    .ok_or("Failed to create playlist")?;
+                self.broadcast_playlists().await;
+                p
+            }
+        };
+
+        let total = video_ids.len();
+        let state = self.clone();
+        tokio::spawn(async move {
+            let mut imported = 0;
+            for video_id in &video_ids {
+                let url = format!("https://www.youtube.com/watch?v={video_id}");
+                match state.extract_audio(&url).await {
+                    Ok(track) => {
+                        state.add_playlist_track(&playlist.id, &track.id).await;
+                        // 取り込めた曲から順に一覧へ反映させる
+                        state.broadcast_tracks().await;
+                        state.broadcast_playlists().await;
+                        imported += 1;
+                    }
+                    // 失敗はダウンロード進捗のエラー表示で伝わるためログのみ
+                    Err(e) => tracing::warn!("Playlist import: skipping {video_id}: {e}"),
+                }
+            }
+            tracing::info!(
+                "Playlist import finished: '{}' ({imported}/{total} imported)",
+                playlist.name
+            );
+        });
+
+        Ok(PlaylistImportInfo { name, total })
+    }
+
     fn parse_pending(
         device_id: &str,
         result: redis::RedisResult<Option<String>>,
@@ -1435,6 +1833,89 @@ async fn fetch_metadata(url: &str) -> Result<Value, String> {
     serde_json::from_slice(&stdout).map_err(|e| format!("Failed to parse metadata: {e}"))
 }
 
+/// 並び順で current_id の次 (dir=1) / 前 (dir=-1) を返す。端は反対側へ
+/// 折り返し、current_id が見つからない (削除済みなど) 場合は先頭 (dir=1)
+/// または末尾 (dir=-1) を返す
+fn neighbor_track(tracks: &[AudioTrack], current_id: &str, dir: isize) -> Option<AudioTrack> {
+    if tracks.is_empty() {
+        return None;
+    }
+    let len = tracks.len() as isize;
+    let idx = match tracks.iter().position(|t| t.id == current_id) {
+        Some(i) => (i as isize + dir).rem_euclid(len),
+        None if dir >= 0 => 0,
+        None => len - 1,
+    };
+    tracks.get(idx as usize).cloned()
+}
+
+/// current_id 以外からランダムに 1 曲返す (1 曲しかなければその曲)
+fn random_track_from(mut tracks: Vec<AudioTrack>, current_id: &str) -> Option<AudioTrack> {
+    if tracks.len() > 1 {
+        tracks.retain(|t| t.id != current_id);
+    }
+    if tracks.is_empty() {
+        return None;
+    }
+    // 選曲のばらつき程度で十分なので時刻のナノ秒を乱数代わりに使う
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as usize;
+    Some(tracks.swap_remove(nanos % tracks.len()))
+}
+
+/// プレイリスト ID を生成する ("pl" + 時刻由来の値。作成頻度的に十分一意)
+fn new_playlist_id() -> String {
+    let d = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("pl{:x}{:05x}", d.as_millis(), d.subsec_nanos() & 0xfffff)
+}
+
+/// 入力 URL の種類 (動画 / プレイリスト / 不明)
+pub enum UrlKind {
+    Video,
+    Playlist(String),
+    Unknown,
+}
+
+/// URL を動画・プレイリスト・不明に分類する。動画 ID とプレイリスト ID の
+/// 両方を含む URL (プレイリスト再生中の watch URL など) は従来どおり
+/// 動画として扱う
+pub fn classify_url(url: &str) -> UrlKind {
+    if extract_video_id(url).is_some() {
+        UrlKind::Video
+    } else if let Some(list_id) = extract_playlist_id(url) {
+        UrlKind::Playlist(list_id)
+    } else {
+        UrlKind::Unknown
+    }
+}
+
+/// URL の list= パラメータから YouTube プレイリスト ID を取り出す。
+/// 形式の検証は最小限にとどめ、展開できるかどうかは yt-dlp に任せる
+/// (WL などの認証が要るリストもエラーメッセージが利用者に届くように)
+fn extract_playlist_id(url: &str) -> Option<String> {
+    use std::sync::OnceLock;
+
+    static RE: OnceLock<Option<Regex>> = OnceLock::new();
+    let re = RE
+        .get_or_init(|| Regex::new(r"youtube\.com/\S*[?&]list=([a-zA-Z0-9_-]{2,})").ok())
+        .as_ref()?;
+    Some(re.captures(url)?.get(1)?.as_str().to_string())
+}
+
+/// 文字列が YouTube 動画 ID の形式かどうか
+fn is_video_id(s: &str) -> bool {
+    use std::sync::OnceLock;
+
+    static RE: OnceLock<Option<Regex>> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(&format!("^{VIDEO_ID_PATTERN}$")).ok())
+        .as_ref()
+        .is_some_and(|re| re.is_match(s))
+}
+
 fn extract_video_id(url: &str) -> Option<String> {
     use std::sync::OnceLock;
 
@@ -1461,14 +1942,6 @@ fn extract_video_id(url: &str) -> Option<String> {
 
 /// audio_cache 内の {video_id}.m4a を (video_id, パス) で列挙する
 fn cached_video_ids(cache_dir: &Path) -> Vec<(String, PathBuf)> {
-    use std::sync::OnceLock;
-
-    static ID_RE: OnceLock<Option<Regex>> = OnceLock::new();
-    let Some(id_re) = ID_RE.get_or_init(|| Regex::new(&format!("^{VIDEO_ID_PATTERN}$")).ok())
-    else {
-        return Vec::new();
-    };
-
     let Ok(entries) = std::fs::read_dir(cache_dir) else {
         return Vec::new();
     };
@@ -1480,7 +1953,7 @@ fn cached_video_ids(cache_dir: &Path) -> Vec<(String, PathBuf)> {
                 return None;
             }
             let stem = path.file_stem()?.to_str()?;
-            if !id_re.is_match(stem) {
+            if !is_video_id(stem) {
                 return None;
             }
             Some((stem.to_string(), path))
@@ -1707,6 +2180,127 @@ mod tests {
         ] {
             assert_eq!(serde_json::to_value(status).unwrap(), json!(expected));
         }
+    }
+
+    /// テスト用の最小トラック
+    fn track(id: &str) -> AudioTrack {
+        AudioTrack {
+            id: id.into(),
+            title: id.into(),
+            thumbnail: String::new(),
+            duration: 10,
+            channel: String::new(),
+            is_live: false,
+            created_at: 0.0,
+            file_path: String::new(),
+        }
+    }
+
+    #[test]
+    fn neighbor_track_wraps_and_falls_back() {
+        let tracks = vec![
+            track("aaaaaaaaaa1"),
+            track("aaaaaaaaaa2"),
+            track("aaaaaaaaaa3"),
+        ];
+
+        // 順方向: 次へ進み、末尾は先頭へ折り返す
+        assert_eq!(
+            neighbor_track(&tracks, "aaaaaaaaaa1", 1).unwrap().id,
+            "aaaaaaaaaa2"
+        );
+        assert_eq!(
+            neighbor_track(&tracks, "aaaaaaaaaa3", 1).unwrap().id,
+            "aaaaaaaaaa1"
+        );
+        // 逆方向: 前へ戻り、先頭は末尾へ折り返す
+        assert_eq!(
+            neighbor_track(&tracks, "aaaaaaaaaa2", -1).unwrap().id,
+            "aaaaaaaaaa1"
+        );
+        assert_eq!(
+            neighbor_track(&tracks, "aaaaaaaaaa1", -1).unwrap().id,
+            "aaaaaaaaaa3"
+        );
+        // 見つからない (削除済みなど): 先頭 / 末尾
+        assert_eq!(
+            neighbor_track(&tracks, "gone", 1).unwrap().id,
+            "aaaaaaaaaa1"
+        );
+        assert_eq!(
+            neighbor_track(&tracks, "gone", -1).unwrap().id,
+            "aaaaaaaaaa3"
+        );
+        // 空なら None
+        assert!(neighbor_track(&[], "aaaaaaaaaa1", 1).is_none());
+    }
+
+    #[test]
+    fn random_track_excludes_current_unless_only_one() {
+        // 2 曲なら必ずもう一方が選ばれる
+        let tracks = vec![track("aaaaaaaaaa1"), track("aaaaaaaaaa2")];
+        for _ in 0..5 {
+            let picked = random_track_from(tracks.clone(), "aaaaaaaaaa1").unwrap();
+            assert_eq!(picked.id, "aaaaaaaaaa2");
+        }
+        // 1 曲しかなければその曲
+        let only = vec![track("aaaaaaaaaa1")];
+        assert_eq!(
+            random_track_from(only, "aaaaaaaaaa1").unwrap().id,
+            "aaaaaaaaaa1"
+        );
+        assert!(random_track_from(Vec::new(), "aaaaaaaaaa1").is_none());
+    }
+
+    #[test]
+    fn classifies_urls() {
+        assert!(matches!(
+            classify_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+            UrlKind::Video
+        ));
+        // v= と list= の両方を含む URL は動画として扱う
+        assert!(matches!(
+            classify_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL0123456789abcdefghij"),
+            UrlKind::Video
+        ));
+        match classify_url("https://www.youtube.com/playlist?list=PL0123456789abcdefghij") {
+            UrlKind::Playlist(id) => assert_eq!(id, "PL0123456789abcdefghij"),
+            _ => panic!("expected playlist"),
+        }
+        // v= なしの watch?list= もプレイリスト扱い
+        assert!(matches!(
+            classify_url("https://www.youtube.com/watch?list=PL0123456789abcdefghij"),
+            UrlKind::Playlist(_)
+        ));
+        // WL などの短い特殊リスト ID も受け付ける (展開可否は yt-dlp に任せる)
+        assert!(matches!(
+            classify_url("https://www.youtube.com/playlist?list=WL"),
+            UrlKind::Playlist(_)
+        ));
+        assert!(matches!(
+            classify_url("https://example.com/watch?v=x"),
+            UrlKind::Unknown
+        ));
+        assert!(matches!(
+            classify_url("https://www.youtube.com/feed/library"),
+            UrlKind::Unknown
+        ));
+    }
+
+    #[test]
+    fn video_id_format_check() {
+        assert!(is_video_id("dQw4w9WgXcQ"));
+        assert!(!is_video_id("short"));
+        assert!(!is_video_id("dQw4w9WgXcQ-too-long"));
+    }
+
+    #[test]
+    fn playlist_ids_are_distinct() {
+        // 連続生成でも重複しない (時刻由来のため同一ミリ秒でもナノ秒で分かれる)
+        let a = new_playlist_id();
+        let b = new_playlist_id();
+        assert_ne!(a, b);
+        assert!(a.starts_with("pl"));
     }
 
     #[test]

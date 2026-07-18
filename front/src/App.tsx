@@ -11,7 +11,7 @@ import { PlaybackModeSelector } from "./components/PlaybackModeSelector";
 import { History } from "./components/History";
 import { AuthModal } from "./components/AuthModal";
 import { ToastContainer, useToast } from "./components/Toast";
-import type { Device, DownloadProgress, PlaybackMode, Track, TracksPage } from "./types";
+import type { Device, DownloadProgress, PlaybackMode, Playlist, Track, TracksPage } from "./types";
 
 export function App() {
   const [showAuth, setShowAuth] = useState(false);
@@ -25,6 +25,9 @@ export function App() {
   const [currentTrack, setCurrentTrack] = useState<Track | null>(null);
   const [playbackMode, setPlaybackMode] = useState<PlaybackMode>("off");
   const [downloads, setDownloads] = useState<DownloadProgress[]>([]);
+  const [playlists, setPlaylists] = useState<Playlist[]>([]);
+  // ループ/シャッフルの選曲範囲プレイリスト ID (null はライブラリ全体)
+  const [activePlaylist, setActivePlaylist] = useState<string | null>(null);
   const { toasts, showToast } = useToast();
   const urlInputRef = useRef<UrlInputHandle>(null);
 
@@ -54,6 +57,20 @@ export function App() {
     showToast(`エラー: ${error}`);
   }, [showToast]);
 
+  const handlePlaylistImportStarted = useCallback((name: string, total: number) => {
+    setExtracting(false);
+    showToast(`プレイリスト「${name}」から ${total} 曲の取り込みを開始しました`);
+    urlInputRef.current?.clear();
+  }, [showToast]);
+
+  // REST での作成直後に (playlists_update の到着を待たず) タブへ反映する。
+  // WS 切断中でも一覧が追従し、作成直後のタブ切り替えが弾かれない
+  const handlePlaylistCreated = useCallback((playlist: Playlist) => {
+    setPlaylists((prev) =>
+      prev.some((p) => p.id === playlist.id) ? prev : [...prev, playlist],
+    );
+  }, []);
+
   const { sendMessage } = useWebSocket(wsActive, {
     onVersion: setVersion,
     onConnectedChange: (c) => {
@@ -67,6 +84,9 @@ export function App() {
     onExtractResult: handleExtractResult,
     onExtractError: handleExtractError,
     onDownloadsUpdate: setDownloads,
+    onPlaylistsUpdate: setPlaylists,
+    onActivePlaylist: setActivePlaylist,
+    onPlaylistImportStarted: handlePlaylistImportStarted,
   });
 
   function handleTrackDeleted(trackId: string) {
@@ -84,6 +104,13 @@ export function App() {
   function handlePlaybackModeChange(mode: PlaybackMode) {
     // 表示の更新は保存成功時にサーバーが返す playback_mode_update に任せる
     if (!sendMessage({ type: "set_playback_mode", mode })) {
+      showToast("サーバーに接続されていません");
+    }
+  }
+
+  function handleActivePlaylistChange(playlistId: string | null) {
+    // 表示の更新はサーバーが返す active_playlist_update に任せる
+    if (!sendMessage({ type: "set_active_playlist", playlist: playlistId })) {
       showToast("サーバーに接続されていません");
     }
   }
@@ -114,7 +141,11 @@ export function App() {
         <DownloadList downloads={downloads} />
         <div className="main-grid">
           <div className="main-left">
-            <NowPlaying track={currentTrack} />
+            <NowPlaying
+              track={currentTrack}
+              onUnauthorized={onUnauthorized}
+              showToast={showToast}
+            />
             <DeviceList
               devices={devices}
               currentTrack={currentTrack}
@@ -125,6 +156,9 @@ export function App() {
             <PlaybackModeSelector
               mode={playbackMode}
               onChange={handlePlaybackModeChange}
+              playlists={playlists}
+              activePlaylist={activePlaylist}
+              onActivePlaylistChange={handleActivePlaylistChange}
             />
           </div>
           <div className="main-right">
@@ -133,6 +167,8 @@ export function App() {
               initialData={initialTracks}
               refreshKey={tracksVersion}
               currentTrack={currentTrack}
+              playlists={playlists}
+              onPlaylistCreated={handlePlaylistCreated}
               onSelectTrack={setCurrentTrack}
               onTrackDeleted={handleTrackDeleted}
               onUnauthorized={onUnauthorized}

@@ -49,10 +49,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/api/audio/{audio_id}/stream", get(handlers::stream_audio))
         .route("/api/audio/{audio_id}/live", get(handlers::live_audio))
+        .route("/api/audio/{audio_id}/url", get(handlers::audio_url))
         .route("/api/search", get(handlers::search_youtube))
         .route("/api/tracks", get(handlers::list_tracks))
         .route("/api/tracks/reorder", post(handlers::reorder_track))
         .route("/api/tracks/{track_id}", delete(handlers::delete_track))
+        .route(
+            "/api/playlists",
+            get(handlers::list_playlists).post(handlers::create_playlist),
+        )
+        .route(
+            "/api/playlists/{playlist_id}",
+            delete(handlers::delete_playlist),
+        )
+        .route(
+            "/api/playlists/{playlist_id}/tracks",
+            post(handlers::add_playlist_track),
+        )
+        .route(
+            "/api/playlists/{playlist_id}/tracks/{track_id}",
+            delete(handlers::remove_playlist_track),
+        )
         .route("/api/devices", get(handlers::get_devices))
         .route("/api/devices/{device_id}", delete(handlers::delete_device))
         .route("/api/play", post(handlers::play_on_devices))

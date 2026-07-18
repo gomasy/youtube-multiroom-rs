@@ -25,9 +25,13 @@ pub async fn handle_alexa(state: &Arc<AppState>, body: Value, base_url: &str) ->
     let resp = match req_type {
         "LaunchRequest" => on_launch(state, &device_id, base_url).await,
         "IntentRequest" => on_intent(state, &body, &device_id, base_url).await,
-        "SessionEndedRequest" => speech("セッション終了", true),
+        // SessionEndedRequest への応答は Alexa 側で破棄されるため空でよい
+        "SessionEndedRequest" => alexa_response(json!({})),
         t if t.starts_with("AudioPlayer.") => {
             on_audio_event(state, t, &body, &device_id, base_url).await
+        }
+        t if t.starts_with("PlaybackController.") => {
+            on_playback_controller(state, t, &body, &device_id, base_url).await
         }
         _ => speech("すみません、よくわかりませんでした。", true),
     };
@@ -68,7 +72,12 @@ async fn on_launch(state: &Arc<AppState>, device_id: &str, base_url: &str) -> Va
 /// どちらも無ければ None。キューからの開始は何も再生していないときに限る
 /// (シーク反映などの起動で再生中・一時停止中の曲を破棄しないため)。
 /// キューエントリはそのまま token に使い、消費は再生開始を確認した
-/// PlaybackStarted が値一致で行う
+/// PlaybackStarted が値一致で行う。
+///
+/// pending_or_queue_next と似ているが役割が違う: こちらは「起動・再開の
+/// 応答としてただちに再生を始める」ため pending を take で消費し、
+/// 再生中の曲を守るゲートを持つ。次曲の選定 (スキップ・自動継続) は
+/// pending_or_queue_next を使うこと
 async fn start_pending_or_queue(
     state: &Arc<AppState>,
     device_id: &str,
@@ -117,19 +126,11 @@ async fn on_intent(state: &Arc<AppState>, body: &Value, device_id: &str, base_ur
             stop_directive(state, device_id, "stopped").await
         }
 
-        "AMAZON.ResumeIntent" => {
-            if let Some(dev) = state.get_device(device_id).await
-                && let Some(track) = dev.current_track
-            {
-                // 明示的な再開指示なので、失敗の連続記録をリセットして
-                // 再試行の余地を戻す (error 直後の再開が即 error に戻らないように)
-                state.clear_playback_failures(device_id).await;
-                let token = new_token(&track.id);
-                return play_directive(state, &track, device_id, dev.position_ms, base_url, token)
-                    .await;
-            }
-            speech("再生する曲がありません。", true)
-        }
+        "AMAZON.ResumeIntent" => resume_playback(state, device_id, base_url, true).await,
+
+        "AMAZON.NextIntent" => skip_next(state, body, device_id, base_url, true).await,
+
+        "AMAZON.PreviousIntent" => skip_prev(state, body, device_id, base_url, true).await,
 
         "AMAZON.HelpIntent" => speech(
             "Web ブラウザの操作画面で YouTube の URL を貼り付け、\
@@ -140,6 +141,108 @@ async fn on_intent(state: &Arc<AppState>, body: &Value, device_id: &str, base_ur
         ),
 
         _ => speech("Web 画面から操作してください。", false),
+    }
+}
+
+/// 現在のトラックを推定位置から再生し直す (Resume インテント / 再生ボタン)。
+/// Web からの再生指示や「次に再生」キューが待っていればそちらを優先して開始する
+async fn resume_playback(
+    state: &Arc<AppState>,
+    device_id: &str,
+    base_url: &str,
+    can_speak: bool,
+) -> Value {
+    if let Some(resp) = start_pending_or_queue(state, device_id, base_url).await {
+        return resp;
+    }
+    if let Some(dev) = state.get_device(device_id).await
+        && let Some(track) = dev.current_track
+    {
+        // 明示的な再開指示なので、失敗の連続記録をリセットして
+        // 再試行の余地を戻す (error 直後の再開が即 error に戻らないように)
+        state.clear_playback_failures(device_id).await;
+        let token = new_token(&track.id);
+        return play_directive(state, &track, device_id, dev.position_ms, base_url, token).await;
+    }
+    no_track_response(can_speak, "再生する曲がありません。")
+}
+
+/// 「次の曲」への明示スキップ。pending → 「次に再生」キュー → 選曲範囲の
+/// 並び順 (シャッフル中はランダム) の優先順で選び、即時再生に切り替える。
+/// 再生モードが「オフ」でも明示指示なので次の曲へ進む
+async fn skip_next(
+    state: &Arc<AppState>,
+    body: &Value,
+    device_id: &str,
+    base_url: &str,
+    can_speak: bool,
+) -> Value {
+    // 明示的な操作なので失敗の連続記録をリセットする
+    state.clear_playback_failures(device_id).await;
+    let current_token = playing_context_token(state, body, device_id).await;
+
+    let next = match pending_or_queue_next(state, device_id, &current_token).await {
+        Ok(Some(next)) => Some(next),
+        Ok(None) => state
+            .skip_next_track(token_track_id(&current_token))
+            .await
+            .map(|track| {
+                let token = new_token(&track.id);
+                (track, 0, token)
+            }),
+        // キューの状態を確認できないときは安全側 (何も切り替えない) に倒す
+        Err(()) => None,
+    };
+    match next {
+        Some((track, offset_ms, token)) => {
+            play_directive(state, &track, device_id, offset_ms, base_url, token).await
+        }
+        None => no_track_response(can_speak, "次の曲がありません。"),
+    }
+}
+
+/// 「前の曲」への明示スキップ (選曲範囲の並び順で前へ、先頭は末尾へ折り返し)
+async fn skip_prev(
+    state: &Arc<AppState>,
+    body: &Value,
+    device_id: &str,
+    base_url: &str,
+    can_speak: bool,
+) -> Value {
+    state.clear_playback_failures(device_id).await;
+    let current_token = playing_context_token(state, body, device_id).await;
+    match state.skip_prev_track(token_track_id(&current_token)).await {
+        Some(track) => {
+            let token = new_token(&track.id);
+            play_directive(state, &track, device_id, 0, base_url, token).await
+        }
+        None => no_track_response(can_speak, "前の曲がありません。"),
+    }
+}
+
+// ── PlaybackController Events ──
+
+/// Echo Show のタッチ操作やリモコンの物理ボタンによる再生操作。
+/// 応答に音声は含められず、AudioPlayer ディレクティブのみ有効
+async fn on_playback_controller(
+    state: &Arc<AppState>,
+    event_type: &str,
+    body: &Value,
+    device_id: &str,
+    base_url: &str,
+) -> Value {
+    match event_type {
+        "PlaybackController.PlayCommandIssued" => {
+            resume_playback(state, device_id, base_url, false).await
+        }
+        "PlaybackController.PauseCommandIssued" => stop_directive(state, device_id, "paused").await,
+        "PlaybackController.NextCommandIssued" => {
+            skip_next(state, body, device_id, base_url, false).await
+        }
+        "PlaybackController.PreviousCommandIssued" => {
+            skip_prev(state, body, device_id, base_url, false).await
+        }
+        _ => alexa_response(json!({})),
     }
 }
 
@@ -289,23 +392,11 @@ async fn queued_or_auto_next(
     current_token: &str,
     allow_live_auto: bool,
 ) -> Option<(AudioTrack, u64, String)> {
-    if let Some(cmd) = state.peek_pending(device_id).await
-        && cmd.action == "play"
-    {
-        let token = new_token(&cmd.track.id);
-        return Some((cmd.track, cmd.offset_ms, token));
-    }
-
-    // 再生中の曲のエントリが先頭に残っていたら (PlaybackStarted での消費が
-    // Redis エラーで漏れた場合)、ここで取り除いてから次を見る
-    while let Some((entry, track)) = state.peek_queue(device_id).await {
-        if entry == current_token {
-            if !state.remove_queue_entry(device_id, &entry).await {
-                return None;
-            }
-            continue;
-        }
-        return Some((track, 0, entry));
+    match pending_or_queue_next(state, device_id, current_token).await {
+        Ok(Some(next)) => return Some(next),
+        Ok(None) => {}
+        // キューの状態を確認できないときは安全側 (自動選曲もしない) に倒す
+        Err(()) => return None,
     }
 
     state
@@ -316,6 +407,64 @@ async fn queued_or_auto_next(
             let token = auto_token(&t.id);
             (t, 0, token)
         })
+}
+
+/// pending コマンド → 「次に再生」キューの優先順で次の再生候補を返す
+/// (再生モード由来の自動選曲は含まない)。候補が無ければ Ok(None)、
+/// Redis エラーで状態を確認できなければ Err。pending は消費しない
+/// (REPLACE_ALL/ENQUEUE どちらの経路でも PlaybackStarted が消す)
+async fn pending_or_queue_next(
+    state: &Arc<AppState>,
+    device_id: &str,
+    current_token: &str,
+) -> Result<Option<(AudioTrack, u64, String)>, ()> {
+    if let Some(cmd) = state.peek_pending(device_id).await
+        && cmd.action == "play"
+    {
+        let token = new_token(&cmd.track.id);
+        return Ok(Some((cmd.track, cmd.offset_ms, token)));
+    }
+
+    // 再生中の曲のエントリが先頭に残っていたら (PlaybackStarted での消費が
+    // Redis エラーで漏れた場合)、ここで取り除いてから次を見る
+    while let Some((entry, track)) = state.peek_queue(device_id).await {
+        if entry == current_token {
+            if !state.remove_queue_entry(device_id, &entry).await {
+                return Err(());
+            }
+            continue;
+        }
+        return Ok(Some((track, 0, entry)));
+    }
+    Ok(None)
+}
+
+/// 現在の再生対象を指す token を求める。リクエストの AudioPlayer コンテキスト
+/// (一時停止・停止直後でも直前の再生を指す) を優先し、無ければデバイス状態の
+/// 現在トラック ID で代用する
+async fn playing_context_token(state: &Arc<AppState>, body: &Value, device_id: &str) -> String {
+    if let Some(token) = body["context"]["AudioPlayer"]["token"]
+        .as_str()
+        .filter(|t| !t.is_empty())
+    {
+        return token.to_string();
+    }
+    state
+        .get_device(device_id)
+        .await
+        .and_then(|d| d.current_track)
+        .map(|t| t.id)
+        .unwrap_or_default()
+}
+
+/// 再生を切り替えられないときの応答。PlaybackController 由来 (can_speak =
+/// false) は仕様上音声を返せないため空の応答にする
+fn no_track_response(can_speak: bool, text: &str) -> Value {
+    if can_speak {
+        speech(text, true)
+    } else {
+        alexa_response(json!({}))
+    }
 }
 
 /// PlaybackFailed への再試行ディレクティブを組み立てる。トラックを解決
@@ -443,14 +592,10 @@ fn play_response(
     enqueue_after: Option<&str>,
     token: String,
 ) -> Value {
-    // Echo は認証ヘッダを付けられないため、署名付き URL でストリームを認証する。
-    // ライブ配信はファイルがないため、CDN の音声を中継する /live を使う
-    let endpoint = if track.is_live { "live" } else { "stream" };
-    let mut stream_url = format!("{}/api/audio/{}/{}", base_url, track.id, endpoint);
-    if let Some(secret) = &state.api_token {
-        stream_url.push('?');
-        stream_url.push_str(&crate::auth::stream_query(secret, &track.id));
-    }
+    let stream_url = format!(
+        "{base_url}{}",
+        crate::auth::stream_path(state.api_token.as_deref(), &track.id, track.is_live)
+    );
 
     let mut stream = json!({
         "url": stream_url,

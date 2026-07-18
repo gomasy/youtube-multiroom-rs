@@ -2,6 +2,7 @@ import { useState } from "react";
 import { authFetch, playTracks, queueNext, removeQueueItem, clearQueue } from "../api";
 import { ScrollingText } from "./ScrollingText";
 import { SeekBar } from "./SeekBar";
+import { CloseIcon, TrashIcon } from "./icons";
 import type { Device, Track } from "../types";
 
 const STATUS_LABELS: Record<string, string> = {
@@ -186,9 +187,7 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
                               catchToast(removeQueueItem(dev.device_id, t.entry, onUnauthorized))
                             }
                           >
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                              <path d="M6 6l12 12M18 6L6 18" />
-                            </svg>
+                            <CloseIcon size={12} />
                           </button>
                         </div>
                       ))}
@@ -200,9 +199,7 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
                   title="デバイスを削除"
                   onClick={(e) => { e.stopPropagation(); deleteDevice(dev.device_id); }}
                 >
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6h14" />
-                  </svg>
+                  <TrashIcon />
                 </button>
               </div>
             );

@@ -1,7 +1,7 @@
 use crate::alexa::handle_alexa;
 use crate::state::{
-    AUDIO_MIME, AppState, AudioTrack, DeviceUpdate, PlayRequest, ReorderRequest, SeekRequest,
-    run_yt_dlp,
+    AUDIO_MIME, AppState, AudioTrack, DeviceUpdate, PlayRequest, ReorderOutcome, ReorderRequest,
+    SeekRequest, UrlKind, classify_url, run_yt_dlp,
 };
 use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message, WebSocket};
@@ -220,6 +220,20 @@ pub async fn live_audio(
         .into_response())
 }
 
+/// GET /api/audio/:id/url
+///
+/// ブラウザのプレビュー再生用に、audio 要素へそのまま渡せるストリーム URL
+/// (認証有効時は署名クエリ付きの相対パス) を返す。このエンドポイント自体は
+/// Bearer 認証の対象なので、署名 URL を第三者が発行することはできない
+pub async fn audio_url(
+    State(state): State<Arc<AppState>>,
+    Path(audio_id): Path<String>,
+) -> AppResult<Json<Value>> {
+    let track = track_or_404(&state, &audio_id).await?;
+    let url = crate::auth::stream_path(state.api_token.as_deref(), &track.id, track.is_live);
+    Ok(Json(json!({ "url": url })))
+}
+
 fn parse_byte_range(header: &str, total: usize) -> Option<(usize, usize)> {
     if total == 0 {
         return None;
@@ -311,35 +325,53 @@ fn search_entry(v: &Value) -> Option<AudioTrack> {
 pub struct TracksQuery {
     page: Option<usize>,
     per_page: Option<usize>,
+    /// 指定するとそのプレイリストの収録順で返す (未指定はライブラリ全体)
+    playlist: Option<String>,
 }
 
-/// GET /api/tracks?page=1&per_page=10
+/// GET /api/tracks?page=1&per_page=10&playlist={id}
 pub async fn list_tracks(
     State(state): State<Arc<AppState>>,
     Query(query): Query<TracksQuery>,
-) -> Json<Value> {
+) -> AppResult<Json<Value>> {
     // Redis 初期化などでトラック情報が消えていたら audio_cache から復元
     state.restore_tracks_if_missing().await;
 
+    if let Some(pid) = &query.playlist {
+        playlist_or_404(&state, pid).await?;
+    }
     let per_page = query.per_page.unwrap_or(10).clamp(1, 100);
     let page = query.page.unwrap_or(1).max(1);
-    let (tracks, total) = state.list_tracks_page(page, per_page).await;
-    Json(json!({
+    let (tracks, total) = state
+        .list_tracks_page(query.playlist.as_deref(), page, per_page)
+        .await;
+    Ok(Json(json!({
         "tracks": tracks,
         "total": total,
         "page": page,
         "per_page": per_page,
-    }))
+    })))
 }
 
 /// POST /api/tracks/reorder
+///
+/// playlist を指定するとプレイリスト内の並び、なければライブラリ全体を動かす
 pub async fn reorder_track(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ReorderRequest>,
 ) -> AppResult<Json<Value>> {
     track_or_404(&state, &req.track_id).await?;
-    if !state.reorder_track(&req.track_id, req.new_index).await {
-        return Err(AppError::internal("Failed to save track order"));
+    if let Some(pid) = &req.playlist {
+        playlist_or_404(&state, pid).await?;
+    }
+    match state
+        .reorder_track(req.playlist.as_deref(), &req.track_id, req.new_index)
+        .await
+    {
+        ReorderOutcome::Moved => {}
+        // プレイリスト未収録のトラックや、競合する削除で並びから消えた場合
+        ReorderOutcome::NotInList => return Err(AppError::not_found("Track not in the list")),
+        ReorderOutcome::Failed => return Err(AppError::internal("Failed to save track order")),
     }
     state.broadcast_tracks().await;
     Ok(Json(json!({ "status": "ok" })))
@@ -356,6 +388,100 @@ pub async fn delete_track(
         .ok_or_else(|| AppError::not_found("Track not found"))?;
     state.broadcast_tracks().await;
     state.broadcast_devices().await;
+    // 収録していたプレイリストの曲数表示を更新させる
+    state.broadcast_playlists().await;
+    Ok(Json(json!({ "status": "ok" })))
+}
+
+// ════════════════════════════════════════
+// プレイリスト API
+// ════════════════════════════════════════
+
+async fn playlist_or_404(state: &AppState, playlist_id: &str) -> AppResult<()> {
+    state
+        .get_playlist(playlist_id)
+        .await
+        .map(|_| ())
+        .ok_or_else(|| AppError::not_found("Playlist not found"))
+}
+
+/// GET /api/playlists
+pub async fn list_playlists(State(state): State<Arc<AppState>>) -> Json<Value> {
+    Json(json!({ "playlists": state.playlists_json().await }))
+}
+
+#[derive(Deserialize)]
+pub struct CreatePlaylistRequest {
+    name: String,
+}
+
+/// POST /api/playlists
+pub async fn create_playlist(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreatePlaylistRequest>,
+) -> AppResult<Json<Value>> {
+    let playlist = state
+        .create_playlist(&req.name)
+        .await
+        .ok_or_else(|| AppError::bad_request("Invalid playlist name"))?;
+    state.broadcast_playlists().await;
+    // クライアントの Playlist 型 (count 必須) と同じ形で返す
+    let mut playlist = serde_json::to_value(&playlist)
+        .map_err(|e| AppError::internal(format!("Failed to serialize playlist: {e}")))?;
+    playlist["count"] = json!(0);
+    Ok(Json(json!({ "status": "ok", "playlist": playlist })))
+}
+
+/// DELETE /api/playlists/:id
+pub async fn delete_playlist(
+    State(state): State<Arc<AppState>>,
+    Path(playlist_id): Path<String>,
+) -> AppResult<Json<Value>> {
+    if !state.delete_playlist(&playlist_id).await {
+        return Err(AppError::not_found("Playlist not found"));
+    }
+    state.broadcast_playlists().await;
+    // 選曲範囲に指定されていた場合はライブラリ全体へ戻ったことを知らせる
+    state.broadcast_active_playlist().await;
+    Ok(Json(json!({ "status": "ok" })))
+}
+
+#[derive(Deserialize)]
+pub struct PlaylistTrackRequest {
+    track_id: String,
+}
+
+/// POST /api/playlists/:id/tracks
+pub async fn add_playlist_track(
+    State(state): State<Arc<AppState>>,
+    Path(playlist_id): Path<String>,
+    Json(req): Json<PlaylistTrackRequest>,
+) -> AppResult<Json<Value>> {
+    playlist_or_404(&state, &playlist_id).await?;
+    let track = track_or_404(&state, &req.track_id).await?;
+    if !state.add_playlist_track(&playlist_id, &track.id).await {
+        return Err(AppError::internal("Failed to add track to playlist"));
+    }
+    state.broadcast_playlists().await;
+    // プレイリストを表示中のクライアントに収録内容を再取得させる
+    state.broadcast_tracks().await;
+    Ok(Json(json!({
+        "status": "ok",
+        "message": format!("「{}」をプレイリストに追加しました", track.title),
+    })))
+}
+
+/// DELETE /api/playlists/:id/tracks/:track_id
+pub async fn remove_playlist_track(
+    State(state): State<Arc<AppState>>,
+    Path((playlist_id, track_id)): Path<(String, String)>,
+) -> AppResult<Json<Value>> {
+    playlist_or_404(&state, &playlist_id).await?;
+    if !state.remove_playlist_track(&playlist_id, &track_id).await {
+        return Err(AppError::not_found("Track not in playlist"));
+    }
+    state.broadcast_playlists().await;
+    state.broadcast_tracks().await;
     Ok(Json(json!({ "status": "ok" })))
 }
 
@@ -412,7 +538,7 @@ async fn queue_on_devices(
     Ok(Json(json!({
         "status": "queued",
         "devices": device_ids,
-        "message": "Say 'Alexa, open YouTube Player' on each Echo device"
+        "message": "再生をキューしました。各 Echo で「アレクサ、YouTube プレーヤーを開いて」と言ってください",
     })))
 }
 
@@ -509,7 +635,6 @@ pub async fn seek_device(
     Ok(Json(json!({
         "status": "queued",
         "position_ms": position_ms,
-        "message": "Say 'Alexa, open YouTube Player' on the Echo device to apply"
     })))
 }
 
@@ -602,6 +727,8 @@ async fn ws_handler(mut socket: WebSocket, state: Arc<AppState>) {
         "devices": state.devices_json().await,
         "playback_mode": state.playback_mode().await,
         "downloads": state.downloads_json().await,
+        "playlists": state.playlists_json().await,
+        "active_playlist": state.active_playlist().await,
     });
     if socket
         .send(Message::Text(init_msg.to_string().into()))
@@ -673,17 +800,32 @@ async fn handle_ws_message(
                 let _ = client_tx.send(msg.to_string());
                 return;
             };
-            // ダウンロードは長時間かかるため別タスクで行い、結果だけ返す
+            // ダウンロードは長時間かかるため別タスクで行い、結果だけ返す。
+            // プレイリスト URL は展開して一括インポートを開始する
             let state = state.clone();
             let tx = client_tx.clone();
             let url = url.to_string();
             tokio::spawn(async move {
-                let result = match state.extract_audio(&url).await {
-                    Ok(track) => {
-                        state.broadcast_tracks().await;
-                        json!({ "type": "extract_audio_result", "track": track })
-                    }
-                    Err(e) => json!({ "type": "extract_audio_error", "error": e }),
+                let result = match classify_url(&url) {
+                    UrlKind::Video => match state.extract_audio(&url).await {
+                        Ok(track) => {
+                            state.broadcast_tracks().await;
+                            json!({ "type": "extract_audio_result", "track": track })
+                        }
+                        Err(e) => json!({ "type": "extract_audio_error", "error": e }),
+                    },
+                    UrlKind::Playlist(list_id) => match state.import_playlist(&list_id).await {
+                        Ok(info) => json!({
+                            "type": "playlist_import_result",
+                            "name": info.name,
+                            "total": info.total,
+                        }),
+                        Err(e) => json!({ "type": "extract_audio_error", "error": e }),
+                    },
+                    UrlKind::Unknown => json!({
+                        "type": "extract_audio_error",
+                        "error": "Could not recognize YouTube URL",
+                    }),
                 };
                 let _ = tx.send(result.to_string());
             });
@@ -695,12 +837,11 @@ async fn handle_ws_message(
                 state.broadcast_playback_mode(mode).await;
             }
         }
-        "rename_device" => {
-            if let (Some(did), Some(name)) = (data["device_id"].as_str(), data["name"].as_str()) {
-                state
-                    .update_device(did, DeviceUpdate::new().name(name))
-                    .await;
-                state.broadcast_devices().await;
+        "set_active_playlist" => {
+            // playlist は null (ライブラリ全体) も正当な値
+            let playlist = data["playlist"].as_str();
+            if state.set_active_playlist(playlist).await {
+                state.broadcast_active_playlist().await;
             }
         }
         _ => {}

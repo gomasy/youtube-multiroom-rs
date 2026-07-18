@@ -1,12 +1,15 @@
 import { ScrollingText } from "./ScrollingText";
+import { PreviewPlayer } from "./PreviewPlayer";
 import { formatDuration } from "../format";
 import type { Track } from "../types";
 
 interface Props {
   track: Track | null;
+  onUnauthorized: () => void;
+  showToast: (msg: string) => void;
 }
 
-export function NowPlaying({ track }: Props) {
+export function NowPlaying({ track, onUnauthorized, showToast }: Props) {
   return (
     <div className={`now-playing${track ? "" : " empty"}`}>
       <div className="track-row">
@@ -35,6 +38,16 @@ export function NowPlaying({ track }: Props) {
           </div>
         </div>
       </div>
+      {track && (
+        // key で再マウントさせ、トラック切り替え時の再生停止と状態リセットを
+        // アンマウントに任せる
+        <PreviewPlayer
+          key={track.id}
+          track={track}
+          onUnauthorized={onUnauthorized}
+          showToast={showToast}
+        />
+      )}
     </div>
   );
 }

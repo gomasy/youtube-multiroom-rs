@@ -1,4 +1,4 @@
-import type { Track, TracksPage } from "./types";
+import type { Playlist, Track, TracksPage } from "./types";
 
 export const PER_PAGE = 10;
 
@@ -38,9 +38,12 @@ export async function fetchTracks(
   perPage: number,
   onUnauthorized?: () => void,
   token?: string,
+  playlistId?: string | null,
 ): Promise<TracksPage> {
+  let url = `/api/tracks?page=${page}&per_page=${perPage}`;
+  if (playlistId) url += `&playlist=${encodeURIComponent(playlistId)}`;
   const res = await authFetch(
-    `/api/tracks?page=${page}&per_page=${perPage}`,
+    url,
     token ? { headers: { Authorization: `Bearer ${token}` } } : {},
     onUnauthorized,
   );
@@ -48,21 +51,96 @@ export async function fetchTracks(
   return res.json();
 }
 
-// トラックを全体並びの newIndex (0 始まり) へ移動する
+// トラックを並びの newIndex (0 始まり) へ移動する
+// (playlistId 指定時はプレイリスト内、未指定はライブラリ全体)
 export async function reorderTrack(
   trackId: string,
   newIndex: number,
   onUnauthorized?: () => void,
+  playlistId?: string | null,
 ): Promise<void> {
   const res = await authFetch(
     "/api/tracks/reorder",
     {
       method: "POST",
-      body: JSON.stringify({ track_id: trackId, new_index: newIndex }),
+      body: JSON.stringify({
+        track_id: trackId,
+        new_index: newIndex,
+        playlist: playlistId ?? null,
+      }),
     },
     onUnauthorized,
   );
   if (!res.ok) throw new Error("並べ替えに失敗しました");
+}
+
+// プレビュー再生用に audio 要素へ渡せるストリーム URL (署名付き) を取得する
+export async function getStreamUrl(
+  trackId: string,
+  onUnauthorized?: () => void,
+): Promise<string> {
+  const res = await authFetch(
+    `/api/audio/${encodeURIComponent(trackId)}/url`,
+    {},
+    onUnauthorized,
+  );
+  if (!res.ok) throw new Error("再生 URL の取得に失敗しました");
+  const data = await res.json();
+  return data.url;
+}
+
+export async function createPlaylist(
+  name: string,
+  onUnauthorized?: () => void,
+): Promise<Playlist> {
+  const res = await authFetch(
+    "/api/playlists",
+    { method: "POST", body: JSON.stringify({ name }) },
+    onUnauthorized,
+  );
+  if (!res.ok) throw new Error("プレイリストの作成に失敗しました");
+  const data = await res.json();
+  return data.playlist;
+}
+
+export async function deletePlaylist(
+  playlistId: string,
+  onUnauthorized?: () => void,
+): Promise<void> {
+  const res = await authFetch(
+    `/api/playlists/${encodeURIComponent(playlistId)}`,
+    { method: "DELETE" },
+    onUnauthorized,
+  );
+  if (!res.ok) throw new Error("プレイリストの削除に失敗しました");
+}
+
+// トラックをプレイリスト末尾へ追加する (収録済みなら末尾へ移動)
+export async function addToPlaylist(
+  playlistId: string,
+  trackId: string,
+  onUnauthorized?: () => void,
+): Promise<{ message?: string }> {
+  const res = await authFetch(
+    `/api/playlists/${encodeURIComponent(playlistId)}/tracks`,
+    { method: "POST", body: JSON.stringify({ track_id: trackId }) },
+    onUnauthorized,
+  );
+  if (!res.ok) throw new Error("プレイリストへの追加に失敗しました");
+  return res.json();
+}
+
+export async function removeFromPlaylist(
+  playlistId: string,
+  trackId: string,
+  onUnauthorized?: () => void,
+): Promise<void> {
+  const res = await authFetch(
+    `/api/playlists/${encodeURIComponent(playlistId)}/tracks/${encodeURIComponent(trackId)}`,
+    { method: "DELETE" },
+    onUnauthorized,
+  );
+  if (!res.ok) throw new Error("プレイリストからの削除に失敗しました");
 }
 
 // yt-dlp の ytsearch で YouTube を検索し、Track 互換の結果一覧を返す

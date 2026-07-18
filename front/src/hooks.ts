@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback } from "react";
 import { getToken } from "./api";
-import type { Device, DownloadProgress, PlaybackMode, Track, WSMessage } from "./types";
+import type { Device, DownloadProgress, PlaybackMode, Playlist, Track, WSMessage } from "./types";
 
 interface WSCallbacks {
   onVersion: (version: string) => void;
@@ -11,6 +11,9 @@ interface WSCallbacks {
   onExtractResult: (track: Track) => void;
   onExtractError: (error: string) => void;
   onDownloadsUpdate: (downloads: DownloadProgress[]) => void;
+  onPlaylistsUpdate: (playlists: Playlist[]) => void;
+  onActivePlaylist: (playlistId: string | null) => void;
+  onPlaylistImportStarted: (name: string, total: number) => void;
   onConnectedChange: (connected: boolean) => void;
 }
 
@@ -51,6 +54,8 @@ export function useWebSocket(active: boolean, callbacks: WSCallbacks) {
         if (data.playback_mode) cbRef.current.onPlaybackMode(data.playback_mode);
         // リロード・再接続時に進行中ダウンロードの表示を同期し直す
         cbRef.current.onDownloadsUpdate(data.downloads || []);
+        cbRef.current.onPlaylistsUpdate(data.playlists || []);
+        cbRef.current.onActivePlaylist(data.active_playlist ?? null);
       } else if (data.type === "device_update") {
         cbRef.current.onDeviceUpdate(data.devices || {});
       } else if (data.type === "tracks_update") {
@@ -63,6 +68,12 @@ export function useWebSocket(active: boolean, callbacks: WSCallbacks) {
         cbRef.current.onExtractError(data.error);
       } else if (data.type === "downloads_update") {
         cbRef.current.onDownloadsUpdate(data.downloads || []);
+      } else if (data.type === "playlists_update") {
+        cbRef.current.onPlaylistsUpdate(data.playlists || []);
+      } else if (data.type === "active_playlist_update") {
+        cbRef.current.onActivePlaylist(data.playlist ?? null);
+      } else if (data.type === "playlist_import_result") {
+        cbRef.current.onPlaylistImportStarted(data.name, data.total);
       }
     };
 
