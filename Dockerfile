@@ -5,12 +5,12 @@ RUN npm ci
 COPY front/ ./
 RUN npm run build
 
-# apk 版 ffmpeg は動画コーデック込みで依存が約 130MB に膨らむため、
-# このアプリに必要な機能だけを有効にした最小構成を自前ビルドする。
-# 用途は次の 3 つ:
-#   - ライブ中継: HLS/HTTPS 入力 → AAC コピー → ADTS 出力 (handlers.rs)
-#   - 非 AAC ライブの再エンコード: opus/vorbis デコード → AAC エンコード
-#   - yt-dlp の m4a 抽出/fixup: mov/matroska 入力、ipod/mp4 出力、aac_adtstoasc
+# The apk-provided ffmpeg balloons to ~130MB once video codecs are included,
+# so we build a minimal configuration with only the features this app needs.
+# It is used for three purposes:
+#   - Live relay: HLS/HTTPS input -> AAC copy -> ADTS output (handlers.rs)
+#   - Re-encoding non-AAC live streams: opus/vorbis decode -> AAC encode
+#   - yt-dlp m4a extraction/fixup: mov/matroska input, ipod/mp4 output, aac_adtstoasc
 FROM alpine:latest AS ffmpeg
 RUN apk add --no-cache build-base pkgconf nasm curl tar xz openssl-dev zlib-dev
 # renovate: datasource=github-tags depName=FFmpeg/FFmpeg extractVersion=^n(?<version>\d+\.\d+(\.\d+)?)$
@@ -28,8 +28,8 @@ RUN ./configure \
         --enable-small \
         --enable-openssl \
         --enable-zlib \
-        # udp 自体は不要だが、tls_openssl.c が DTLS 対応で ff_udp_* を
-        # 参照するため、リンクを通すのに udp を有効にする必要がある
+        # udp is not needed on its own, but tls_openssl.c references ff_udp_*
+        # for DTLS support, so it must be enabled to link successfully
         --enable-protocol=file,pipe,tcp,udp,tls,http,https,httpproxy,crypto \
         --enable-demuxer=hls,mpegts,mov,matroska,aac \
         --enable-decoder=aac,opus,vorbis \
@@ -42,24 +42,26 @@ RUN ./configure \
     && make install
 
 FROM rust:1-alpine AS backend
-# openssl クレート (Alexa 署名検証) のビルドに必要
+# Required to build the openssl crate (Alexa request signature verification)
 RUN apk add --no-cache musl-dev pkgconf openssl-dev
-# 動的リンクにして実行ステージの libssl を共有する (crt-static だと libssl とリンクできない)
+# Link dynamically so the runtime stage can share its libssl (crt-static cannot link against libssl)
 ENV RUSTFLAGS="-C target-feature=-crt-static"
 WORKDIR /app
 COPY Cargo.toml Cargo.lock build.rs ./
 RUN mkdir src && echo 'fn main() {}' > src/main.rs && cargo build --release && rm -rf src
 COPY src/ src/
-# ホスト側で求めた git 情報を渡す (.git はイメージに含めないため build.rs が
-# 自力で取得できない)。未指定なら build.rs 側で "unknown" になる。
+# locales/ is embedded into the binary at compile time, so include it in the build context
+COPY locales/ locales/
+# Pass git metadata gathered on the host (.git is excluded from the image, so
+# build.rs cannot obtain it itself). Falls back to "unknown" if not provided.
 ARG GIT_HASH
 ARG BUILD_DATE
 ENV GIT_HASH=${GIT_HASH} BUILD_DATE=${BUILD_DATE}
 RUN touch src/main.rs && cargo build --release
 
 FROM alpine:latest
-# deno は yt-dlp の JS ランタイムとして必要。apk 版 yt-dlp は更新が遅れる
-# 可能性があるため、従来どおり pipx で PyPI の最新版を入れる
+# deno is needed as yt-dlp's JS runtime. The apk yt-dlp may lag behind, so we
+# install the latest PyPI release via pipx as before.
 RUN apk add --no-cache ca-certificates deno python3 libssl3 zlib \
     && apk add --no-cache --virtual .build pipx \
     && pipx install yt-dlp \
