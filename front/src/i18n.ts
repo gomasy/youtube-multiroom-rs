@@ -2,6 +2,11 @@ type Lang = "en" | "ja";
 
 const lang: Lang = navigator.language.startsWith("ja") ? "ja" : "en";
 
+// Reflect the detected locale on the document root for accessibility/CSS.
+if (typeof document !== "undefined") {
+  document.documentElement.lang = lang;
+}
+
 const messages: Record<Lang, Record<string, string>> = {
   en: {
     // Header
@@ -170,7 +175,7 @@ const messages: Record<Lang, Record<string, string>> = {
     "devices.deleted": "デバイスを削除しました",
     "devices.seekFailed": "シークに失敗しました",
     "devices.seekQueued":
-      "シークをキューしました。「アレクサ、YouTube プレーヤーを開いて」で反映されます",
+      "シークをキューしました。「アレクサ、YouTube プレーヤーを開いて」で反映されます。",
     "devices.selectTrack": "先にトラックを取得してください",
     "devices.selectDevice": "デバイスを選択してください",
     "devices.playQueued": "再生をキューしました",
@@ -205,7 +210,7 @@ const messages: Record<Lang, Record<string, string>> = {
     "history.tracks": "取得済みトラック",
     "history.deletePlaylist": "プレイリストを削除",
     "history.playlistEmpty":
-      "このプレイリストは空です。ライブラリの ♪＋ ボタンで追加できます",
+      "このプレイリストは空です。ライブラリの ♪＋ ボタンで追加できます。",
     "history.noTracks": "トラックがありません",
     "history.dragToReorder": "ドラッグで並べ替え",
     "history.addToPlaylist": "プレイリストに追加",
@@ -243,7 +248,7 @@ const messages: Record<Lang, Record<string, string>> = {
     // AddToPlaylistMenu
     "playlistMenu.title": "プレイリストに追加",
     "playlistMenu.empty":
-      "プレイリストがありません。一覧上部の「＋」で作成できます",
+      "プレイリストがありません。一覧上部の「＋」で作成できます。",
 
     // App / common
     "common.trackFetched": "取得しました",
@@ -276,7 +281,8 @@ export function t(key: string): string {
 export function tFmt(key: string, params: Record<string, string | number>): string {
   let msg = t(key);
   for (const [k, v] of Object.entries(params)) {
-    msg = msg.replace(`{${k}}`, String(v));
+    // Replace every occurrence (String.replace with a string only swaps the first).
+    msg = msg.replace(new RegExp(`\\{${k}\\}`, "g"), String(v));
   }
   return msg;
 }

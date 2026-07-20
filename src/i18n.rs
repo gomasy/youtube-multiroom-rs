@@ -5,11 +5,31 @@ pub enum Lang {
 }
 
 impl Lang {
+    /// Parse a language code such as "en", "en-US", "ja", or "ja-JP".
+    /// Returns None for unrecognized or empty values.
+    pub fn parse(s: &str) -> Option<Self> {
+        if s.starts_with("en") {
+            Some(Lang::En)
+        } else if s.starts_with("ja") {
+            Some(Lang::Ja)
+        } else {
+            None
+        }
+    }
+
+    /// Resolve the language from the APP_LANG environment variable.
+    /// Defaults to Japanese for backward compatibility and warns when APP_LANG
+    /// is set but unrecognized.
     pub fn from_env() -> Self {
         match std::env::var("APP_LANG").ok().as_deref() {
-            Some(s) if s.starts_with("en") => Lang::En,
-            Some(s) if s.starts_with("ja") => Lang::Ja,
-            _ => Lang::Ja,
+            Some(s) => match Self::parse(s) {
+                Some(l) => l,
+                None => {
+                    tracing::warn!("APP_LANG=\"{s}\" is not recognized; defaulting to \"ja\"");
+                    Lang::Ja
+                }
+            },
+            None => Lang::Ja,
         }
     }
 
@@ -82,7 +102,7 @@ impl Lang {
     pub fn api_play_queued(self) -> &'static str {
         match self {
             Lang::En => "Playback queued. Say \"Alexa, open YouTube Player\" on each Echo device.",
-            Lang::Ja => "再生をキューしました。各 Echo で「アレクサ、YouTube プレーヤーを開いて」と言ってください",
+            Lang::Ja => "再生をキューしました。各 Echo で「アレクサ、YouTube プレーヤーを開いて」と言ってください。",
         }
     }
 
