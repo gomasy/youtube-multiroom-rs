@@ -81,12 +81,16 @@ impl Lang {
 
     pub fn alexa_help(self) -> &'static str {
         match self {
-            Lang::En => "Paste a YouTube URL in the web interface and press the play button. \
-                         Then say \"Alexa, open YouTube Player\" on this device.",
-            Lang::Ja => "Web ブラウザの操作画面で YouTube の URL を貼り付け、\
+            Lang::En => {
+                "Paste a YouTube URL in the web interface and press the play button. \
+                         Then say \"Alexa, open YouTube Player\" on this device."
+            }
+            Lang::Ja => {
+                "Web ブラウザの操作画面で YouTube の URL を貼り付け、\
                          再生ボタンを押してください。\
                          その後、このデバイスで「アレクサ、YouTube プレーヤーを開いて」\
-                         と言ってください。",
+                         と言ってください。"
+            }
         }
     }
 
@@ -102,7 +106,9 @@ impl Lang {
     pub fn api_play_queued(self) -> &'static str {
         match self {
             Lang::En => "Playback queued. Say \"Alexa, open YouTube Player\" on each Echo device.",
-            Lang::Ja => "再生をキューしました。各 Echo で「アレクサ、YouTube プレーヤーを開いて」と言ってください。",
+            Lang::Ja => {
+                "再生をキューしました。各 Echo で「アレクサ、YouTube プレーヤーを開いて」と言ってください。"
+            }
         }
     }
 
