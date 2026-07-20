@@ -1,5 +1,6 @@
 import { useRef, useState, useImperativeHandle, forwardRef } from "react";
 import { searchYouTube } from "../api";
+import { t } from "../i18n";
 import { TrackRowInfo } from "./TrackRowInfo";
 import type { Track } from "../types";
 
@@ -25,7 +26,6 @@ export const UrlInput = forwardRef<UrlInputHandle, Props>(function UrlInput(
   const [value, setValue] = useState("");
   const [searching, setSearching] = useState(false);
   const [results, setResults] = useState<Track[] | null>(null);
-  // 直前の onChange がペースト由来かどうか (URL ペースト時の自動取得に使う)
   const pastedRef = useRef(false);
 
   const busy = extracting || searching;
@@ -39,7 +39,7 @@ export const UrlInput = forwardRef<UrlInputHandle, Props>(function UrlInput(
     if (busy) return;
     const trimmed = input.trim();
     if (!trimmed) {
-      showToast("URL または検索キーワードを入力してください");
+      showToast(t("url.empty"));
       return;
     }
     if (isYoutubeUrl(trimmed)) {
@@ -47,9 +47,8 @@ export const UrlInput = forwardRef<UrlInputHandle, Props>(function UrlInput(
       onExtract(trimmed);
       return;
     }
-    // YouTube 以外の URL は検索キーワード扱いせず、非対応であることを伝える
     if (/^https?:\/\//i.test(trimmed)) {
-      showToast("YouTube の URL ではないため取得できません");
+      showToast(t("url.notYoutube"));
       return;
     }
     void search(trimmed);
@@ -60,7 +59,7 @@ export const UrlInput = forwardRef<UrlInputHandle, Props>(function UrlInput(
     try {
       setResults(await searchYouTube(query, onUnauthorized));
     } catch (e) {
-      showToast(`エラー: ${(e as Error).message}`);
+      showToast(`${t("common.error")}: ${(e as Error).message}`);
     } finally {
       setSearching(false);
     }
@@ -87,7 +86,7 @@ export const UrlInput = forwardRef<UrlInputHandle, Props>(function UrlInput(
         <input
           type="text"
           className="url-input"
-          placeholder="YouTube URL または検索キーワード..."
+          placeholder={t("url.placeholder")}
           autoComplete="off"
           spellCheck={false}
           value={value}
@@ -96,22 +95,22 @@ export const UrlInput = forwardRef<UrlInputHandle, Props>(function UrlInput(
           onPaste={() => { pastedRef.current = true; }}
         />
         <button className="btn" onClick={() => submit(value)} disabled={busy}>
-          {extracting ? <><span className="spinner" />取得中</>
-            : searching ? <><span className="spinner" />検索中</>
-            : isUrl ? "取得" : "検索"}
+          {extracting ? <><span className="spinner" />{t("url.extracting")}</>
+            : searching ? <><span className="spinner" />{t("url.searching")}</>
+            : isUrl ? t("url.extract") : t("url.search")}
         </button>
       </div>
 
       {results && (
         <div className="search-results">
           <div className="search-results-header section-label">
-            <span>検索結果 ({results.length})</span>
+            <span>{t("url.results")} ({results.length})</span>
             <button className="text-btn" onClick={() => setResults(null)}>
-              閉じる
+              {t("url.close")}
             </button>
           </div>
           {results.length === 0 && (
-            <div className="search-empty">見つかりませんでした</div>
+            <div className="search-empty">{t("url.noResults")}</div>
           )}
           {results.map((t) => (
             <div key={t.id} className="history-item" onClick={() => pickResult(t)}>

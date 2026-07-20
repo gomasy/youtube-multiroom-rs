@@ -2,6 +2,7 @@ mod alexa;
 mod alexa_verify;
 mod auth;
 mod handlers;
+mod i18n;
 mod state;
 
 pub const VERSION: &str = concat!(
@@ -24,7 +25,6 @@ use tower_http::services::ServeDir;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // .env があれば読み込む (無くてもエラーにしない)
     let dotenv_loaded = dotenvy::dotenv().is_ok();
 
     tracing_subscriber::fmt()
@@ -41,8 +41,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "LISTEN_ADDR is not a valid socket address: {listen_addr}"
         ))
     });
+    let lang = i18n::Lang::from_env();
 
-    let state = AppState::new(api_token, &redis_url)
+    let state = AppState::new(api_token, &redis_url, lang)
         .await
         .unwrap_or_else(|e| die(e));
 
@@ -116,13 +117,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// 起動に必須の設定が欠けている場合にエラーを表示して終了する
 fn die(msg: impl std::fmt::Display) -> ! {
     eprintln!("Error: {msg}");
     process::exit(1);
 }
 
-/// URL のユーザー情報 (user:password@) を伏せてログ用に整形する
+/// Redact user credentials from a URL for log output.
 fn redact_url(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
         return url.to_string();

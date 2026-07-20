@@ -1,5 +1,5 @@
-// 複数コンポーネントで使い回す小さなインラインアイコン。
-// ストローク系は currentColor を使うので、色は置き場所の CSS で決まる
+// Small inline icons shared across components.
+// Stroke-based icons use currentColor, so color is determined by CSS context.
 
 export function TrashIcon({ size = 16 }: { size?: number }) {
   return (
@@ -34,7 +34,7 @@ export function PauseIcon({ size = 14 }: { size?: number }) {
   );
 }
 
-/** 「プレイリストに追加」(リスト+プラス) */
+/** "Add to playlist" icon (list + plus) */
 export function AddToListIcon({ size = 16 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">

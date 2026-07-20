@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import faviconUrl from "url:../favicon.svg";
 
 interface Props {
@@ -13,7 +14,7 @@ export function Header({ connected, version }: Props) {
       {version && <span className="header-version">{version}</span>}
       <div
         className={`dot${connected ? "" : " disconnected"}`}
-        title={connected ? "サーバー接続中" : "切断中"}
+        title={connected ? t("header.connected") : t("header.disconnected")}
       />
     </div>
   );

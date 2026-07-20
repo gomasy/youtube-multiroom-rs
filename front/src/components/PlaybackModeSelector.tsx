@@ -1,16 +1,16 @@
+import { t } from "../i18n";
 import type { PlaybackMode, Playlist } from "../types";
 
-const MODES: { value: PlaybackMode; label: string; hint: string }[] = [
-  { value: "off", label: "オフ", hint: "曲が終わったら停止" },
-  { value: "loop", label: "ループ", hint: "再生範囲を順に連続再生" },
-  { value: "shuffle", label: "シャッフル", hint: "再生範囲からランダムに連続再生" },
+const MODES: { value: PlaybackMode; labelKey: string; hintKey: string }[] = [
+  { value: "off", labelKey: "mode.off", hintKey: "mode.off.hint" },
+  { value: "loop", labelKey: "mode.loop", hintKey: "mode.loop.hint" },
+  { value: "shuffle", labelKey: "mode.shuffle", hintKey: "mode.shuffle.hint" },
 ];
 
 interface Props {
   mode: PlaybackMode;
   onChange: (mode: PlaybackMode) => void;
   playlists: Playlist[];
-  /** ループ/シャッフルの選曲範囲プレイリスト ID (null はライブラリ全体) */
   activePlaylist: string | null;
   onActivePlaylistChange: (playlistId: string | null) => void;
 }
@@ -24,32 +24,31 @@ export function PlaybackModeSelector({
 }: Props) {
   return (
     <div className="playback-mode-section">
-      <div className="section-label">連続再生</div>
+      <div className="section-label">{t("mode.label")}</div>
       <div className="segmented">
         {MODES.map((m) => (
           <button
             key={m.value}
             className={`segmented-btn${mode === m.value ? " active" : ""}`}
-            title={m.hint}
+            title={t(m.hintKey)}
             onClick={() => onChange(m.value)}
           >
-            {m.label}
+            {t(m.labelKey)}
           </button>
         ))}
       </div>
       {playlists.length > 0 && (
         <div className="scope-row">
           <label className="scope-label" htmlFor="playback-scope">
-            再生範囲
+            {t("mode.scope")}
           </label>
           <select
             id="playback-scope"
             className="scope-select"
-            // 削除済みプレイリストへの追従はサーバー (active_playlist_update) に任せる
             value={activePlaylist ?? ""}
             onChange={(e) => onActivePlaylistChange(e.target.value || null)}
           >
-            <option value="">ライブラリ全体</option>
+            <option value="">{t("mode.allTracks")}</option>
             {playlists.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.name} ({p.count})

@@ -1,17 +1,18 @@
 import { useState } from "react";
 import { authFetch, playTracks, queueNext, removeQueueItem, clearQueue } from "../api";
+import { t } from "../i18n";
 import { ScrollingText } from "./ScrollingText";
 import { SeekBar } from "./SeekBar";
 import { CloseIcon, TrashIcon } from "./icons";
 import type { Device, Track } from "../types";
 
-const STATUS_LABELS: Record<string, string> = {
-  idle: "待機中",
-  playing: "再生中",
-  paused: "一時停止",
-  stopped: "停止",
-  queued: "キュー済み",
-  error: "エラー",
+const STATUS_KEYS: Record<string, string> = {
+  idle: "status.idle",
+  playing: "status.playing",
+  paused: "status.paused",
+  stopped: "status.stopped",
+  queued: "status.queued",
+  error: "status.error",
 };
 
 interface Props {
@@ -51,16 +52,16 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
         { method: "DELETE" },
         onUnauthorized,
       );
-      if (!res.ok) throw new Error("削除に失敗しました");
+      if (!res.ok) throw new Error(t("devices.deleteFailed"));
       setSelectedDevices((prev) => {
         const next = new Set(prev);
         next.delete(deviceId);
         return next;
       });
       onDeviceDeleted(deviceId);
-      showToast("デバイスを削除しました");
+      showToast(t("devices.deleted"));
     } catch (e) {
-      showToast(`エラー: ${(e as Error).message}`);
+      showToast(`${t("common.error")}: ${(e as Error).message}`);
     }
   }
 
@@ -74,14 +75,13 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
         },
         onUnauthorized,
       );
-      if (!res.ok) throw new Error("シークに失敗しました");
-      showToast("シークをキューしました。「アレクサ、YouTube プレーヤーを開いて」で反映されます");
+      if (!res.ok) throw new Error(t("devices.seekFailed"));
+      showToast(t("devices.seekQueued"));
     } catch (e) {
-      showToast(`エラー: ${(e as Error).message}`);
+      showToast(`${t("common.error")}: ${(e as Error).message}`);
     }
   }
 
-  // 選択デバイスへの操作 (再生 / 次に再生) の検証・busy 管理・結果トーストを共通化する
   async function sendToSelected(
     call: (
       trackId: string,
@@ -92,11 +92,11 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
     fallbackMsg: string,
   ) {
     if (!currentTrack) {
-      showToast("先にトラックを取得してください");
+      showToast(t("devices.selectTrack"));
       return;
     }
     if (selectedDevices.size === 0) {
-      showToast("デバイスを選択してください");
+      showToast(t("devices.selectDevice"));
       return;
     }
 
@@ -105,25 +105,24 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
       const data = await call(currentTrack.id, Array.from(selectedDevices), onUnauthorized);
       showToast(data.message || fallbackMsg);
     } catch (e) {
-      showToast(`エラー: ${(e as Error).message}`);
+      showToast(`${t("common.error")}: ${(e as Error).message}`);
     } finally {
       setBusy(false);
     }
   }
 
-  const playOnSelected = () => sendToSelected(playTracks, setPlaying, "再生をキューしました");
-  const queueOnSelected = () => sendToSelected(queueNext, setQueueing, "次に再生に追加しました");
+  const playOnSelected = () => sendToSelected(playTracks, setPlaying, t("devices.playQueued"));
+  const queueOnSelected = () => sendToSelected(queueNext, setQueueing, t("devices.queuedNext"));
 
-  // 成功時の表示更新はサーバーが配る device_update に任せ、失敗だけ通知する
   function catchToast(action: Promise<unknown>) {
-    action.catch((e) => showToast(`エラー: ${(e as Error).message}`));
+    action.catch((e) => showToast(`${t("common.error")}: ${(e as Error).message}`));
   }
 
   const canPlay = !!currentTrack && selectedDevices.size > 0;
 
   return (
     <div className="devices-section">
-      <div className="section-label">デバイス</div>
+      <div className="section-label">{t("devices.label")}</div>
       <div className="device-list">
         {entries.length === 0 ? (
           <div className="empty-state">
@@ -131,10 +130,9 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
               <circle cx="12" cy="12" r="10" stroke="var(--text-dim)" strokeWidth="1.5" />
               <path d="M12 8v4M12 14.5v.5" stroke="var(--text-dim)" strokeWidth="1.5" strokeLinecap="round" />
             </svg>
-            <div>まだデバイスが接続されていません</div>
-            <div style={{ marginTop: 6, fontSize: 12 }}>
-              Echo で「アレクサ、YouTube プレーヤーを開いて」と<br />
-              言うとデバイスが登録されます
+            <div>{t("devices.empty")}</div>
+            <div style={{ marginTop: 6, fontSize: 12, whiteSpace: "pre-line" }}>
+              {t("devices.emptyHint")}
             </div>
           </div>
         ) : (
@@ -153,7 +151,7 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
                   <div className="device-name">{dev.name}</div>
                   <div className="device-status">
                     <span className={`status-dot ${dev.status}`} />
-                    {STATUS_LABELS[dev.status] || dev.status}
+                    {STATUS_KEYS[dev.status] ? t(STATUS_KEYS[dev.status]) : dev.status}
                   </div>
                   {dev.current_track && (
                     <ScrollingText
@@ -168,23 +166,23 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
                   {dev.queue && dev.queue.length > 0 && (
                     <div className="device-queue" onClick={(e) => e.stopPropagation()}>
                       <div className="device-queue-header">
-                        <span>次に再生 ({dev.queue.length})</span>
+                        <span>{t("devices.upNext")} ({dev.queue.length})</span>
                         <button
                           className="text-btn text-btn-danger"
                           onClick={() => catchToast(clearQueue(dev.device_id, onUnauthorized))}
                         >
-                          クリア
+                          {t("devices.clearQueue")}
                         </button>
                       </div>
-                      {dev.queue.map((t, i) => (
-                        <div key={t.entry} className="device-queue-item">
+                      {dev.queue.map((qt, i) => (
+                        <div key={qt.entry} className="device-queue-item">
                           <span className="queue-item-index">{i + 1}</span>
-                          <span className="queue-item-title">{t.title}</span>
+                          <span className="queue-item-title">{qt.title}</span>
                           <button
                             className="delete-btn"
-                            title="キューから削除"
+                            title={t("devices.removeFromQueue")}
                             onClick={() =>
-                              catchToast(removeQueueItem(dev.device_id, t.entry, onUnauthorized))
+                              catchToast(removeQueueItem(dev.device_id, qt.entry, onUnauthorized))
                             }
                           >
                             <CloseIcon size={12} />
@@ -196,7 +194,7 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
                 </div>
                 <button
                   className="delete-btn"
-                  title="デバイスを削除"
+                  title={t("devices.deleteDevice")}
                   onClick={(e) => { e.stopPropagation(); deleteDevice(dev.device_id); }}
                 >
                   <TrashIcon />
@@ -210,17 +208,17 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
       {entries.length > 0 && (
         <div className="controls">
           <button className="btn" onClick={playOnSelected} disabled={!canPlay || playing}>
-            {playing ? <><span className="spinner" />キュー中</> : "▶ 選択デバイスで再生"}
+            {playing ? <><span className="spinner" />{t("devices.queueing")}</> : t("devices.playSelected")}
           </button>
           <button
             className="btn btn-outline"
             onClick={queueOnSelected}
             disabled={!canPlay || queueing}
           >
-            {queueing ? <><span className="spinner" />追加中</> : "次に再生に追加"}
+            {queueing ? <><span className="spinner" />{t("devices.adding")}</> : t("devices.addToUpNext")}
           </button>
           <button className="btn btn-outline btn-sm" onClick={selectAll}>
-            全選択
+            {t("devices.selectAll")}
           </button>
         </div>
       )}

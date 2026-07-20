@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { checkAuth } from "./api";
+import { t, tFmt } from "./i18n";
 import { useWebSocket } from "./hooks";
 import { Header } from "./components/Header";
 import { UrlInput } from "./components/UrlInput";
@@ -20,13 +21,11 @@ export function App() {
   const [version, setVersion] = useState<string | null>(null);
   const [devices, setDevices] = useState<Record<string, Device>>({});
   const [tracksVersion, setTracksVersion] = useState(0);
-  // 認証確認時に取得した 1 ページ目のスナップショット。History が一度だけ消費する
   const [initialTracks, setInitialTracks] = useState<TracksPage | null>(null);
   const [currentTrack, setCurrentTrack] = useState<Track | null>(null);
   const [playbackMode, setPlaybackMode] = useState<PlaybackMode>("off");
   const [downloads, setDownloads] = useState<DownloadProgress[]>([]);
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
-  // ループ/シャッフルの選曲範囲プレイリスト ID (null はライブラリ全体)
   const [activePlaylist, setActivePlaylist] = useState<string | null>(null);
   const { toasts, showToast } = useToast();
   const urlInputRef = useRef<UrlInputHandle>(null);
@@ -48,23 +47,21 @@ export function App() {
   const handleExtractResult = useCallback((track: Track) => {
     setExtracting(false);
     setCurrentTrack(track);
-    showToast(`「${track.title}」を取得しました`);
+    showToast(`${t("common.trackFetched")}: ${track.title}`);
     urlInputRef.current?.clear();
   }, [showToast]);
 
   const handleExtractError = useCallback((error: string) => {
     setExtracting(false);
-    showToast(`エラー: ${error}`);
+    showToast(`${t("common.error")}: ${error}`);
   }, [showToast]);
 
   const handlePlaylistImportStarted = useCallback((name: string, total: number) => {
     setExtracting(false);
-    showToast(`プレイリスト「${name}」から ${total} 曲の取り込みを開始しました`);
+    showToast(`${name}: ${tFmt("common.importStarted", { total })}`);
     urlInputRef.current?.clear();
   }, [showToast]);
 
-  // REST での作成直後に (playlists_update の到着を待たず) タブへ反映する。
-  // WS 切断中でも一覧が追従し、作成直後のタブ切り替えが弾かれない
   const handlePlaylistCreated = useCallback((playlist: Playlist) => {
     setPlaylists((prev) =>
       prev.some((p) => p.id === playlist.id) ? prev : [...prev, playlist],
@@ -102,16 +99,14 @@ export function App() {
   }
 
   function handlePlaybackModeChange(mode: PlaybackMode) {
-    // 表示の更新は保存成功時にサーバーが返す playback_mode_update に任せる
     if (!sendMessage({ type: "set_playback_mode", mode })) {
-      showToast("サーバーに接続されていません");
+      showToast(t("common.notConnected"));
     }
   }
 
   function handleActivePlaylistChange(playlistId: string | null) {
-    // 表示の更新はサーバーが返す active_playlist_update に任せる
     if (!sendMessage({ type: "set_active_playlist", playlist: playlistId })) {
-      showToast("サーバーに接続されていません");
+      showToast(t("common.notConnected"));
     }
   }
 
@@ -133,7 +128,7 @@ export function App() {
             if (sendMessage({ type: "extract_audio", url })) {
               setExtracting(true);
             } else {
-              showToast("サーバーに接続されていません");
+              showToast(t("common.notConnected"));
             }
           }}
           showToast={showToast}

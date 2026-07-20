@@ -14,9 +14,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// 署名付きストリーム URL の有効期限。
-/// URL は再生開始時に発行され、長尺トラックでは再生中も Range リクエストで
-/// 同じ URL が使われ続けるため、十分長めに取る
+/// TTL for signed stream URLs. URLs are issued at playback start and reused
+/// for Range requests throughout long tracks, so the TTL must be generous.
 const STREAM_URL_TTL_SECS: u64 = 24 * 3600;
 
 pub async fn require_token(
@@ -30,19 +29,19 @@ pub async fn require_token(
 
     let path = request.uri().path();
 
-    // Alexa webhook はスキル署名検証が前提のため Bearer 認証の対象外
+    // Alexa webhook relies on skill signature verification, not Bearer auth
     if path == "/alexa" {
         return next.run(request).await;
     }
 
-    // Echo は Authorization ヘッダを付けられないため、
-    // ストリーム URL は HMAC 署名クエリ (exp & sig) で認証する
+    // Echo devices cannot attach Authorization headers, so stream URLs
+    // are authenticated via HMAC-signed query parameters (exp & sig)
     if let Some(audio_id) = audio_endpoint_id(path)
         && verify_stream_query(expected, audio_id, request.uri().query())
     {
         return next.run(request).await;
     }
-    // 署名がなくても通常のトークン認証は受け付ける (下へフォールスルー)
+    // Fall through to normal Bearer token auth even without a signature
 
     let header_ok = request
         .headers()
@@ -65,17 +64,17 @@ pub async fn require_token(
     }
 }
 
-/// ストリーム URL に付与する署名クエリ ("exp=...&sig=..." 形式) を生成する
+/// Generate a signed query string ("exp=...&sig=...") for stream URLs.
 pub fn stream_query(secret: &str, audio_id: &str) -> String {
     let exp = now_secs() + STREAM_URL_TTL_SECS;
     let sig = sign(secret, audio_id, exp);
     format!("exp={exp}&sig={sig}")
 }
 
-/// トラックのストリーム再生パスを組み立てる (認証有効時は署名クエリ付き)。
-/// Echo もブラウザの audio 要素も Authorization ヘッダを付けられないため、
-/// 再生 URL はこの署名で認証する。ライブ配信はファイルがなく、CDN の音声を
-/// 中継する /live を使う
+/// Build a stream path for a track (with signed query when auth is enabled).
+/// Neither Echo nor the browser audio element can attach Authorization headers,
+/// so playback URLs rely on this signature. Live streams use /live (CDN relay)
+/// instead of /stream (local file).
 pub fn stream_path(api_token: Option<&str>, audio_id: &str, is_live: bool) -> String {
     let endpoint = if is_live { "live" } else { "stream" };
     let mut path = format!("/api/audio/{audio_id}/{endpoint}");
@@ -109,16 +108,16 @@ fn sign(secret: &str, audio_id: &str, exp: u64) -> String {
         .collect()
 }
 
-/// "/api/audio/{id}/stream" または "/api/audio/{id}/live" からトラック ID を取り出す。
-/// パスは main.rs のルート定義・alexa.rs の URL 生成と一致していること
+/// Extract the track ID from "/api/audio/{id}/stream" or "/api/audio/{id}/live".
+/// The paths must match the route definitions in main.rs and URL generation in alexa.rs.
 fn audio_endpoint_id(path: &str) -> Option<&str> {
     let rest = path.strip_prefix("/api/audio/")?;
     rest.strip_suffix("/stream")
         .or_else(|| rest.strip_suffix("/live"))
 }
 
-/// クエリ文字列から値を取り出す。クライアントが encodeURIComponent 等で
-/// エンコードしたトークンも一致するよう、%XX はデコードして返す
+/// Extract a value from a query string. Percent-decodes %XX sequences so that
+/// tokens encoded by the client's encodeURIComponent match correctly.
 fn query_param<'a>(query: Option<&'a str>, key: &str) -> Option<Cow<'a, str>> {
     query?.split('&').find_map(|pair| {
         let (k, v) = pair.split_once('=')?;
@@ -192,7 +191,7 @@ mod tests {
         let q = format!("exp={exp}&sig={}", sign("secret", "abc123", exp));
         assert!(!verify_stream_query("secret", "abc123", Some(&q)));
 
-        // exp を伸ばすと署名が合わなくなる
+        // Extending exp invalidates the signature
         let future = now_secs() + 100;
         let q = format!("exp={future}&sig={}", sign("secret", "abc123", exp));
         assert!(!verify_stream_query("secret", "abc123", Some(&q)));
@@ -200,14 +199,14 @@ mod tests {
 
     #[test]
     fn stream_path_matches_endpoint_and_auth() {
-        // 認証無効時は素のパス
+        // Without auth: bare path
         assert_eq!(
             stream_path(None, "abc123", false),
             "/api/audio/abc123/stream"
         );
         assert_eq!(stream_path(None, "abc123", true), "/api/audio/abc123/live");
 
-        // 認証有効時は署名クエリ付きで、そのまま検証を通る
+        // With auth: signed query that passes verification
         let path = stream_path(Some("secret"), "abc123", false);
         let (base, query) = path.split_once('?').unwrap();
         assert_eq!(base, "/api/audio/abc123/stream");

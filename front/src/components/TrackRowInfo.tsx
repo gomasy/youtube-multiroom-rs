@@ -2,7 +2,7 @@ import { ScrollingText } from "./ScrollingText";
 import { formatDuration } from "../format";
 import type { Track } from "../types";
 
-// トラック一覧・検索結果の行で共通のサムネイル + タイトル + メタ表示
+// Shared thumbnail + title + metadata display for track list and search result rows
 export function TrackRowInfo({ track }: { track: Track }) {
   return (
     <>

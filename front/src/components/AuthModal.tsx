@@ -1,5 +1,6 @@
 import { useRef } from "react";
 import { checkAuth, setToken } from "../api";
+import { t } from "../i18n";
 import type { TracksPage } from "../types";
 
 interface Props {
@@ -16,7 +17,7 @@ export function AuthModal({ onAuthenticated, showToast }: Props) {
 
     const { authorized, data } = await checkAuth(token);
     if (!authorized) {
-      showToast("トークンが正しくありません");
+      showToast(t("auth.invalidToken"));
       return;
     }
 
@@ -31,8 +32,8 @@ export function AuthModal({ onAuthenticated, showToast }: Props) {
   return (
     <div className="auth-modal">
       <div className="auth-box">
-        <h2>認証が必要です</h2>
-        <p>API トークンを入力してください</p>
+        <h2>{t("auth.required")}</h2>
+        <p>{t("auth.enterToken")}</p>
         <input
           ref={inputRef}
           type="password"
@@ -42,7 +43,7 @@ export function AuthModal({ onAuthenticated, showToast }: Props) {
           autoFocus
         />
         <button className="btn" onClick={handleSave} style={{ width: "100%", marginTop: 12 }}>
-          接続
+          {t("auth.connect")}
         </button>
       </div>
     </div>

@@ -1,4 +1,4 @@
-/** 秒数を m:ss 形式に整形する */
+/** Format seconds as m:ss */
 export function formatTime(seconds: number): string {
   const total = Math.floor(seconds);
   const m = Math.floor(total / 60);
@@ -6,7 +6,7 @@ export function formatTime(seconds: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-/** トラックの長さ表示用。未取得 (undefined / 0) は "--:--" */
+/** Format track duration for display. Shows "--:--" when undefined or 0. */
 export function formatDuration(seconds?: number): string {
   return seconds ? formatTime(seconds) : "--:--";
 }

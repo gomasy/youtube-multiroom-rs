@@ -1,6 +1,7 @@
 import { ScrollingText } from "./ScrollingText";
 import { PreviewPlayer } from "./PreviewPlayer";
 import { formatDuration } from "../format";
+import { t } from "../i18n";
 import type { Track } from "../types";
 
 interface Props {
@@ -27,20 +28,18 @@ export function NowPlaying({ track, onUnauthorized, showToast }: Props) {
         <div className="track-info">
           <ScrollingText
             className="track-title"
-            text={track ? track.title : "曲が選択されていません"}
+            text={track ? track.title : t("nowPlaying.noTrack")}
           />
           <div className="track-meta">
             {track
               ? track.is_live
                 ? <>{track.channel ? `${track.channel} · ` : ""}<span className="live-badge">LIVE</span></>
                 : [track.channel, formatDuration(track.duration)].filter(Boolean).join(" · ")
-              : "YouTube URL を入力して取得してください"}
+              : t("nowPlaying.hint")}
           </div>
         </div>
       </div>
       {track && (
-        // key で再マウントさせ、トラック切り替え時の再生停止と状態リセットを
-        // アンマウントに任せる
         <PreviewPlayer
           key={track.id}
           track={track}

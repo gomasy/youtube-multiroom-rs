@@ -1,9 +1,9 @@
-//! Alexa リクエスト署名検証
+//! Alexa request signature verification.
 //!
-//! /alexa は Bearer 認証の対象外のため、Amazon が規定する署名検証で
-//! リクエストが本当に Alexa から送られたものであることを確認する。
-//! 手順: 証明書 URL の妥当性確認 → 証明書チェーン検証 (SAN・有効期限・
-//! 信頼チェーン) → リクエストボディの署名検証 → timestamp の鮮度確認。
+//! /alexa is exempt from Bearer auth; instead, Amazon's signature verification
+//! confirms that requests genuinely originate from Alexa.
+//! Steps: validate certificate URL → verify certificate chain (SAN, expiry,
+//! trust chain) → verify request body signature → check timestamp freshness.
 //! <https://developer.amazon.com/docs/custom-skills/host-a-custom-skill-as-a-web-service.html>
 
 use axum::http::HeaderMap;
@@ -21,15 +21,15 @@ use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
 use tokio::sync::Mutex;
 
-/// リクエスト timestamp の許容ずれ (Amazon の規定は最大 150 秒)
+/// Allowed timestamp skew (Amazon specifies max 150 seconds).
 const TIMESTAMP_TOLERANCE_SECS: i64 = 150;
-/// 証明書チェーン取得のタイムアウト
+/// Timeout for fetching the certificate chain.
 const CERT_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
-/// 証明書の SAN に含まれるべきホスト名
+/// Hostname required in the certificate's SAN.
 const ECHO_API_SAN: &str = "echo-api.amazon.com";
 
-/// 検証済み公開鍵のキャッシュ。証明書 URL は証明書の更新で変わるため
-/// URL ごとに証明書の有効期限まで保持する
+/// Cache of verified public keys. Certificate URLs change on cert renewal,
+/// so each URL is cached until the certificate's expiry.
 struct CachedKey {
     key: PKey<Public>,
     not_after: SystemTime,
@@ -40,10 +40,10 @@ fn cert_cache() -> &'static Mutex<HashMap<String, CachedKey>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// 署名ヘッダと証明書チェーンでリクエストボディの真正性を検証する
+/// Verify request body authenticity using signature headers and the certificate chain.
 pub async fn verify_request(headers: &HeaderMap, body: &[u8]) -> Result<(), String> {
     let cert_url = header_str(headers, "signaturecertchainurl")?;
-    // SHA-256 署名 (Signature-256) があれば優先し、なければ従来の SHA-1
+    // Prefer SHA-256 signature (Signature-256) if available; fall back to legacy SHA-1
     let (sig_b64, digest) = match header_str(headers, "signature-256") {
         Ok(s) => (s, MessageDigest::sha256()),
         Err(_) => (header_str(headers, "signature")?, MessageDigest::sha1()),
@@ -68,7 +68,7 @@ pub async fn verify_request(headers: &HeaderMap, body: &[u8]) -> Result<(), Stri
     }
 }
 
-/// request.timestamp が現在時刻から許容範囲内であることを確認する (リプレイ対策)
+/// Verify that request.timestamp is within tolerance of current time (replay protection).
 pub fn verify_timestamp(body: &Value) -> Result<(), String> {
     let ts = body["request"]["timestamp"]
         .as_str()
@@ -89,9 +89,9 @@ fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Result<&'a str, String>
         .ok_or_else(|| format!("missing {name} header"))
 }
 
-/// 証明書 URL が Amazon の規定 (https / s3.amazonaws.com / ポート 443 /
-/// パスが /echo.api/ 配下) を満たすことを確認する。
-/// url クレートのパースがドットセグメント (..) の正規化を行う
+/// Validate that the certificate URL meets Amazon's requirements (https,
+/// s3.amazonaws.com, port 443, path under /echo.api/).
+/// The url crate's parser normalizes dot segments (..).
 fn validate_cert_url(cert_url: &str) -> Result<(), String> {
     let u = url::Url::parse(cert_url).map_err(|e| format!("invalid cert URL: {e}"))?;
     if u.scheme() != "https" {
@@ -112,7 +112,7 @@ fn validate_cert_url(cert_url: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 証明書チェーンを取得・検証し、署名検証用の公開鍵を返す (キャッシュあり)
+/// Fetch and verify the certificate chain, returning the public key for signature verification (cached).
 async fn fetch_verified_key(cert_url: &str) -> Result<PKey<Public>, String> {
     {
         let cache = cert_cache().lock().await;
@@ -148,8 +148,8 @@ async fn fetch_verified_key(cert_url: &str) -> Result<PKey<Public>, String> {
     Ok(key)
 }
 
-/// PEM 証明書チェーンを検証し、(リーフ証明書の公開鍵, 有効期限) を返す。
-/// チェーンはシステムの CA ストアを起点に検証する (有効期限の確認も含む)
+/// Verify a PEM certificate chain and return (leaf public key, expiry).
+/// The chain is verified against the system CA store (including expiry check).
 fn verify_cert_chain(pem: &[u8]) -> Result<(PKey<Public>, SystemTime), String> {
     let mut certs =
         X509::stack_from_pem(pem).map_err(|e| format!("failed to parse cert chain: {e}"))?;
@@ -193,7 +193,7 @@ fn verify_cert_chain(pem: &[u8]) -> Result<(PKey<Public>, SystemTime), String> {
         ));
     }
 
-    // キャッシュの保持期限として有効期限を SystemTime に換算する
+    // Convert the certificate's expiry to SystemTime for cache retention
     let now = Asn1Time::days_from_now(0).map_err(|e| format!("time init failed: {e}"))?;
     let remaining = now
         .diff(leaf.not_after())
@@ -222,7 +222,7 @@ mod tests {
             "https://s3.amazonaws.com/echo.api/echo-api-cert.pem",
             "https://s3.amazonaws.com:443/echo.api/echo-api-cert.pem",
             "https://S3.AMAZONAWS.COM/echo.api/cert.pem",
-            // ドットセグメントは正規化されて /echo.api/ 配下に戻る
+            // Dot segments are normalized back under /echo.api/
             "https://s3.amazonaws.com/echo.api/../echo.api/echo-api-cert.pem",
         ] {
             assert!(validate_cert_url(url).is_ok(), "should accept {url}");

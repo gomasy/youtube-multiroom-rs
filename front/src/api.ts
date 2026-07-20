@@ -1,3 +1,4 @@
+import { t } from "./i18n";
 import type { Playlist, Track, TracksPage } from "./types";
 
 export const PER_PAGE = 10;
@@ -28,7 +29,7 @@ export async function authFetch(
   const res = await fetch(url, options);
   if (res.status === 401) {
     onUnauthorized?.();
-    throw new Error("認証が必要です");
+    throw new Error(t("api.unauthorized"));
   }
   return res;
 }
@@ -47,12 +48,10 @@ export async function fetchTracks(
     token ? { headers: { Authorization: `Bearer ${token}` } } : {},
     onUnauthorized,
   );
-  if (!res.ok) throw new Error("トラック一覧の取得に失敗しました");
+  if (!res.ok) throw new Error(t("api.fetchTracksFailed"));
   return res.json();
 }
 
-// トラックを並びの newIndex (0 始まり) へ移動する
-// (playlistId 指定時はプレイリスト内、未指定はライブラリ全体)
 export async function reorderTrack(
   trackId: string,
   newIndex: number,
@@ -71,10 +70,9 @@ export async function reorderTrack(
     },
     onUnauthorized,
   );
-  if (!res.ok) throw new Error("並べ替えに失敗しました");
+  if (!res.ok) throw new Error(t("api.reorderFailed"));
 }
 
-// プレビュー再生用に audio 要素へ渡せるストリーム URL (署名付き) を取得する
 export async function getStreamUrl(
   trackId: string,
   onUnauthorized?: () => void,
@@ -84,7 +82,7 @@ export async function getStreamUrl(
     {},
     onUnauthorized,
   );
-  if (!res.ok) throw new Error("再生 URL の取得に失敗しました");
+  if (!res.ok) throw new Error(t("api.streamUrlFailed"));
   const data = await res.json();
   return data.url;
 }
@@ -98,7 +96,7 @@ export async function createPlaylist(
     { method: "POST", body: JSON.stringify({ name }) },
     onUnauthorized,
   );
-  if (!res.ok) throw new Error("プレイリストの作成に失敗しました");
+  if (!res.ok) throw new Error(t("api.createPlaylistFailed"));
   const data = await res.json();
   return data.playlist;
 }
@@ -112,10 +110,9 @@ export async function deletePlaylist(
     { method: "DELETE" },
     onUnauthorized,
   );
-  if (!res.ok) throw new Error("プレイリストの削除に失敗しました");
+  if (!res.ok) throw new Error(t("api.deletePlaylistFailed"));
 }
 
-// トラックをプレイリスト末尾へ追加する (収録済みなら末尾へ移動)
 export async function addToPlaylist(
   playlistId: string,
   trackId: string,
@@ -126,7 +123,7 @@ export async function addToPlaylist(
     { method: "POST", body: JSON.stringify({ track_id: trackId }) },
     onUnauthorized,
   );
-  if (!res.ok) throw new Error("プレイリストへの追加に失敗しました");
+  if (!res.ok) throw new Error(t("api.addToPlaylistFailed"));
   return res.json();
 }
 
@@ -140,10 +137,9 @@ export async function removeFromPlaylist(
     { method: "DELETE" },
     onUnauthorized,
   );
-  if (!res.ok) throw new Error("プレイリストからの削除に失敗しました");
+  if (!res.ok) throw new Error(t("api.removeFromPlaylistFailed"));
 }
 
-// yt-dlp の ytsearch で YouTube を検索し、Track 互換の結果一覧を返す
 export async function searchYouTube(
   query: string,
   onUnauthorized?: () => void,
@@ -153,12 +149,11 @@ export async function searchYouTube(
     {},
     onUnauthorized,
   );
-  if (!res.ok) throw new Error("検索に失敗しました");
+  if (!res.ok) throw new Error(t("api.searchFailed"));
   const data = await res.json();
   return data.results ?? [];
 }
 
-// トラックを選択デバイスで即時再生するようキューする
 export async function playTracks(
   trackId: string,
   deviceIds: string[],
@@ -172,11 +167,10 @@ export async function playTracks(
     },
     onUnauthorized,
   );
-  if (!res.ok) throw new Error("再生のキューに失敗しました");
+  if (!res.ok) throw new Error(t("api.playFailed"));
   return res.json();
 }
 
-// トラックを選択デバイスの「次に再生」キュー末尾へ追加する
 export async function queueNext(
   trackId: string,
   deviceIds: string[],
@@ -190,11 +184,10 @@ export async function queueNext(
     },
     onUnauthorized,
   );
-  if (!res.ok) throw new Error("キューへの追加に失敗しました");
+  if (!res.ok) throw new Error(t("api.queueFailed"));
   return res.json();
 }
 
-// キュー項目を一意なエントリ値の指定で 1 件削除する
 export async function removeQueueItem(
   deviceId: string,
   entry: string,
@@ -205,7 +198,7 @@ export async function removeQueueItem(
     { method: "DELETE" },
     onUnauthorized,
   );
-  if (!res.ok) throw new Error("キューからの削除に失敗しました");
+  if (!res.ok) throw new Error(t("api.removeQueueFailed"));
 }
 
 export async function clearQueue(
@@ -217,12 +210,9 @@ export async function clearQueue(
     { method: "DELETE" },
     onUnauthorized,
   );
-  if (!res.ok) throw new Error("キューのクリアに失敗しました");
+  if (!res.ok) throw new Error(t("api.clearQueueFailed"));
 }
 
-// 認証確認を兼ねてトラック一覧の先頭ページを取得する。
-// token を渡すと保存済みトークンの代わりにそれで検証する(モーダルでの入力確認用)。
-// authorized=false は 401(要認証)。ネットワークエラー等は認証済み扱いで進める。
 export async function checkAuth(
   token?: string,
 ): Promise<{ authorized: boolean; data: TracksPage | null }> {

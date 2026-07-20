@@ -52,7 +52,7 @@ export function useWebSocket(active: boolean, callbacks: WSCallbacks) {
         if (data.version) cbRef.current.onVersion(data.version);
         cbRef.current.onInit(data.devices || {});
         if (data.playback_mode) cbRef.current.onPlaybackMode(data.playback_mode);
-        // リロード・再接続時に進行中ダウンロードの表示を同期し直す
+        // Re-sync in-progress download display on reload/reconnect
         cbRef.current.onDownloadsUpdate(data.downloads || []);
         cbRef.current.onPlaylistsUpdate(data.playlists || []);
         cbRef.current.onActivePlaylist(data.active_playlist ?? null);

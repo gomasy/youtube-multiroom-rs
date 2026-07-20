@@ -12,17 +12,17 @@ export interface Device {
   name: string;
   status: "idle" | "playing" | "paused" | "stopped" | "queued" | "error";
   current_track?: Track;
-  /** 最後に確認できた再生位置 (ミリ秒) */
+  /** Last known playback position (milliseconds) */
   position_ms?: number;
-  /** デバイス状態の最終更新時刻 (UNIX 秒) */
+  /** Last device state update time (UNIX seconds) */
   last_update?: number;
-  /** 「次に再生」キュー (先頭が次に再生される) */
+  /** Up Next queue (front item plays next) */
   queue?: QueueItem[];
 }
 
-/** 「次に再生」キューの 1 項目 */
+/** A single item in the Up Next queue */
 export interface QueueItem extends Track {
-  /** キュー内で一意なエントリ。削除時の指定に使う */
+  /** Unique entry identifier within the queue. Used for deletion. */
   entry: string;
 }
 
@@ -33,27 +33,27 @@ export interface TracksPage {
   per_page: number;
 }
 
-/** 名前付きプレイリスト (収録曲数付きのワイヤ形式) */
+/** Named playlist (wire format with track count) */
 export interface Playlist {
   id: string;
   name: string;
-  /** 作成時刻 (UNIX 秒)。一覧はこの昇順で並ぶ */
+  /** Creation time (UNIX seconds). List is sorted ascending by this. */
   created_at?: number;
   count: number;
 }
 
 export type PlaybackMode = "loop" | "shuffle" | "off";
 
-/** 進行中ダウンロードの進捗 (サーバー側で管理され、全クライアントへ配られる) */
+/** In-progress download progress (managed server-side, broadcast to all clients) */
 export interface DownloadProgress {
   id: string;
-  /** メタデータ取得前は動画 ID が入る */
+  /** Contains video ID before metadata is fetched */
   title: string;
   status: "metadata" | "downloading" | "processing" | "error";
-  /** ダウンロード済み割合 (0–100) */
+  /** Downloaded percentage (0–100) */
   percent: number;
   error?: string;
-  /** 開始時刻 (UNIX 秒) */
+  /** Start time (UNIX seconds) */
   started_at: number;
 }
 
@@ -64,7 +64,7 @@ export interface WSInitMessage {
   playback_mode?: PlaybackMode;
   downloads?: DownloadProgress[];
   playlists?: Playlist[];
-  /** ループ/シャッフルの選曲範囲プレイリスト ID (null はライブラリ全体) */
+  /** Loop/shuffle scope playlist ID (null means full library) */
   active_playlist?: string | null;
 }
 
@@ -104,11 +104,11 @@ export interface WSPlaylistsUpdateMessage {
 
 export interface WSActivePlaylistUpdateMessage {
   type: "active_playlist_update";
-  /** null はライブラリ全体 */
+  /** null means full library */
   playlist: string | null;
 }
 
-/** プレイリスト URL の一括インポートが始まったことへの応答 (取り込みは裏で進む) */
+/** Response indicating a playlist URL batch import has started (import runs in background) */
 export interface WSPlaylistImportResultMessage {
   type: "playlist_import_result";
   name: string;

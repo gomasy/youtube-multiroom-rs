@@ -19,7 +19,7 @@ use tokio_util::io::ReaderStream;
 type AppResult<T> = Result<T, AppError>;
 
 // ════════════════════════════════════════
-// エラー型
+// Error type
 // ════════════════════════════════════════
 
 pub struct AppError {
@@ -56,13 +56,13 @@ impl IntoResponse for AppError {
 }
 
 // ════════════════════════════════════════
-// 音声 API
+// Audio API
 // ════════════════════════════════════════
 
 /// GET /api/audio/:id/stream
 ///
-/// ファイルはメモリに読み込まず、Range に応じて seek + ストリーミングで返す
-/// (Echo は再生中に Range リクエストを繰り返すため)
+/// Streams the file with Range support (no full in-memory read). Echo devices
+/// issue repeated Range requests during playback.
 pub async fn stream_audio(
     State(state): State<Arc<AppState>>,
     Path(audio_id): Path<String>,
@@ -116,11 +116,11 @@ pub async fn stream_audio(
 
 /// GET /api/audio/:id/live
 ///
-/// ライブ配信はファイルとして保存できないため、yt-dlp で CDN の HLS URL を
-/// 都度解決し、ffmpeg で音声 (AAC) のみを抜き出して ADTS ストリームとして
-/// 中継する。Echo は映像入りの muxed HLS を再生できないため、リダイレクト
-/// ではなくサーバー側で音声を分離する必要がある。音声はコーデックコピー
-/// (再エンコードなし) のため CPU 負荷は小さい
+/// Live streams cannot be saved as files, so we resolve the CDN HLS URL via
+/// yt-dlp on each request, then relay audio-only (AAC) through ffmpeg as an
+/// ADTS stream. Echo devices cannot play muxed HLS with video, so server-side
+/// audio extraction is required. Audio is codec-copied (no re-encoding) for
+/// minimal CPU overhead.
 pub async fn live_audio(
     State(state): State<Arc<AppState>>,
     Path(audio_id): Path<String>,
@@ -132,11 +132,10 @@ pub async fn live_audio(
     }
 
     let url = format!("https://www.youtube.com/watch?v={audio_id}");
-    // ffmpeg が扱いやすい HLS を最優先する。ライブ配信は音声のみの
-    // フォーマットが提供されないことが多く、その場合は最低ビットレートの
-    // muxed HLS (映像+音声) にフォールバックする。
-    // acodec も一緒に取得し、AAC 以外を掴んだ場合の再エンコード判定に使う。
-    // Echo はレスポンスを長く待てないため制限時間は短めに取る
+    // Prefer HLS which ffmpeg handles well. Live streams often lack audio-only
+    // formats, so fall back to the lowest-bitrate muxed HLS (video+audio).
+    // Also fetch acodec to decide whether re-encoding is needed.
+    // Use a short timeout since Echo devices can't wait long.
     let stdout = run_yt_dlp(
         &[
             "--print",
@@ -153,7 +152,7 @@ pub async fn live_audio(
     .await
     .map_err(|e| AppError::internal(format!("Failed to get live stream URL: {e}")))?;
 
-    // 出力は URL (DASH では複数行) → acodec の順。先頭の URL のみ使う
+    // Output is URL (may be multiple lines for DASH) then acodec. Use only the first URL.
     let stdout_str = String::from_utf8_lossy(&stdout);
     let lines: Vec<&str> = stdout_str
         .lines()
@@ -165,9 +164,9 @@ pub async fn live_audio(
         _ => return Err(AppError::internal("yt-dlp returned empty stream URL")),
     };
 
-    // AAC ならコンテナ載せ替えのみで済むが、それ以外 (Opus など) は ADTS に
-    // 格納できないため AAC へ再エンコードする。muxed HLS では acodec が
-    // "unknown" のこともあり、その場合も安全側 (再エンコード) に倒す
+    // AAC can be remuxed as-is; other codecs (Opus, etc.) need transcoding
+    // since ADTS only supports AAC. "unknown" acodec (common in muxed HLS)
+    // also triggers transcoding to be safe.
     let codec_args: &[&str] = if acodec.starts_with("mp4a") || acodec.starts_with("aac") {
         &["-c:a", "copy"]
     } else {
@@ -191,9 +190,9 @@ pub async fn live_audio(
         .ok_or_else(|| AppError::internal("Failed to capture ffmpeg stdout"))?;
     let stderr = child.stderr.take();
 
-    // Echo が切断するとレスポンスボディと共に stdout パイプが閉じ、
-    // ffmpeg は EPIPE で自然終了する。ゾンビ化しないようここで回収し、
-    // エラー出力があれば原因調査のためログに残す
+    // When Echo disconnects, the response body and stdout pipe close, causing
+    // ffmpeg to exit naturally via EPIPE. Reap the child to prevent zombies
+    // and log any stderr for debugging.
     tokio::spawn(async move {
         let mut err_buf = String::new();
         if let Some(mut stderr) = stderr {
@@ -222,9 +221,9 @@ pub async fn live_audio(
 
 /// GET /api/audio/:id/url
 ///
-/// ブラウザのプレビュー再生用に、audio 要素へそのまま渡せるストリーム URL
-/// (認証有効時は署名クエリ付きの相対パス) を返す。このエンドポイント自体は
-/// Bearer 認証の対象なので、署名 URL を第三者が発行することはできない
+/// Returns a stream URL (signed relative path when auth is enabled) for
+/// browser preview playback via the audio element. This endpoint itself
+/// requires Bearer auth, so third parties cannot mint signed URLs.
 pub async fn audio_url(
     State(state): State<Arc<AppState>>,
     Path(audio_id): Path<String>,
@@ -241,7 +240,7 @@ fn parse_byte_range(header: &str, total: usize) -> Option<(usize, usize)> {
     let range = header.strip_prefix("bytes=")?;
     let (start_str, end_str) = range.split_once('-')?;
     let (start, end) = if start_str.is_empty() {
-        // サフィックス範囲 (bytes=-N): 末尾 N バイト
+        // Suffix range (bytes=-N): last N bytes
         let suffix_len: usize = end_str.parse().ok()?;
         if suffix_len == 0 {
             return None;
@@ -271,9 +270,9 @@ pub struct SearchQuery {
 
 /// GET /api/search?q=...&limit=8
 ///
-/// yt-dlp の ytsearch で YouTube を検索し、/api/tracks と同じ形の軽量な
-/// メタデータ一覧を返す。--flat-playlist で各動画ページの解決を省き、
-/// 応答を数秒に収める
+/// Searches YouTube via yt-dlp ytsearch and returns lightweight metadata in
+/// the same shape as /api/tracks. Uses --flat-playlist to skip resolving
+/// individual video pages, keeping response time to a few seconds.
 pub async fn search_youtube(Query(query): Query<SearchQuery>) -> AppResult<Json<Value>> {
     let q = query.q.trim();
     if q.is_empty() {
@@ -289,7 +288,7 @@ pub async fn search_youtube(Query(query): Query<SearchQuery>) -> AppResult<Json<
     .await
     .map_err(|e| AppError::internal(format!("Search failed: {e}")))?;
 
-    // 出力は 1 行 1 動画の JSON
+    // Output is one JSON object per video per line
     let results: Vec<AudioTrack> = String::from_utf8_lossy(&stdout)
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -299,15 +298,15 @@ pub async fn search_youtube(Query(query): Query<SearchQuery>) -> AppResult<Json<
     Ok(Json(json!({ "results": results })))
 }
 
-/// yt-dlp の flat-playlist エントリを検索結果用の AudioTrack に変換する。
-/// AudioTrack を経由することで /api/tracks とのワイヤ形式の一致を
-/// コンパイラに保証させる (file_path は serde(skip) なので露出しない)
+/// Convert a yt-dlp flat-playlist entry into an AudioTrack for search results.
+/// Using AudioTrack ensures wire-format compatibility with /api/tracks
+/// (file_path is serde(skip) so it's never exposed).
 fn search_entry(v: &Value) -> Option<AudioTrack> {
     let id = v["id"].as_str()?;
     Some(AudioTrack {
         id: id.to_string(),
         title: v["title"].as_str().unwrap_or(id).to_string(),
-        // flat エントリのサムネイルは有無・形式が揺れるため既知の URL 形式で組み立てる
+        // Flat entries have inconsistent thumbnail formats; use a known URL pattern
         thumbnail: format!("https://i.ytimg.com/vi/{id}/mqdefault.jpg"),
         duration: v["duration"].as_f64().unwrap_or(0.0) as u64,
         channel: v["channel"]
@@ -325,7 +324,7 @@ fn search_entry(v: &Value) -> Option<AudioTrack> {
 pub struct TracksQuery {
     page: Option<usize>,
     per_page: Option<usize>,
-    /// 指定するとそのプレイリストの収録順で返す (未指定はライブラリ全体)
+    /// When specified, return tracks in this playlist's order (omit for full library).
     playlist: Option<String>,
 }
 
@@ -334,7 +333,7 @@ pub async fn list_tracks(
     State(state): State<Arc<AppState>>,
     Query(query): Query<TracksQuery>,
 ) -> AppResult<Json<Value>> {
-    // Redis 初期化などでトラック情報が消えていたら audio_cache から復元
+    // Restore track metadata from audio_cache if Redis was cleared
     state.restore_tracks_if_missing().await;
 
     if let Some(pid) = &query.playlist {
@@ -355,7 +354,7 @@ pub async fn list_tracks(
 
 /// POST /api/tracks/reorder
 ///
-/// playlist を指定するとプレイリスト内の並び、なければライブラリ全体を動かす
+/// Reorders a track within a playlist (if specified) or the full library.
 pub async fn reorder_track(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ReorderRequest>,
@@ -369,7 +368,7 @@ pub async fn reorder_track(
         .await
     {
         ReorderOutcome::Moved => {}
-        // プレイリスト未収録のトラックや、競合する削除で並びから消えた場合
+        // Track not in the list (not added to playlist, or removed concurrently)
         ReorderOutcome::NotInList => return Err(AppError::not_found("Track not in the list")),
         ReorderOutcome::Failed => return Err(AppError::internal("Failed to save track order")),
     }
@@ -388,13 +387,13 @@ pub async fn delete_track(
         .ok_or_else(|| AppError::not_found("Track not found"))?;
     state.broadcast_tracks().await;
     state.broadcast_devices().await;
-    // 収録していたプレイリストの曲数表示を更新させる
+    // Update playlist counts for any playlists that contained this track
     state.broadcast_playlists().await;
     Ok(Json(json!({ "status": "ok" })))
 }
 
 // ════════════════════════════════════════
-// プレイリスト API
+// Playlist API
 // ════════════════════════════════════════
 
 async fn playlist_or_404(state: &AppState, playlist_id: &str) -> AppResult<()> {
@@ -425,7 +424,7 @@ pub async fn create_playlist(
         .await
         .ok_or_else(|| AppError::bad_request("Invalid playlist name"))?;
     state.broadcast_playlists().await;
-    // クライアントの Playlist 型 (count 必須) と同じ形で返す
+    // Return in the same shape as the client's Playlist type (count required)
     let mut playlist = serde_json::to_value(&playlist)
         .map_err(|e| AppError::internal(format!("Failed to serialize playlist: {e}")))?;
     playlist["count"] = json!(0);
@@ -441,7 +440,7 @@ pub async fn delete_playlist(
         return Err(AppError::not_found("Playlist not found"));
     }
     state.broadcast_playlists().await;
-    // 選曲範囲に指定されていた場合はライブラリ全体へ戻ったことを知らせる
+    // If this playlist was the active playback scope, notify that it reverted to full library
     state.broadcast_active_playlist().await;
     Ok(Json(json!({ "status": "ok" })))
 }
@@ -463,11 +462,11 @@ pub async fn add_playlist_track(
         return Err(AppError::internal("Failed to add track to playlist"));
     }
     state.broadcast_playlists().await;
-    // プレイリストを表示中のクライアントに収録内容を再取得させる
+    // Notify clients viewing this playlist to refresh their track list
     state.broadcast_tracks().await;
     Ok(Json(json!({
         "status": "ok",
-        "message": format!("「{}」をプレイリストに追加しました", track.title),
+        "message": state.lang.api_added_to_playlist(&track.title),
     })))
 }
 
@@ -486,7 +485,7 @@ pub async fn remove_playlist_track(
 }
 
 // ════════════════════════════════════════
-// デバイス & 再生制御 API
+// Device & Playback Control API
 // ════════════════════════════════════════
 
 /// GET /api/devices
@@ -523,7 +522,7 @@ async fn track_or_404(state: &AppState, track_id: &str) -> AppResult<AudioTrack>
         .ok_or_else(|| AppError::not_found("Track not found"))
 }
 
-/// トラックを各デバイスの pending キューに積み、デバイス状態を通知する
+/// Queue a track for playback on each device's pending slot and broadcast state.
 async fn queue_on_devices(
     state: &AppState,
     track: AudioTrack,
@@ -538,14 +537,14 @@ async fn queue_on_devices(
     Ok(Json(json!({
         "status": "queued",
         "devices": device_ids,
-        "message": "再生をキューしました。各 Echo で「アレクサ、YouTube プレーヤーを開いて」と言ってください",
+        "message": state.lang.api_play_queued(),
     })))
 }
 
 /// POST /api/queue
 ///
-/// トラックを選択デバイスの「次に再生」キュー末尾に追加する。
-/// 現在の曲が終わるとき (PlaybackNearlyFinished) に先頭から消費される
+/// Append a track to the "next up" queue of the selected devices. The front
+/// of the queue is consumed on PlaybackNearlyFinished.
 pub async fn queue_next(
     State(state): State<Arc<AppState>>,
     Json(req): Json<PlayRequest>,
@@ -553,7 +552,7 @@ pub async fn queue_next(
     let track = track_or_404(&state, &req.track_id).await?;
     let mut queued = Vec::new();
     for did in &req.device_ids {
-        // 未登録デバイスに積むと参照されないキーが残るため登録済みに限る
+        // Only queue on registered devices to avoid orphaned Redis keys
         if state.get_device(did).await.is_none() {
             continue;
         }
@@ -569,20 +568,21 @@ pub async fn queue_next(
     Ok(Json(json!({
         "status": "ok",
         "devices": queued,
-        "message": format!("「{}」を次に再生に追加しました", track.title),
+        "message": state.lang.api_queued_next(&track.title),
     })))
 }
 
 /// DELETE /api/devices/:id/queue/:entry
 ///
-/// エントリ値の一致でキュー項目を 1 件削除する。エントリは一意なので、
-/// デバイス側の消費と競合しても別の曲を消すことはない
+/// Remove a single queue item by entry value match. Entries are unique, so
+/// even if a device consumes it concurrently, a different track won't be
+/// accidentally removed.
 pub async fn remove_queue_item(
     State(state): State<Arc<AppState>>,
     Path((device_id, entry)): Path<(String, String)>,
 ) -> AppResult<Json<Value>> {
     let removed = state.remove_queue_entry(&device_id, &entry).await;
-    // 見つからない場合もクライアントの表示が古い可能性があるため最新状態を配る
+    // Always broadcast latest state even on miss (client's view may be stale)
     state.broadcast_devices().await;
     if !removed {
         return Err(AppError::not_found("Queue item not found"));
@@ -602,9 +602,9 @@ pub async fn clear_queue(
 
 /// POST /api/devices/:id/seek
 ///
-/// デバイスの現在トラックを指定位置から再生するコマンドをキューする。
-/// Alexa スキルはサーバーからディレクティブをプッシュできないため、
-/// Echo がスキルに接続したタイミング (音声起動または曲の切り替わり) で反映される
+/// Queue a seek command for a device's current track. Since the Alexa skill
+/// cannot push directives to devices, the seek is applied when the Echo next
+/// connects to the skill (via voice command or track transition).
 pub async fn seek_device(
     State(state): State<Arc<AppState>>,
     Path(device_id): Path<String>,
@@ -620,13 +620,13 @@ pub async fn seek_device(
     if track.is_live {
         return Err(AppError::bad_request("Cannot seek a live stream"));
     }
-    // 長さ不明 (メタデータ再取得失敗など) だと丸め先が定まらない。
-    // 黙って先頭へ丸めるのではなく拒否する
+    // Unknown duration means we can't clamp properly; reject rather than
+    // silently seeking to the start
     if track.duration == 0 {
         return Err(AppError::bad_request("Track duration is unknown"));
     }
 
-    // 終端ちょうどにキューすると再生が即終了するため 1 秒手前までに丸める
+    // Clamp to 1 second before the end to avoid immediate playback termination
     let max_ms = track.duration.saturating_mul(1000).saturating_sub(1000);
     let position_ms = req.position_ms.min(max_ms);
     state.queue_play(&device_id, track, position_ms).await;
@@ -669,9 +669,9 @@ pub async fn delete_device(
 
 /// POST /alexa
 ///
-/// Bearer 認証の対象外のため、Amazon の署名検証でリクエストが本当に
-/// Alexa から送られたものであることを確認する。検証失敗時は Amazon の
-/// 規定どおり 400 を返す
+/// Not behind Bearer auth — instead, Amazon's signature verification confirms
+/// the request genuinely originates from Alexa. Returns 400 on verification
+/// failure per Amazon's specification.
 pub async fn alexa_webhook(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -714,13 +714,13 @@ pub async fn ws_upgrade(State(state): State<Arc<AppState>>, ws: WebSocketUpgrade
 async fn ws_handler(mut socket: WebSocket, state: Arc<AppState>) {
     tracing::info!("WebSocket client connected");
 
-    // broadcast チャンネルはスナップショット作成前に購読する。後から購読すると
-    // 作成中に流れた更新 (ダウンロード完了による一覧からの除去など) を
-    // 取りこぼし、init の内容が古いまま二度と補正されない
+    // Subscribe before building the snapshot to avoid missing updates that
+    // arrive during snapshot assembly (e.g., download completion removing an
+    // entry), which would leave init stale with no subsequent correction.
     let mut rx = state.tx.subscribe();
 
-    // 初期状態を送信 (トラック一覧は REST でページ取得させる)。
-    // 進行中ダウンロードを含めることで、リロード後もすぐ進捗表示が復元される
+    // Send initial state (track list is fetched via REST pagination).
+    // Include in-progress downloads so the progress display is restored after reload.
     let init_msg = json!({
         "type": "init",
         "version": crate::VERSION,
@@ -738,30 +738,29 @@ async fn ws_handler(mut socket: WebSocket, state: Arc<AppState>) {
         return;
     }
 
-    // クライアント固有メッセージ用チャンネル (extract 結果など)
+    // Per-client channel for individual responses (e.g., extract results)
     let (client_tx, mut client_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
     loop {
         tokio::select! {
-            // サーバー → クライアント (broadcast)
+            // Server → client (broadcast)
             Ok(msg) = rx.recv() => {
                 if socket.send(Message::Text(msg.into())).await.is_err() {
                     break;
                 }
             }
 
-            // サーバー → クライアント (個別応答)
+            // Server → client (individual response)
             Some(msg) = client_rx.recv() => {
                 if socket.send(Message::Text(msg.into())).await.is_err() {
                     break;
                 }
             }
 
-            // クライアント → サーバー
+            // Client → server
             recv = socket.recv() => {
-                // Close フレームなしの切断 (None / Err) でも確実にループを
-                // 抜ける。パターンマッチで受けると不一致時にこのブランチが
-                // 無効化されるだけで、タスクが残留してしまう
+                // Handle both clean disconnects (None) and errors to ensure we
+                // always break out of the loop and don't leak the task
                 match recv {
                     Some(Ok(Message::Text(text))) => {
                         if let Ok(data) = serde_json::from_str::<Value>(&text) {
@@ -780,8 +779,8 @@ async fn ws_handler(mut socket: WebSocket, state: Arc<AppState>) {
     tracing::info!("WebSocket client disconnected");
 }
 
-/// クライアントからの 1 メッセージを処理する。
-/// 応答はすべて client_tx に積み、ws_handler の select ループから送信させる
+/// Process a single client WebSocket message.
+/// Responses are sent via client_tx, delivered by ws_handler's select loop.
 async fn handle_ws_message(
     state: &Arc<AppState>,
     client_tx: &tokio::sync::mpsc::UnboundedSender<String>,
@@ -800,8 +799,8 @@ async fn handle_ws_message(
                 let _ = client_tx.send(msg.to_string());
                 return;
             };
-            // ダウンロードは長時間かかるため別タスクで行い、結果だけ返す。
-            // プレイリスト URL は展開して一括インポートを開始する
+            // Download can take a long time; run in a separate task and return result.
+            // Playlist URLs are expanded and trigger a batch import.
             let state = state.clone();
             let tx = client_tx.clone();
             let url = url.to_string();
@@ -838,7 +837,7 @@ async fn handle_ws_message(
             }
         }
         "set_active_playlist" => {
-            // playlist は null (ライブラリ全体) も正当な値
+            // null is a valid value (meaning "full library")
             let playlist = data["playlist"].as_str();
             if state.set_active_playlist(playlist).await {
                 state.broadcast_active_playlist().await;
@@ -872,13 +871,13 @@ mod tests {
             entry["thumbnail"],
             "https://i.ytimg.com/vi/dQw4w9WgXcQ/mqdefault.jpg"
         );
-        // 内部用の file_path はワイヤ形式に露出しない
+        // Internal file_path must not appear in wire format
         assert!(entry.get("file_path").is_none());
     }
 
     #[test]
     fn search_entry_fills_missing_fields() {
-        // duration 無し (ライブなど)・channel の代わりに uploader
+        // No duration (e.g., live); uploader instead of channel
         let v = json!({
             "id": "dQw4w9WgXcQ",
             "uploader": "Up",
@@ -890,17 +889,17 @@ mod tests {
         assert_eq!(entry.channel, "Up");
         assert!(entry.is_live);
 
-        // id が無いエントリは捨てる
+        // Entries without id are discarded
         assert!(search_entry(&json!({ "title": "x" })).is_none());
     }
 
     #[test]
     fn parses_byte_ranges() {
-        // 通常範囲・末尾丸め・開始のみ
+        // Normal range, clamped end, start-only
         assert_eq!(parse_byte_range("bytes=0-99", 1000), Some((0, 99)));
         assert_eq!(parse_byte_range("bytes=900-1999", 1000), Some((900, 999)));
         assert_eq!(parse_byte_range("bytes=500-", 1000), Some((500, 999)));
-        // サフィックス範囲は末尾 N バイト
+        // Suffix range: last N bytes
         assert_eq!(parse_byte_range("bytes=-100", 1000), Some((900, 999)));
         assert_eq!(parse_byte_range("bytes=-2000", 1000), Some((0, 999)));
     }
@@ -912,7 +911,7 @@ mod tests {
         assert_eq!(parse_byte_range("bytes=5-2", 1000), None);
         assert_eq!(parse_byte_range("bytes=0-99", 0), None);
         assert_eq!(parse_byte_range("items=0-99", 1000), None);
-        // 複数範囲は未対応 (呼び出し側が 200 全体にフォールバック)
+        // Multi-range not supported (caller falls back to 200 full)
         assert_eq!(parse_byte_range("bytes=0-1,5-6", 1000), None);
     }
 }

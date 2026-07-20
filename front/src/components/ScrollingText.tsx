@@ -1,11 +1,11 @@
 import { useLayoutEffect, useRef, useState } from "react";
 
-// はみ出し分をスクロールする速度 (px/s)
+// Scroll speed for overflowing text (px/s)
 const SCROLL_SPEED = 30;
-// タイムライン中でスクロールに使う割合 (残りは両端での停止時間)
+// Fraction of the animation timeline used for scrolling (rest is pause at each end)
 const SCROLL_RATIO = 0.66;
-// 右端フェードマスクの幅 (styles.css の .marquee.overflowing と合わせる)。
-// この分だけ余計にスクロールし、終端で末尾の文字がフェードにかからないようにする
+// Width of the right-edge fade mask (must match .marquee.overflowing in styles.css).
+// Extra scroll distance ensures trailing characters don't hide under the fade.
 const FADE_WIDTH = 16;
 
 interface Props {
@@ -14,8 +14,8 @@ interface Props {
 }
 
 /**
- * コンテナ幅に収まらないテキストを Spotify 風に往復スクロールさせる。
- * 幅は常にコンテナ側で決まり、テキスト長でレイアウトが広がることはない。
+ * Spotify-style back-and-forth scrolling for text that overflows its container.
+ * Width is always determined by the container; text length never expands the layout.
  */
 export function ScrollingText({ text, className }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);

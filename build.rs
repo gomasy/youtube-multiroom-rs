@@ -1,8 +1,8 @@
 use std::process::Command;
 
 fn main() {
-    // Docker ビルドなど .git が無い環境では、ホスト側で求めた値を
-    // ARG→ENV 経由で受け取る。環境変数が無ければ git にフォールバックする。
+    // In environments without .git (e.g. Docker builds), values are passed via
+    // ARG→ENV from the host. Fall back to git if the env var is unset.
     let hash = env_or_git("GIT_HASH", &["rev-parse", "--short", "HEAD"]);
     println!("cargo:rustc-env=GIT_HASH={hash}");
 
