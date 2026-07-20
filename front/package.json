@@ -4,8 +4,9 @@
   "source": "src/index.html",
   "scripts": {
     "clean": "rm -rf dist .parcel-cache",
-    "dev": "concurrently -n rust,parcel -c cyan,yellow \"cd .. && cargo run\" \"npm run clean && parcel watch\"",
-    "build": "npm run clean && parcel build"
+    "gen-i18n": "node scripts/gen-i18n.mjs",
+    "dev": "concurrently -n rust,parcel -c cyan,yellow \"cd .. && cargo run\" \"npm run clean && npm run gen-i18n && parcel watch\"",
+    "build": "npm run clean && npm run gen-i18n && parcel build"
   },
   "dependencies": {
     "react": "^19.2.7",

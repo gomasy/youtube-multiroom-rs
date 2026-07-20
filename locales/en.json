@@ -1,0 +1,13 @@
+{
+  "alexa_not_understood": "Sorry, I didn't understand that.",
+  "alexa_connected": "Connected to YouTube MultiRoom. You can control playback from the web interface.",
+  "alexa_no_queued_track": "No track is queued. Please select a track from the web interface.",
+  "alexa_no_track": "There is no track to play.",
+  "alexa_no_next": "There is no next track.",
+  "alexa_no_prev": "There is no previous track.",
+  "alexa_help": "Paste a YouTube URL in the web interface and press the play button. Then say \"Alexa, open YouTube Player\" on this device.",
+  "alexa_use_web": "Please use the web interface to control playback.",
+  "api_play_queued": "Playback queued. Say \"Alexa, open YouTube Player\" on each Echo device.",
+  "api_added_to_playlist": "Added \"{title}\" to playlist",
+  "api_queued_next": "Added \"{title}\" to Up Next"
+}

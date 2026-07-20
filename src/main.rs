@@ -41,6 +41,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "LISTEN_ADDR is not a valid socket address: {listen_addr}"
         ))
     });
+
+    i18n::init().unwrap_or_else(|e| die(e));
     let lang = i18n::Lang::from_env();
 
     let state = AppState::new(api_token, &redis_url, lang)
