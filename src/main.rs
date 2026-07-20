@@ -44,6 +44,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     i18n::init().unwrap_or_else(|e| die(e));
     let lang = i18n::Lang::from_env();
+    let lang_code = lang.code();
+    let lang_src = match std::env::var("APP_LANG")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+    {
+        Some(s) => format!("APP_LANG={s}"),
+        None => "default".to_string(),
+    };
 
     let state = AppState::new(api_token, &redis_url, lang)
         .await
@@ -105,6 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Redis    = {}", redact_url(&redis_url));
     println!("  Web UI   → http://localhost:{}", addr.port());
     println!("  Alexa    → POST /alexa");
+    println!("  Lang     → {} ({})", lang_code, lang_src);
     if auth_enabled {
         println!("  Auth     → API_TOKEN is set");
     } else {

@@ -121,6 +121,11 @@ impl Lang {
         }
     }
 
+    /// The language code this `Lang` represents, e.g. `"en"` or `"ja"`.
+    pub fn code(&self) -> &'static str {
+        self.code
+    }
+
     /// Resolve the language from the APP_LANG environment variable.
     /// Falls back to the default catalog language when APP_LANG is unset or
     /// does not match any loaded catalog, warning in those cases.
