@@ -60,7 +60,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
     });
 
-    let fallback = rust_i18n::locale().to_string();
+    let fallback = _RUST_I18N_FALLBACK_LOCALE
+        .and_then(|l| l.first())
+        .expect("i18n fallback locale must be set")
+        .to_string();
     let (locale, locale_src) = match std::env::var("APP_LANG")
         .ok()
         .filter(|s| !s.trim().is_empty())
@@ -209,6 +212,14 @@ mod tests {
     fn resolve_empty_returns_none() {
         assert_eq!(resolve_locale(""), None);
         assert_eq!(resolve_locale("   "), None);
+    }
+
+    #[test]
+    fn fallback_locale_is_ja() {
+        let fallback = super::_RUST_I18N_FALLBACK_LOCALE
+            .and_then(|l| l.first())
+            .copied();
+        assert_eq!(fallback, Some("ja"));
     }
 
     #[test]
