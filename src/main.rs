@@ -5,6 +5,8 @@ mod handlers;
 mod i18n;
 mod state;
 
+rust_i18n::i18n!("locales", fallback = "ja");
+
 pub const VERSION: &str = concat!(
     "v",
     env!("CARGO_PKG_VERSION"),
@@ -42,7 +44,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
     });
 
-    i18n::init().unwrap_or_else(|e| die(e));
     let lang = i18n::Lang::from_env();
     let lang_code = lang.code();
     let lang_src = match std::env::var("APP_LANG")

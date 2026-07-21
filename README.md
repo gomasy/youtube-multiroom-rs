@@ -17,8 +17,8 @@ youtube-multiroom-rs/
 │       ├── lint.yml           # rustfmt check
 │       └── release.yml        # Binary release build (GitHub Releases)
 ├── locales/
-│   ├── en.json                # English message catalog (backend)
-│   └── ja.json                # Japanese message catalog (backend)
+│   ├── en.yml                 # English message catalog (backend)
+│   └── ja.yml                 # Japanese message catalog (backend)
 ├── src/
 │   ├── main.rs        # Entry point & router
 │   ├── state.rs       # Shared state, audio & device management
@@ -97,7 +97,6 @@ cargo build --release
 | `API_TOKEN` | No | Bearer token for API authentication |
 | `LISTEN_ADDR` | No | Address and port to listen on (default: `0.0.0.0:8888`) |
 | `APP_LANG` | No | Default response language (e.g. `en`, `ja`). Unrecognized values fall back to the default catalog. Defaults to `ja` |
-| `LOCALES_DIR` | No | Directory of `*.json` translation files loaded at startup, overriding/extending the embedded ones. Defaults to `locales/` |
 
 Variables can also be placed in a `.env` file in the working directory (loaded automatically at startup; real environment variables take precedence). See `.env.example`.
 
@@ -108,19 +107,17 @@ cp .env.example .env
 
 ### Internationalization
 
-UI text and Alexa voice responses are translated through per-language JSON catalogs — no language is hard-coded in the source, and the set of supported languages is driven entirely by the files present.
+UI text and Alexa voice responses are translated through per-language catalogs — no language is hard-coded in the source, and the set of supported languages is driven entirely by the files present.
 
-- **Backend**: `locales/*.json` (e.g. `en.json`, `ja.json`), embedded into the binary at compile time via `include_dir`. At startup, any `*.json` in `LOCALES_DIR` (default `locales/`) is loaded on top and takes precedence, so a language can be added or fixed with just a file — no recompile needed.
+- **Backend**: `locales/*.yml` (e.g. `en.yml`, `ja.yml`), embedded into the binary at compile time via `rust-i18n`. Adding or changing a language requires a recompile.
 - **Frontend**: `front/locales/*.json`, loaded on demand at runtime via `fetch()`. The Web UI detects the browser language (`navigator.language`) and loads only the matching catalog (plus `en` as fallback). It also sends the language via the `X-App-Lang` header so the backend resolves the matching catalog per request.
 
 The active server-wide language (set via `APP_LANG`) is printed at startup.
 
-**Add a language** — drop a JSON file named after its code and translate every key:
+**Add a language** — create a file named after its code and translate every key:
 
-- Backend: copy `locales/en.json` → `locales/<code>.json`, then restart (or place it under `LOCALES_DIR` to override at runtime without rebuilding).
+- Backend: copy `locales/en.yml` → `locales/<code>.yml`, then rebuild.
 - Frontend: copy `front/locales/en.json` → `front/locales/<code>.json`. No rebuild needed — locale files are loaded on demand at runtime.
-
-Every key is required in each file; a missing key fails fast at startup (backend) or falls back to the default language (frontend).
 
 ### Run
 

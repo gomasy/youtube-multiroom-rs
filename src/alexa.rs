@@ -34,7 +34,7 @@ pub async fn handle_alexa(state: &Arc<AppState>, body: Value, base_url: &str) ->
         t if t.starts_with("PlaybackController.") => {
             on_playback_controller(state, t, &body, &device_id, base_url).await
         }
-        _ => speech(lang.alexa_not_understood(), true),
+        _ => speech(&lang.alexa_not_understood(), true),
     };
 
     state.broadcast_devices().await;
@@ -63,7 +63,7 @@ async fn on_launch(state: &Arc<AppState>, device_id: &str, base_url: &str) -> Va
             .await;
     }
 
-    speech(state.lang.alexa_connected(), false)
+    speech(&state.lang.alexa_connected(), false)
 }
 
 /// Start playback from a pending command or the front of the "next up" queue.
@@ -113,7 +113,7 @@ async fn on_intent(state: &Arc<AppState>, body: &Value, device_id: &str, base_ur
             if let Some(resp) = start_pending_or_queue(state, device_id, base_url).await {
                 return resp;
             }
-            speech(lang.alexa_no_queued_track(), true)
+            speech(&lang.alexa_no_queued_track(), true)
         }
 
         "AMAZON.PauseIntent" => stop_directive(state, device_id, "paused").await,
@@ -128,9 +128,9 @@ async fn on_intent(state: &Arc<AppState>, body: &Value, device_id: &str, base_ur
 
         "AMAZON.PreviousIntent" => skip_prev(state, body, device_id, base_url, true).await,
 
-        "AMAZON.HelpIntent" => speech(lang.alexa_help(), false),
+        "AMAZON.HelpIntent" => speech(&lang.alexa_help(), false),
 
-        _ => speech(lang.alexa_use_web(), false),
+        _ => speech(&lang.alexa_use_web(), false),
     }
 }
 
@@ -155,7 +155,7 @@ async fn resume_playback(
         let token = new_token(&track.id);
         return play_directive(state, &track, device_id, dev.position_ms, base_url, token).await;
     }
-    no_track_response(can_speak, state.lang.alexa_no_track())
+    no_track_response(can_speak, &state.lang.alexa_no_track())
 }
 
 /// Explicit "next track" skip. Priority: pending → "next up" queue → playback
@@ -188,7 +188,7 @@ async fn skip_next(
         Some((track, offset_ms, token)) => {
             play_directive(state, &track, device_id, offset_ms, base_url, token).await
         }
-        None => no_track_response(can_speak, state.lang.alexa_no_next()),
+        None => no_track_response(can_speak, &state.lang.alexa_no_next()),
     }
 }
 
@@ -208,7 +208,7 @@ async fn skip_prev(
             let token = new_token(&track.id);
             play_directive(state, &track, device_id, 0, base_url, token).await
         }
-        None => no_track_response(can_speak, state.lang.alexa_no_prev()),
+        None => no_track_response(can_speak, &state.lang.alexa_no_prev()),
     }
 }
 
