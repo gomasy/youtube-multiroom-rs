@@ -71,6 +71,7 @@ WORKDIR /app
 COPY --from=ffmpeg /usr/local/bin/ffmpeg /usr/local/bin/ffprobe /usr/local/bin/
 COPY --from=backend /app/target/release/youtube-multiroom .
 COPY --from=frontend /app/front/dist front/dist
+COPY --from=frontend /app/front/locales front/locales
 RUN mkdir audio_cache
 EXPOSE 8888
 CMD ["./youtube-multiroom"]

@@ -33,8 +33,6 @@ youtube-multiroom-rs/
 │   ├── locales/
 │   │   ├── en.json            # English message catalog (frontend)
 │   │   └── ja.json            # Japanese message catalog (frontend)
-│   ├── scripts/
-│   │   └── gen-i18n.mjs       # Scan locales/ and generate catalog index
 │   └── src/
 │       ├── favicon.svg
 │       ├── index.html
@@ -44,7 +42,6 @@ youtube-multiroom-rs/
 │       ├── format.ts      # Shared time/duration formatters
 │       ├── hooks.ts       # WebSocket hook
 │       ├── i18n.ts        # Frontend i18n runtime (locale detection & lookup)
-│       ├── locales.generated.ts # Auto-generated catalog index
 │       ├── types.ts       # Shared type definitions
 │       ├── parcel-env.d.ts # Ambient types for Parcel-specific imports
 │       ├── styles.css
@@ -114,14 +111,14 @@ cp .env.example .env
 UI text and Alexa voice responses are translated through per-language JSON catalogs — no language is hard-coded in the source, and the set of supported languages is driven entirely by the files present.
 
 - **Backend**: `locales/*.json` (e.g. `en.json`, `ja.json`), embedded into the binary at compile time via `include_dir`. At startup, any `*.json` in `LOCALES_DIR` (default `locales/`) is loaded on top and takes precedence, so a language can be added or fixed with just a file — no recompile needed.
-- **Frontend**: `front/locales/*.json`, bundled by Parcel through `front/scripts/gen-i18n.mjs`, which scans the directory at build time. The Web UI detects the browser language (`navigator.language`) and sends it via the `X-App-Lang` header; the backend resolves the matching catalog per request.
+- **Frontend**: `front/locales/*.json`, loaded on demand at runtime via `fetch()`. The Web UI detects the browser language (`navigator.language`) and loads only the matching catalog (plus `en` as fallback). It also sends the language via the `X-App-Lang` header so the backend resolves the matching catalog per request.
 
 The active server-wide language (set via `APP_LANG`) is printed at startup.
 
 **Add a language** — drop a JSON file named after its code and translate every key:
 
 - Backend: copy `locales/en.json` → `locales/<code>.json`, then restart (or place it under `LOCALES_DIR` to override at runtime without rebuilding).
-- Frontend: copy `front/locales/en.json` → `front/locales/<code>.json`, then rebuild the frontend (`npm run build`, which regenerates the catalog list).
+- Frontend: copy `front/locales/en.json` → `front/locales/<code>.json`. No rebuild needed — locale files are loaded on demand at runtime.
 
 Every key is required in each file; a missing key fails fast at startup (backend) or falls back to the default language (frontend).
 

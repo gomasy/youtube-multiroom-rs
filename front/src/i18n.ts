@@ -1,27 +1,38 @@
-// Internationalization with compile-time-bundled message catalogs.
-//
-// Translations live in JSON files under front/locales/, one file per language
-// named after its code (e.g. en.json, ja.json). scripts/gen-i18n.mjs scans
-// that directory and bundles every *.json into the app, so the language set is
-// driven entirely by the files present — no language is hard-coded here. The
-// detected locale is resolved at runtime and falls back to the default catalog
-// when a code has no file.
+type Catalog = Record<string, string>;
 
-import { catalogs } from "./locales.generated";
+const DEFAULT_LANG = "en";
 
-const DEFAULT_LANG = "en" in catalogs ? "en" : Object.keys(catalogs)[0];
+let catalogs: Record<string, Catalog> = {};
+export let lang: string = DEFAULT_LANG;
 
 function detectLang(): string {
-  const nav =
-    typeof navigator !== "undefined" ? navigator.language : "";
-  const code = nav.toLowerCase().split("-")[0];
-  return code in catalogs ? code : DEFAULT_LANG;
+  const code = navigator.language.toLowerCase().split("-")[0];
+  return code || DEFAULT_LANG;
 }
 
-export const lang: string = detectLang();
+async function fetchCatalog(code: string): Promise<Catalog> {
+  const res = await fetch(`/locales/${code}.json`);
+  if (!res.ok) throw new Error(`locale ${code}: ${res.status}`);
+  return res.json();
+}
 
-// Reflect the detected locale on the document root for accessibility/CSS.
-if (typeof document !== "undefined") {
+export async function init(): Promise<void> {
+  const detected = detectLang();
+
+  if (detected === DEFAULT_LANG) {
+    catalogs[DEFAULT_LANG] = await fetchCatalog(DEFAULT_LANG);
+  } else {
+    const [fallback, local] = await Promise.all([
+      fetchCatalog(DEFAULT_LANG),
+      fetchCatalog(detected).catch(() => null),
+    ]);
+    catalogs[DEFAULT_LANG] = fallback;
+    if (local) {
+      catalogs[detected] = local;
+      lang = detected;
+    }
+  }
+
   document.documentElement.lang = lang;
 }
 

@@ -3,5 +3,4 @@
 /front/dist
 /front/.parcel-cache
 /front/node_modules
-/front/src/locales.generated.ts
 /.env

@@ -102,6 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             state.clone(),
             auth::require_token,
         ))
+        .nest_service("/locales", ServeDir::new("front/locales"))
         .fallback_service(ServeDir::new("front/dist"))
         .with_state(state);
 
