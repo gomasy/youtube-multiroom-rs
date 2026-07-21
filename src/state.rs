@@ -1,4 +1,3 @@
-use crate::i18n::Lang;
 use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
 use regex::Regex;
@@ -387,7 +386,7 @@ pub struct AppState {
     pub tx: broadcast::Sender<String>,
     pub cache_dir: PathBuf,
     pub api_token: Option<String>,
-    pub lang: Lang,
+    pub locale: String,
     /// Whether track restoration from audio_cache is in progress (prevents
     /// concurrent runs).
     restoring: AtomicBool,
@@ -410,7 +409,7 @@ impl AppState {
     pub async fn new(
         api_token: Option<String>,
         redis_url: &str,
-        lang: Lang,
+        locale: String,
     ) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
         let (tx, _) = broadcast::channel::<String>(256);
         let cache_dir = std::env::current_dir()
@@ -428,7 +427,7 @@ impl AppState {
             tx,
             cache_dir,
             api_token,
-            lang,
+            locale,
             restoring: AtomicBool::new(false),
             order_lock: Mutex::new(()),
             extract_locks: Mutex::new(HashMap::new()),

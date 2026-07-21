@@ -1,6 +1,7 @@
 use crate::state::{
     AppState, AudioTrack, DeviceUpdate, auto_token, is_auto_token, new_token, token_track_id,
 };
+use rust_i18n::t;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -21,8 +22,6 @@ pub async fn handle_alexa(state: &Arc<AppState>, body: Value, base_url: &str) ->
     let name = format!("Echo-{short_id}");
     state.register_device(&device_id, &name).await;
 
-    let lang = state.lang;
-
     let resp = match req_type {
         "LaunchRequest" => on_launch(state, &device_id, base_url).await,
         "IntentRequest" => on_intent(state, &body, &device_id, base_url).await,
@@ -34,7 +33,7 @@ pub async fn handle_alexa(state: &Arc<AppState>, body: Value, base_url: &str) ->
         t if t.starts_with("PlaybackController.") => {
             on_playback_controller(state, t, &body, &device_id, base_url).await
         }
-        _ => speech(&lang.alexa_not_understood(), true),
+        _ => speech(&t!("alexa_not_understood", locale = &state.locale), true),
     };
 
     state.broadcast_devices().await;
@@ -63,7 +62,7 @@ async fn on_launch(state: &Arc<AppState>, device_id: &str, base_url: &str) -> Va
             .await;
     }
 
-    speech(&state.lang.alexa_connected(), false)
+    speech(&t!("alexa_connected", locale = &state.locale), false)
 }
 
 /// Start playback from a pending command or the front of the "next up" queue.
@@ -106,14 +105,14 @@ async fn start_pending_or_queue(
 
 async fn on_intent(state: &Arc<AppState>, body: &Value, device_id: &str, base_url: &str) -> Value {
     let intent = body["request"]["intent"]["name"].as_str().unwrap_or("");
-    let lang = state.lang;
+    let locale = &state.locale;
 
     match intent {
         "PlayFromWebIntent" => {
             if let Some(resp) = start_pending_or_queue(state, device_id, base_url).await {
                 return resp;
             }
-            speech(&lang.alexa_no_queued_track(), true)
+            speech(&t!("alexa_no_queued_track", locale = locale), true)
         }
 
         "AMAZON.PauseIntent" => stop_directive(state, device_id, "paused").await,
@@ -128,9 +127,9 @@ async fn on_intent(state: &Arc<AppState>, body: &Value, device_id: &str, base_ur
 
         "AMAZON.PreviousIntent" => skip_prev(state, body, device_id, base_url, true).await,
 
-        "AMAZON.HelpIntent" => speech(&lang.alexa_help(), false),
+        "AMAZON.HelpIntent" => speech(&t!("alexa_help", locale = locale), false),
 
-        _ => speech(&lang.alexa_use_web(), false),
+        _ => speech(&t!("alexa_use_web", locale = locale), false),
     }
 }
 
@@ -155,7 +154,7 @@ async fn resume_playback(
         let token = new_token(&track.id);
         return play_directive(state, &track, device_id, dev.position_ms, base_url, token).await;
     }
-    no_track_response(can_speak, &state.lang.alexa_no_track())
+    no_track_response(can_speak, &t!("alexa_no_track", locale = &state.locale))
 }
 
 /// Explicit "next track" skip. Priority: pending → "next up" queue → playback
@@ -188,7 +187,7 @@ async fn skip_next(
         Some((track, offset_ms, token)) => {
             play_directive(state, &track, device_id, offset_ms, base_url, token).await
         }
-        None => no_track_response(can_speak, &state.lang.alexa_no_next()),
+        None => no_track_response(can_speak, &t!("alexa_no_next", locale = &state.locale)),
     }
 }
 
@@ -208,7 +207,7 @@ async fn skip_prev(
             let token = new_token(&track.id);
             play_directive(state, &track, device_id, 0, base_url, token).await
         }
-        None => no_track_response(can_speak, &state.lang.alexa_no_prev()),
+        None => no_track_response(can_speak, &t!("alexa_no_prev", locale = &state.locale)),
     }
 }
 

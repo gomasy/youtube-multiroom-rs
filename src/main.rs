@@ -2,10 +2,26 @@ mod alexa;
 mod alexa_verify;
 mod auth;
 mod handlers;
-mod i18n;
 mod state;
 
 rust_i18n::i18n!("locales", fallback = "ja");
+
+/// Resolve a language code to the best available locale, or `None` if unknown.
+fn resolve_locale(code: &str) -> Option<String> {
+    let code = code.trim().to_ascii_lowercase();
+    if code.is_empty() {
+        return None;
+    }
+    let available = rust_i18n::available_locales!();
+    if available.iter().any(|a| a.as_ref() == code) {
+        return Some(code);
+    }
+    let base = code.split('-').next()?;
+    if available.iter().any(|a| a.as_ref() == base) {
+        return Some(base.to_string());
+    }
+    None
+}
 
 pub const VERSION: &str = concat!(
     "v",
@@ -44,17 +60,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
     });
 
-    let lang = i18n::Lang::from_env();
-    let lang_code = lang.code();
-    let lang_src = match std::env::var("APP_LANG")
+    let fallback = rust_i18n::locale().to_string();
+    let (locale, locale_src) = match std::env::var("APP_LANG")
         .ok()
         .filter(|s| !s.trim().is_empty())
     {
-        Some(s) => format!("APP_LANG={s}"),
-        None => "default".to_string(),
+        Some(s) => {
+            let resolved = resolve_locale(&s).unwrap_or_else(|| {
+                tracing::warn!(
+                    "APP_LANG=\"{s}\" is not a known language; defaulting to \"{fallback}\""
+                );
+                fallback.clone()
+            });
+            (resolved, format!("APP_LANG={s}"))
+        }
+        None => (fallback, "default".to_string()),
     };
 
-    let state = AppState::new(api_token, &redis_url, lang)
+    let state = AppState::new(api_token, &redis_url, locale.clone())
         .await
         .unwrap_or_else(|e| die(e));
 
@@ -115,7 +138,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Redis    = {}", redact_url(&redis_url));
     println!("  Web UI   → http://localhost:{}", addr.port());
     println!("  Alexa    → POST /alexa");
-    println!("  Lang     → {} ({})", lang_code, lang_src);
+    println!("  Lang     → {} ({})", locale, locale_src);
     if auth_enabled {
         println!("  Auth     → API_TOKEN is set");
     } else {
@@ -151,6 +174,8 @@ fn redact_url(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::redact_url;
+    use super::resolve_locale;
+    use rust_i18n::t;
 
     #[test]
     fn redacts_userinfo_only() {
@@ -159,5 +184,50 @@ mod tests {
             "redis://***@localhost:6379/0"
         );
         assert_eq!(redact_url("redis://localhost/"), "redis://localhost/");
+    }
+
+    #[test]
+    fn resolve_exact_match() {
+        assert_eq!(resolve_locale("en"), Some("en".to_string()));
+        assert_eq!(resolve_locale("ja"), Some("ja".to_string()));
+    }
+
+    #[test]
+    fn resolve_base_code_fallback() {
+        assert_eq!(resolve_locale("en-us"), Some("en".to_string()));
+        assert_eq!(resolve_locale("en-US"), Some("en".to_string()));
+        assert_eq!(resolve_locale("ja-JP"), Some("ja".to_string()));
+    }
+
+    #[test]
+    fn resolve_unknown_returns_none() {
+        assert_eq!(resolve_locale("xx"), None);
+        assert_eq!(resolve_locale("xx-YY"), None);
+    }
+
+    #[test]
+    fn resolve_empty_returns_none() {
+        assert_eq!(resolve_locale(""), None);
+        assert_eq!(resolve_locale("   "), None);
+    }
+
+    #[test]
+    fn embedded_translations_load() {
+        assert_eq!(
+            t!("alexa_connected", locale = "en"),
+            "Connected to YouTube MultiRoom. You can control playback from the web interface."
+        );
+        assert_eq!(
+            t!("alexa_connected", locale = "ja"),
+            "YouTube マルチルームに接続しました。Web 画面から操作できます。"
+        );
+    }
+
+    #[test]
+    fn template_substitution_works() {
+        assert_eq!(
+            t!("api_added_to_playlist", locale = "en", title = "Song"),
+            "Added \"Song\" to playlist"
+        );
     }
 }

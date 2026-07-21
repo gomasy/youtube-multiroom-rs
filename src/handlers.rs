@@ -1,5 +1,4 @@
 use crate::alexa::handle_alexa;
-use crate::i18n::Lang;
 use crate::state::{
     AUDIO_MIME, AppState, AudioTrack, DeviceUpdate, PlayRequest, ReorderOutcome, ReorderRequest,
     SeekRequest, UrlKind, classify_url, run_yt_dlp,
@@ -9,6 +8,7 @@ use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path, Query, State, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
+use rust_i18n::t;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::io::SeekFrom;
@@ -466,10 +466,10 @@ pub async fn add_playlist_track(
     state.broadcast_playlists().await;
     // Notify clients viewing this playlist to refresh their track list
     state.broadcast_tracks().await;
-    let lang = client_lang(&headers, &state);
+    let locale = client_locale(&headers, &state);
     Ok(Json(json!({
         "status": "ok",
-        "message": lang.api_added_to_playlist(&track.title),
+        "message": t!("api_added_to_playlist", locale = &locale, title = &track.title),
     })))
 }
 
@@ -503,8 +503,8 @@ pub async fn play_on_devices(
     Json(req): Json<PlayRequest>,
 ) -> AppResult<Json<Value>> {
     let track = track_or_404(&state, &req.track_id).await?;
-    let lang = client_lang(&headers, &state);
-    queue_on_devices(&state, track, req.device_ids, lang).await
+    let locale = client_locale(&headers, &state);
+    queue_on_devices(&state, track, req.device_ids, &locale).await
 }
 
 /// POST /api/play-all
@@ -514,12 +514,12 @@ pub async fn play_on_all(
     Json(req): Json<PlayRequest>,
 ) -> AppResult<Json<Value>> {
     let track = track_or_404(&state, &req.track_id).await?;
-    let lang = client_lang(&headers, &state);
+    let locale = client_locale(&headers, &state);
     let device_ids = state
         .device_ids()
         .await
         .map_err(|e| AppError::internal(format!("Failed to list devices: {e}")))?;
-    queue_on_devices(&state, track, device_ids, lang).await
+    queue_on_devices(&state, track, device_ids, &locale).await
 }
 
 async fn track_or_404(state: &AppState, track_id: &str) -> AppResult<AudioTrack> {
@@ -529,15 +529,15 @@ async fn track_or_404(state: &AppState, track_id: &str) -> AppResult<AudioTrack>
         .ok_or_else(|| AppError::not_found("Track not found"))
 }
 
-/// Resolve the response language for this request. The client advertises its
+/// Resolve the response locale for this request. The client advertises its
 /// locale via the X-App-Lang header (derived from navigator.language); when
 /// absent or unrecognized we fall back to the server-wide APP_LANG default.
-fn client_lang(headers: &HeaderMap, state: &AppState) -> Lang {
+fn client_locale(headers: &HeaderMap, state: &AppState) -> String {
     headers
         .get("x-app-lang")
         .and_then(|v| v.to_str().ok())
-        .and_then(Lang::parse)
-        .unwrap_or(state.lang)
+        .and_then(crate::resolve_locale)
+        .unwrap_or_else(|| state.locale.clone())
 }
 
 /// Queue a track for playback on each device's pending slot and broadcast state.
@@ -545,7 +545,7 @@ async fn queue_on_devices(
     state: &AppState,
     track: AudioTrack,
     device_ids: Vec<String>,
-    lang: Lang,
+    locale: &str,
 ) -> AppResult<Json<Value>> {
     for did in &device_ids {
         state.queue_play(did, track.clone(), 0).await;
@@ -556,7 +556,7 @@ async fn queue_on_devices(
     Ok(Json(json!({
         "status": "queued",
         "devices": device_ids,
-        "message": lang.api_play_queued(),
+        "message": t!("api_play_queued", locale = locale),
     })))
 }
 
@@ -569,7 +569,7 @@ pub async fn queue_next(
     headers: HeaderMap,
     Json(req): Json<PlayRequest>,
 ) -> AppResult<Json<Value>> {
-    let lang = client_lang(&headers, &state);
+    let locale = client_locale(&headers, &state);
     let track = track_or_404(&state, &req.track_id).await?;
     let mut queued = Vec::new();
     for did in &req.device_ids {
@@ -589,7 +589,7 @@ pub async fn queue_next(
     Ok(Json(json!({
         "status": "ok",
         "devices": queued,
-        "message": lang.api_queued_next(&track.title),
+        "message": t!("api_queued_next", locale = &locale, title = &track.title),
     })))
 }
 
