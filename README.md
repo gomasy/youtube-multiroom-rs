@@ -8,6 +8,7 @@ Built with axum + tokio (backend) and React + TypeScript (frontend).
 ```
 youtube-multiroom-rs/
 ├── Cargo.toml
+├── build.rs               # Embed git hash & build date
 ├── Dockerfile
 ├── .github/
 │   ├── renovate.json          # Renovate dependency updates
@@ -15,16 +16,25 @@ youtube-multiroom-rs/
 │       ├── build-image.yml    # Container image build (ghcr.io)
 │       ├── lint.yml           # rustfmt check
 │       └── release.yml        # Binary release build (GitHub Releases)
+├── locales/
+│   ├── en.json                # English message catalog (backend)
+│   └── ja.json                # Japanese message catalog (backend)
 ├── src/
 │   ├── main.rs        # Entry point & router
 │   ├── state.rs       # Shared state, audio & device management
 │   ├── handlers.rs    # HTTP / WebSocket handlers
 │   ├── auth.rs        # Bearer token authentication middleware
+│   ├── i18n.rs        # Internationalization / message catalogs
 │   ├── alexa.rs       # Alexa skill handler
 │   └── alexa_verify.rs # Alexa request signature verification
 ├── front/
 │   ├── package.json
 │   ├── tsconfig.json
+│   ├── locales/
+│   │   ├── en.json            # English message catalog (frontend)
+│   │   └── ja.json            # Japanese message catalog (frontend)
+│   ├── scripts/
+│   │   └── gen-i18n.mjs       # Scan locales/ and generate catalog index
 │   └── src/
 │       ├── favicon.svg
 │       ├── index.html
@@ -33,6 +43,8 @@ youtube-multiroom-rs/
 │       ├── api.ts         # Auth-aware fetch wrapper
 │       ├── format.ts      # Shared time/duration formatters
 │       ├── hooks.ts       # WebSocket hook
+│       ├── i18n.ts        # Frontend i18n runtime (locale detection & lookup)
+│       ├── locales.generated.ts # Auto-generated catalog index
 │       ├── types.ts       # Shared type definitions
 │       ├── parcel-env.d.ts # Ambient types for Parcel-specific imports
 │       ├── styles.css
