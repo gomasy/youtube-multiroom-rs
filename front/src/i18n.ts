@@ -9,12 +9,6 @@
 
 import { catalogs } from "./locales.generated";
 
-type Catalog = Record<string, string>;
-
-// The set of supported languages is derived from the loaded catalogs, never a
-// fixed union.
-export type Lang = string;
-
 const DEFAULT_LANG = "en" in catalogs ? "en" : Object.keys(catalogs)[0];
 
 function detectLang(): string {
@@ -24,7 +18,7 @@ function detectLang(): string {
   return code in catalogs ? code : DEFAULT_LANG;
 }
 
-export const lang: Lang = detectLang();
+export const lang: string = detectLang();
 
 // Reflect the detected locale on the document root for accessibility/CSS.
 if (typeof document !== "undefined") {
@@ -41,12 +35,7 @@ export function tFmt(
 ): string {
   let msg = t(key);
   for (const [k, v] of Object.entries(params)) {
-    // Replace every occurrence (String.replace with a string only swaps the first).
-    msg = msg.replace(new RegExp(`\\{${k}\\}`, "g"), String(v));
+    msg = msg.replaceAll(`{${k}}`, String(v));
   }
   return msg;
-}
-
-export function getLang(): Lang {
-  return lang;
 }

@@ -92,6 +92,14 @@ fn intern(code: &str) -> &'static str {
     }
 }
 
+macro_rules! catalog_accessors {
+    ($($name:ident),* $(,)?) => {
+        $(pub fn $name(&self) -> &'static str {
+            &self.catalog().$name
+        })*
+    };
+}
+
 /// A resolved request language.
 ///
 /// Cheap to copy; holds only the language code. The actual strings are looked
@@ -161,45 +169,17 @@ impl Lang {
             .expect("i18n: no catalogs loaded")
     }
 
-    // Alexa speech responses
-
-    pub fn alexa_not_understood(&self) -> &'static str {
-        &self.catalog().alexa_not_understood
-    }
-
-    pub fn alexa_connected(&self) -> &'static str {
-        &self.catalog().alexa_connected
-    }
-
-    pub fn alexa_no_queued_track(&self) -> &'static str {
-        &self.catalog().alexa_no_queued_track
-    }
-
-    pub fn alexa_no_track(&self) -> &'static str {
-        &self.catalog().alexa_no_track
-    }
-
-    pub fn alexa_no_next(&self) -> &'static str {
-        &self.catalog().alexa_no_next
-    }
-
-    pub fn alexa_no_prev(&self) -> &'static str {
-        &self.catalog().alexa_no_prev
-    }
-
-    pub fn alexa_help(&self) -> &'static str {
-        &self.catalog().alexa_help
-    }
-
-    pub fn alexa_use_web(&self) -> &'static str {
-        &self.catalog().alexa_use_web
-    }
-
-    // API response messages
-
-    pub fn api_play_queued(&self) -> &'static str {
-        &self.catalog().api_play_queued
-    }
+    catalog_accessors!(
+        alexa_not_understood,
+        alexa_connected,
+        alexa_no_queued_track,
+        alexa_no_track,
+        alexa_no_next,
+        alexa_no_prev,
+        alexa_help,
+        alexa_use_web,
+        api_play_queued,
+    );
 
     pub fn api_added_to_playlist(&self, title: &str) -> String {
         self.catalog()

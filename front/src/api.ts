@@ -1,4 +1,4 @@
-import { t, getLang } from "./i18n";
+import { t, lang } from "./i18n";
 import type { Playlist, Track, TracksPage } from "./types";
 
 export const PER_PAGE = 10;
@@ -19,7 +19,7 @@ function authHeaders(): Record<string, string> {
   if (apiToken) h["Authorization"] = `Bearer ${apiToken}`;
   // Advertise the browser locale so the server can localize API messages
   // (toasts, etc.) to match the UI language.
-  h["X-App-Lang"] = getLang();
+  h["X-App-Lang"] = lang;
   return h;
 }
 
