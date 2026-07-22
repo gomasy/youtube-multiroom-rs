@@ -24,7 +24,6 @@ youtube-multiroom-rs/
 │   ├── state.rs       # Shared state, audio & device management
 │   ├── handlers.rs    # HTTP / WebSocket handlers
 │   ├── auth.rs        # Bearer token authentication middleware
-│   ├── i18n.rs        # Internationalization / message catalogs
 │   ├── alexa.rs       # Alexa skill handler
 │   └── alexa_verify.rs # Alexa request signature verification
 ├── front/
@@ -261,6 +260,7 @@ The Web UI ships a web app manifest and icons, so it can be installed to the hom
     │  POST   /api/devices/{id}/stop stop device            │
     │  POST   /alexa                 Alexa webhook          │
     │  WS     /ws                    real-time sync         │
+    │  GET    /locales/*             frontend locale JSON   │
     │  GET    /*                     front/dist static      │
     └──────────────────────────────────────────────────────┘
 ```
