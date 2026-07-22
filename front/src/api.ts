@@ -23,7 +23,7 @@ function authHeaders(): Record<string, string> {
   return h;
 }
 
-export async function authFetch(
+async function authFetch(
   url: string,
   options: RequestInit = {},
   onUnauthorized?: () => void,
@@ -37,6 +37,28 @@ export async function authFetch(
   return res;
 }
 
+/// Perform an authFetch and throw t(errorKey) on a non-OK response.
+export async function authOk(
+  url: string,
+  errorKey: string,
+  options: RequestInit = {},
+  onUnauthorized?: () => void,
+): Promise<Response> {
+  const res = await authFetch(url, options, onUnauthorized);
+  if (!res.ok) throw new Error(t(errorKey));
+  return res;
+}
+
+/// authOk that parses the response body as JSON.
+async function authJson<T>(
+  url: string,
+  errorKey: string,
+  options: RequestInit = {},
+  onUnauthorized?: () => void,
+): Promise<T> {
+  return (await authOk(url, errorKey, options, onUnauthorized)).json();
+}
+
 export async function fetchTracks(
   page: number,
   perPage: number,
@@ -46,13 +68,12 @@ export async function fetchTracks(
 ): Promise<TracksPage> {
   let url = `/api/tracks?page=${page}&per_page=${perPage}`;
   if (playlistId) url += `&playlist=${encodeURIComponent(playlistId)}`;
-  const res = await authFetch(
+  return authJson(
     url,
+    "api.fetchTracksFailed",
     token ? { headers: { Authorization: `Bearer ${token}` } } : {},
     onUnauthorized,
   );
-  if (!res.ok) throw new Error(t("api.fetchTracksFailed"));
-  return res.json();
 }
 
 export async function reorderTrack(
@@ -61,8 +82,9 @@ export async function reorderTrack(
   onUnauthorized?: () => void,
   playlistId?: string | null,
 ): Promise<void> {
-  const res = await authFetch(
+  await authOk(
     "/api/tracks/reorder",
+    "api.reorderFailed",
     {
       method: "POST",
       body: JSON.stringify({
@@ -73,20 +95,18 @@ export async function reorderTrack(
     },
     onUnauthorized,
   );
-  if (!res.ok) throw new Error(t("api.reorderFailed"));
 }
 
 export async function getStreamUrl(
   trackId: string,
   onUnauthorized?: () => void,
 ): Promise<string> {
-  const res = await authFetch(
+  const data = await authJson<{ url: string }>(
     `/api/audio/${encodeURIComponent(trackId)}/url`,
+    "api.streamUrlFailed",
     {},
     onUnauthorized,
   );
-  if (!res.ok) throw new Error(t("api.streamUrlFailed"));
-  const data = await res.json();
   return data.url;
 }
 
@@ -94,13 +114,12 @@ export async function createPlaylist(
   name: string,
   onUnauthorized?: () => void,
 ): Promise<Playlist> {
-  const res = await authFetch(
+  const data = await authJson<{ playlist: Playlist }>(
     "/api/playlists",
+    "api.createPlaylistFailed",
     { method: "POST", body: JSON.stringify({ name }) },
     onUnauthorized,
   );
-  if (!res.ok) throw new Error(t("api.createPlaylistFailed"));
-  const data = await res.json();
   return data.playlist;
 }
 
@@ -108,12 +127,12 @@ export async function deletePlaylist(
   playlistId: string,
   onUnauthorized?: () => void,
 ): Promise<void> {
-  const res = await authFetch(
+  await authOk(
     `/api/playlists/${encodeURIComponent(playlistId)}`,
+    "api.deletePlaylistFailed",
     { method: "DELETE" },
     onUnauthorized,
   );
-  if (!res.ok) throw new Error(t("api.deletePlaylistFailed"));
 }
 
 export async function addToPlaylist(
@@ -121,13 +140,12 @@ export async function addToPlaylist(
   trackId: string,
   onUnauthorized?: () => void,
 ): Promise<{ message?: string }> {
-  const res = await authFetch(
+  return authJson(
     `/api/playlists/${encodeURIComponent(playlistId)}/tracks`,
+    "api.addToPlaylistFailed",
     { method: "POST", body: JSON.stringify({ track_id: trackId }) },
     onUnauthorized,
   );
-  if (!res.ok) throw new Error(t("api.addToPlaylistFailed"));
-  return res.json();
 }
 
 export async function removeFromPlaylist(
@@ -135,25 +153,24 @@ export async function removeFromPlaylist(
   trackId: string,
   onUnauthorized?: () => void,
 ): Promise<void> {
-  const res = await authFetch(
+  await authOk(
     `/api/playlists/${encodeURIComponent(playlistId)}/tracks/${encodeURIComponent(trackId)}`,
+    "api.removeFromPlaylistFailed",
     { method: "DELETE" },
     onUnauthorized,
   );
-  if (!res.ok) throw new Error(t("api.removeFromPlaylistFailed"));
 }
 
 export async function searchYouTube(
   query: string,
   onUnauthorized?: () => void,
 ): Promise<Track[]> {
-  const res = await authFetch(
+  const data = await authJson<{ results?: Track[] }>(
     `/api/search?q=${encodeURIComponent(query)}`,
+    "api.searchFailed",
     {},
     onUnauthorized,
   );
-  if (!res.ok) throw new Error(t("api.searchFailed"));
-  const data = await res.json();
   return data.results ?? [];
 }
 
@@ -162,16 +179,15 @@ export async function playTracks(
   deviceIds: string[],
   onUnauthorized?: () => void,
 ): Promise<{ message?: string }> {
-  const res = await authFetch(
+  return authJson(
     "/api/play",
+    "api.playFailed",
     {
       method: "POST",
       body: JSON.stringify({ track_id: trackId, device_ids: deviceIds }),
     },
     onUnauthorized,
   );
-  if (!res.ok) throw new Error(t("api.playFailed"));
-  return res.json();
 }
 
 export async function queueNext(
@@ -179,16 +195,15 @@ export async function queueNext(
   deviceIds: string[],
   onUnauthorized?: () => void,
 ): Promise<{ message?: string }> {
-  const res = await authFetch(
+  return authJson(
     "/api/queue",
+    "api.queueFailed",
     {
       method: "POST",
       body: JSON.stringify({ track_id: trackId, device_ids: deviceIds }),
     },
     onUnauthorized,
   );
-  if (!res.ok) throw new Error(t("api.queueFailed"));
-  return res.json();
 }
 
 export async function removeQueueItem(
@@ -196,24 +211,24 @@ export async function removeQueueItem(
   entry: string,
   onUnauthorized?: () => void,
 ): Promise<void> {
-  const res = await authFetch(
+  await authOk(
     `/api/devices/${encodeURIComponent(deviceId)}/queue/${encodeURIComponent(entry)}`,
+    "api.removeQueueFailed",
     { method: "DELETE" },
     onUnauthorized,
   );
-  if (!res.ok) throw new Error(t("api.removeQueueFailed"));
 }
 
 export async function clearQueue(
   deviceId: string,
   onUnauthorized?: () => void,
 ): Promise<void> {
-  const res = await authFetch(
+  await authOk(
     `/api/devices/${encodeURIComponent(deviceId)}/queue`,
+    "api.clearQueueFailed",
     { method: "DELETE" },
     onUnauthorized,
   );
-  if (!res.ok) throw new Error(t("api.clearQueueFailed"));
 }
 
 export async function checkAuth(

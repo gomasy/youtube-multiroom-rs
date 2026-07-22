@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { authFetch, playTracks, queueNext, removeQueueItem, clearQueue } from "../api";
+import { authOk, playTracks, queueNext, removeQueueItem, clearQueue } from "../api";
 import { t } from "../i18n";
 import { ScrollingText } from "./ScrollingText";
 import { SeekBar } from "./SeekBar";
@@ -47,12 +47,12 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
 
   async function deleteDevice(deviceId: string) {
     try {
-      const res = await authFetch(
+      await authOk(
         `/api/devices/${encodeURIComponent(deviceId)}`,
+        "devices.deleteFailed",
         { method: "DELETE" },
         onUnauthorized,
       );
-      if (!res.ok) throw new Error(t("devices.deleteFailed"));
       setSelectedDevices((prev) => {
         const next = new Set(prev);
         next.delete(deviceId);
@@ -67,15 +67,15 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
 
   async function seekDevice(deviceId: string, positionMs: number) {
     try {
-      const res = await authFetch(
+      await authOk(
         `/api/devices/${encodeURIComponent(deviceId)}/seek`,
+        "devices.seekFailed",
         {
           method: "POST",
           body: JSON.stringify({ position_ms: positionMs }),
         },
         onUnauthorized,
       );
-      if (!res.ok) throw new Error(t("devices.seekFailed"));
       showToast(t("devices.seekQueued"));
     } catch (e) {
       showToast(`${t("common.error")}: ${(e as Error).message}`);

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   addToPlaylist,
-  authFetch,
+  authOk,
   createPlaylist,
   deletePlaylist,
   fetchTracks,
@@ -189,12 +189,12 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
 
   async function deleteTrack(trackId: string) {
     try {
-      const res = await authFetch(
+      await authOk(
         `/api/tracks/${encodeURIComponent(trackId)}`,
+        "history.deleteFailed",
         { method: "DELETE" },
         onUnauthorized,
       );
-      if (!res.ok) throw new Error(t("history.deleteFailed"));
       onTrackDeleted(trackId);
       setLocalVersion((v) => v + 1);
       showToast(t("history.trackDeleted"));
