@@ -435,6 +435,24 @@ pub async fn create_playlist(
     Ok(Json(json!({ "status": "ok", "playlist": playlist })))
 }
 
+#[derive(Deserialize)]
+pub struct RenamePlaylistRequest {
+    name: String,
+}
+
+/// PATCH /api/playlists/:id
+pub async fn rename_playlist(
+    State(state): State<Arc<AppState>>,
+    Path(playlist_id): Path<String>,
+    Json(req): Json<RenamePlaylistRequest>,
+) -> AppResult<Json<Value>> {
+    if !state.rename_playlist(&playlist_id, &req.name).await {
+        return Err(AppError::bad_request("Invalid name or playlist not found"));
+    }
+    state.broadcast_playlists().await;
+    Ok(Json(json!({ "status": "ok" })))
+}
+
 /// DELETE /api/playlists/:id
 pub async fn delete_playlist(
     State(state): State<Arc<AppState>>,

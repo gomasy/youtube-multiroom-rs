@@ -59,6 +59,9 @@
   "history.create": "作成",
   "history.cancel": "キャンセル",
   "history.tracks": "取得済みトラック",
+  "history.renamePlaylist": "クリックしてリネーム",
+  "history.rename": "リネーム",
+  "history.playlistRenamed": "プレイリスト名を変更しました",
   "history.deletePlaylist": "プレイリストを削除",
   "history.playlistEmpty": "このプレイリストは空です。ライブラリの ♪＋ ボタンで追加できます。",
   "history.filterPlaceholder": "タイトル・チャンネル名で絞り込み...",
@@ -113,5 +116,6 @@
   "api.playFailed": "再生のキューに失敗しました",
   "api.queueFailed": "キューへの追加に失敗しました",
   "api.removeQueueFailed": "キューからの削除に失敗しました",
-  "api.clearQueueFailed": "キューのクリアに失敗しました"
+  "api.clearQueueFailed": "キューのクリアに失敗しました",
+  "api.renamePlaylistFailed": "プレイリストのリネームに失敗しました"
 }

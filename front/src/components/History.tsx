@@ -6,6 +6,7 @@ import {
   deletePlaylist,
   fetchTracks,
   removeFromPlaylist,
+  renamePlaylist,
   reorderTrack,
   PER_PAGE,
 } from "../api";
@@ -245,6 +246,23 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
     }
   }
 
+  const [renameName, setRenameName] = useState<string | null>(null);
+
+  async function submitRename() {
+    const name = (renameName ?? "").trim();
+    if (!name || !viewingPlaylist) {
+      setRenameName(null);
+      return;
+    }
+    try {
+      await renamePlaylist(viewingPlaylist.id, name, onUnauthorized);
+      setRenameName(null);
+      showToast(t("history.playlistRenamed"));
+    } catch (e) {
+      showToast(`${t("common.error")}: ${(e as Error).message}`);
+    }
+  }
+
   async function deleteViewingPlaylist() {
     if (!viewingPlaylist) return;
     try {
@@ -317,18 +335,46 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
       </div>
 
       <div className="section-label history-header">
-        <span>
-          {viewingPlaylist
-            ? `${viewingPlaylist.name} (${total})`
-            : `${t("history.tracks")} (${total})`}
-        </span>
-        {viewingPlaylist && (
-          <button
-            className="text-btn text-btn-danger"
-            onClick={deleteViewingPlaylist}
-          >
-            {t("history.deletePlaylist")}
-          </button>
+        {viewingPlaylist && renameName !== null ? (
+          <span className="playlist-new">
+            <input
+              type="text"
+              className="playlist-new-input"
+              autoFocus
+              value={renameName}
+              onChange={(e) => setRenameName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") submitRename();
+                if (e.key === "Escape") setRenameName(null);
+              }}
+            />
+            <button className="btn btn-sm" onClick={submitRename}>
+              {t("history.rename")}
+            </button>
+            <button className="text-btn" onClick={() => setRenameName(null)}>
+              {t("history.cancel")}
+            </button>
+          </span>
+        ) : (
+          <>
+            <span
+              onClick={() => { if (viewingPlaylist) setRenameName(viewingPlaylist.name); }}
+              title={viewingPlaylist ? t("history.renamePlaylist") : undefined}
+              style={viewingPlaylist ? { cursor: "pointer" } : undefined}
+            >
+              {viewingPlaylist
+                ? `${viewingPlaylist.name} (${total})`
+                : `${t("history.tracks")} (${total})`}
+            </span>
+            {viewingPlaylist && (
+              <button
+                className="text-btn text-btn-danger"
+                onClick={deleteViewingPlaylist}
+              >
+                {t("history.deletePlaylist")}
+              </button>
+            )}
+          </>
         )}
       </div>
 

@@ -59,6 +59,9 @@
   "history.create": "Create",
   "history.cancel": "Cancel",
   "history.tracks": "Tracks",
+  "history.renamePlaylist": "Click to rename",
+  "history.rename": "Rename",
+  "history.playlistRenamed": "Playlist renamed",
   "history.deletePlaylist": "Delete playlist",
   "history.playlistEmpty": "This playlist is empty. Use the add button in the library to add tracks.",
   "history.filterPlaceholder": "Filter by title or channel...",
@@ -113,5 +116,6 @@
   "api.playFailed": "Failed to queue playback",
   "api.queueFailed": "Failed to add to queue",
   "api.removeQueueFailed": "Failed to remove from queue",
-  "api.clearQueueFailed": "Failed to clear queue"
+  "api.clearQueueFailed": "Failed to clear queue",
+  "api.renamePlaylistFailed": "Failed to rename playlist"
 }

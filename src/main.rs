@@ -35,7 +35,7 @@ pub const VERSION: &str = concat!(
 
 use axum::Router;
 use axum::middleware;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post};
 use state::AppState;
 use std::net::SocketAddr;
 use std::process;
@@ -98,7 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route(
             "/api/playlists/{playlist_id}",
-            delete(handlers::delete_playlist),
+            patch(handlers::rename_playlist).delete(handlers::delete_playlist),
         )
         .route(
             "/api/playlists/{playlist_id}/tracks",

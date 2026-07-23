@@ -125,6 +125,19 @@ export async function createPlaylist(
   return data.playlist;
 }
 
+export async function renamePlaylist(
+  playlistId: string,
+  name: string,
+  onUnauthorized?: () => void,
+): Promise<void> {
+  await authOk(
+    `/api/playlists/${encodeURIComponent(playlistId)}`,
+    "api.renamePlaylistFailed",
+    { method: "PATCH", body: JSON.stringify({ name }) },
+    onUnauthorized,
+  );
+}
+
 export async function deletePlaylist(
   playlistId: string,
   onUnauthorized?: () => void,

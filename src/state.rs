@@ -1501,6 +1501,31 @@ impl AppState {
         }
     }
 
+    /// Rename a playlist. Returns false if the name is invalid, the playlist
+    /// doesn't exist, or Redis errors occur.
+    pub async fn rename_playlist(&self, playlist_id: &str, name: &str) -> bool {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > PLAYLIST_NAME_MAX_CHARS {
+            return false;
+        }
+        let Some(mut playlist) = self.get_playlist(playlist_id).await else {
+            return false;
+        };
+        playlist.name = name.to_string();
+        let json_str = serde_json::to_string(&playlist).expect("Playlist serializes to JSON");
+        let mut conn = self.redis.clone();
+        match conn
+            .hset::<_, _, _, ()>(REDIS_KEY_PLAYLISTS, playlist_id, json_str)
+            .await
+        {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!("Redis error renaming playlist {playlist_id}: {e}");
+                false
+            }
+        }
+    }
+
     pub async fn get_playlist(&self, playlist_id: &str) -> Option<Playlist> {
         let mut conn = self.redis.clone();
         match conn
