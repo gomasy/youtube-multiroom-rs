@@ -14,21 +14,21 @@ use tokio::process::Command;
 use tokio::sync::{Mutex, broadcast};
 use tokio::time;
 
-const REDIS_KEY_TRACKS: &str = "youtube:tracks";
-const REDIS_KEY_TRACKS_ORDER: &str = "youtube:tracks_order";
+const REDIS_KEY_ACTIVE_PLAYLIST: &str = "youtube:active_playlist";
 const REDIS_KEY_DEVICES: &str = "youtube:devices";
 const REDIS_KEY_PLAYBACK_MODE: &str = "youtube:playback_mode";
-
-const PLAYBACK_MODES: [&str; 3] = ["loop", "shuffle", "off"];
-const DEFAULT_PLAYBACK_MODE: &str = "off";
+const REDIS_KEY_PLAYLISTS: &str = "youtube:playlists";
+const REDIS_KEY_SLEEP_TIMER: &str = "youtube:sleep_timer";
+const REDIS_KEY_TRACKS: &str = "youtube:tracks";
+const REDIS_KEY_TRACKS_ORDER: &str = "youtube:tracks_order";
 const REDIS_PENDING_PREFIX: &str = "youtube:pending";
+const REDIS_PLAYLIST_PREFIX: &str = "youtube:playlist";
 /// Each entry is a unique "{track_id}#{millis}" string used as the AudioPlayer
 /// token, so playback events can match and consume entries by value.
 const REDIS_QUEUE_PREFIX: &str = "youtube:queue";
-const REDIS_KEY_PLAYLISTS: &str = "youtube:playlists";
-const REDIS_PLAYLIST_PREFIX: &str = "youtube:playlist";
-const REDIS_KEY_ACTIVE_PLAYLIST: &str = "youtube:active_playlist";
-const REDIS_KEY_SLEEP_TIMER: &str = "youtube:sleep_timer";
+
+const PLAYBACK_MODES: [&str; 3] = ["loop", "shuffle", "off"];
+const DEFAULT_PLAYBACK_MODE: &str = "off";
 
 const PLAYLIST_NAME_MAX_CHARS: usize = 100;
 /// Cap for playlist import to avoid expanding effectively-infinite mix lists.
@@ -41,18 +41,14 @@ const PENDING_TTL_SECS: u64 = 600;
 /// Keep failed download progress visible for a while so reloading clients can
 /// still see the error.
 const DOWNLOAD_ERROR_TTL_SECS: u64 = 60;
-
-/// Prefix added via --progress-template to distinguish progress lines.
-const PROGRESS_PREFIX: &str = "__progress__ ";
-
 /// Failures closer than this are counted as consecutive. Retries arrive within
 /// seconds, so this threshold is generous.
 const FAILURE_RESET_SECS: f64 = 60.0;
-
-const VIDEO_ID_PATTERN: &str = "[a-zA-Z0-9_-]{11}";
-
 /// Per-item timeout for metadata fetches to prevent yt-dlp from stalling.
 const METADATA_TIMEOUT_SECS: u64 = 30;
+/// Prefix added via --progress-template to distinguish progress lines.
+const PROGRESS_PREFIX: &str = "__progress__ ";
+const VIDEO_ID_PATTERN: &str = "[a-zA-Z0-9_-]{11}";
 
 /// Cached audio format extension. Must be kept in sync with AUDIO_MIME.
 const AUDIO_EXT: &str = "m4a";
