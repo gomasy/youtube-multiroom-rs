@@ -56,6 +56,7 @@ youtube-multiroom-rs/
 │           ├── NowPlaying.tsx
 │           ├── PlaybackModeSelector.tsx
 │           ├── PreviewPlayer.tsx
+│           ├── SleepTimer.tsx
 │           ├── ScrollingText.tsx
 │           ├── SeekBar.tsx
 │           ├── Toast.tsx
@@ -216,6 +217,10 @@ The Web UI ships a web app manifest and icons, so it can be installed to the hom
 8. Use 「次に再生に追加」 to append the selected track to the play-next queue of the selected devices; queued tracks play after the current one (before the loop/shuffle mode kicks in) and can be reviewed/removed on each device card
 9. Say 「アレクサ、次の曲」 / 「アレクサ、前の曲」 while playing to skip (play-next queue and playback mode are honored; on Echo Show the on-screen prev/next buttons work too)
 10. Use the ▶ button under 選択中のトラック (Now Playing) to preview the selected track in the browser before sending it to the Echos
+11. Use the filter input at the top of the track list to search by title or channel name (debounced 300 ms, case-insensitive)
+12. Click a playlist name to rename it inline; press Enter to save or Escape to cancel
+13. Press 「選択」 to enter select mode: check individual tracks or 「全選択」 an entire page, then bulk-delete or bulk-add to a playlist in one operation
+14. Set a sleep timer (15 / 30 / 60 / 90 min) below the playback mode selector; when it expires, all devices are stopped and the playback mode is set to off
 
 ## Architecture
 
@@ -229,6 +234,7 @@ The Web UI ships a web app manifest and icons, so it can be installed to the hom
     │    ├── youtube:playlists             # named playlist metadata (hash)
     │    ├── youtube:playlist:{id}         # playlist track ids in order (list)
     │    ├── youtube:active_playlist       # loop/shuffle selection scope (playlist id)
+    │    ├── youtube:sleep_timer          # sleep timer expiry (UNIX seconds, with TTL)
     │    ├── youtube:pending:{device_id}   # queued play command (10 min TTL)
     │    └── youtube:queue:{device_id}     # play-next queue (list of unique entries)
     ├── downloads: Mutex<HashMap>   # in-memory download progress
@@ -243,11 +249,14 @@ The Web UI ships a web app manifest and icons, so it can be installed to the hom
     │  GET    /api/search             YouTube search        │
     │  GET    /api/tracks             track list (paged)    │
     │  POST   /api/tracks/reorder     move a track          │
+    │  POST   /api/tracks/bulk-delete bulk delete tracks    │
     │  DELETE /api/tracks/{id}        delete track          │
     │  GET    /api/playlists          playlist list         │
     │  POST   /api/playlists          create playlist       │
+    │  PATCH  /api/playlists/{id}     rename playlist       │
     │  DELETE /api/playlists/{id}     delete playlist       │
     │  POST   /api/playlists/{id}/tracks       add track    │
+    │  POST   /api/playlists/{id}/tracks/bulk  bulk add     │
     │  DELETE /api/playlists/{id}/tracks/{tid} remove track │
     │  GET    /api/devices            device list           │
     │  DELETE /api/devices/{id}       delete device         │
@@ -316,6 +325,10 @@ Pasting a YouTube playlist URL (`youtube.com/playlist?list=...`, or any YouTube 
 
 `PlaybackController.*` requests (touch controls on an Echo Show, or physical remote buttons) are mapped to the same handlers: play → resume, pause → pause, next/previous → skip. Per the Alexa spec these responses carry only `AudioPlayer` directives and no speech.
 
+### Sleep Timer
+
+A sleep timer can be set from the Web UI (preset durations: 15, 30, 60, 90 minutes). When the timer expires, all devices are stopped and the playback mode is set to "off". The countdown is displayed in real time on all connected clients. Setting a new timer cancels any existing one. The expiry is stored in `youtube:sleep_timer` with a Redis TTL for automatic cleanup; a generation counter prevents stale spawned tasks from firing after cancellation or reset.
+
 ### Browser Preview
 
 The Now Playing card has a small preview player to check a track in the browser before sending it to the Echos. Since `<audio>` elements cannot send an `Authorization` header, the client first calls `GET /api/audio/{id}/url` (Bearer-authenticated) to obtain a signed stream URL — the same HMAC scheme used for Echo playback — and feeds that to the audio element. Live tracks are relayed through `/live` and play without seeking.
@@ -324,9 +337,9 @@ The Now Playing card has a small preview player to check a track in the browser 
 
 Audio extraction is handled via WebSocket to avoid reverse proxy read timeouts.
 The client sends `{ "type": "extract_audio", "url": "..." }` and receives `extract_audio_result` or `extract_audio_error`; a playlist URL instead answers with `playlist_import_result` (`name`, `total`) once the background import has started.
-The client can also send `{ "type": "set_playback_mode", "mode": "off" | "loop" | "shuffle" }`, `{ "type": "set_active_playlist", "playlist": "<id>" | null }`, and `{ "type": "ping" }` (answered with `pong`).
+The client can also send `{ "type": "set_playback_mode", "mode": "off" | "loop" | "shuffle" }`, `{ "type": "set_active_playlist", "playlist": "<id>" | null }`, `{ "type": "set_sleep_timer", "minutes": <number> | null }` (null or 0 cancels), and `{ "type": "ping" }` (answered with `pong`).
 
-On connect, the server sends an `init` message containing the current device map, playback mode, in-progress downloads, playlists, and the active playlist
+On connect, the server sends an `init` message containing the current device map, playback mode, in-progress downloads, playlists, active playlist, and sleep timer expiry
 (the track list is fetched separately via `GET /api/tracks`).
 
 State changes are broadcast to all WebSocket clients via `tokio::sync::broadcast`:
@@ -336,6 +349,7 @@ State changes are broadcast to all WebSocket clients via `tokio::sync::broadcast
 - `downloads_update` — download progress changed (new download started, progress updated, completed, or failed)
 - `playlists_update` — playlist list or contents changed (full playlist list with counts)
 - `active_playlist_update` — the loop/shuffle selection scope changed
+- `sleep_timer_update` — the sleep timer was set, cancelled, or expired (carries `expires_at` as UNIX seconds, or null)
 
 ## systemd Service
 
@@ -371,13 +385,16 @@ sudo systemctl enable --now yt-multiroom
 | GET | `/api/audio/{id}/live` | Signed URL | Relay live stream audio as ADTS AAC via ffmpeg |
 | GET | `/api/audio/{id}/url` | Yes | Get a signed stream URL for browser preview |
 | GET | `/api/search` | Yes | Search YouTube (`q`, optional `limit`) |
-| GET | `/api/tracks` | Yes | List tracks in order (paginated, optional `playlist`) |
+| GET | `/api/tracks` | Yes | List tracks in order (paginated, optional `playlist` and `q` filter) |
 | POST | `/api/tracks/reorder` | Yes | Move a track within the library or a playlist order |
+| POST | `/api/tracks/bulk-delete` | Yes | Bulk-delete tracks by ID list |
 | DELETE | `/api/tracks/{id}` | Yes | Delete a track and its cached file |
 | GET | `/api/playlists` | Yes | List playlists with track counts |
 | POST | `/api/playlists` | Yes | Create a playlist (`name`) |
+| PATCH | `/api/playlists/{id}` | Yes | Rename a playlist (`name`) |
 | DELETE | `/api/playlists/{id}` | Yes | Delete a playlist (tracks are kept) |
 | POST | `/api/playlists/{id}/tracks` | Yes | Add a track to a playlist (`track_id`) |
+| POST | `/api/playlists/{id}/tracks/bulk` | Yes | Bulk-add tracks to a playlist (`track_ids`) |
 | DELETE | `/api/playlists/{id}/tracks/{track_id}` | Yes | Remove a track from a playlist |
 | GET | `/api/devices` | Yes | List connected devices |
 | DELETE | `/api/devices/{id}` | Yes | Delete a device |
@@ -391,7 +408,7 @@ sudo systemctl enable --now yt-multiroom
 | POST | `/alexa` | Amazon signature | Alexa skill webhook |
 | WS | `/ws` | Yes | Real-time sync & audio extraction |
 
-`GET /api/tracks` accepts `page` (default 1) and `per_page` (default 10, max 100) query parameters and returns:
+`GET /api/tracks` accepts `page` (default 1), `per_page` (default 10, max 100), and `q` (case-insensitive substring filter on title and channel) query parameters and returns:
 
 ```json
 { "tracks": [ ... ], "total": 42, "page": 1, "per_page": 10 }

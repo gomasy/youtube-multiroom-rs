@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { t } from "../i18n";
+import { t, tFmt } from "../i18n";
 
 const PRESETS = [15, 30, 60, 90];
 
@@ -46,7 +46,7 @@ export function SleepTimer({ expiresAt, onSet, onCancel }: Props) {
               className="btn btn-outline btn-sm"
               onClick={() => onSet(m)}
             >
-              {t("sleep.minutes").replace("{m}", String(m))}
+              {tFmt("sleep.minutes", { m })}
             </button>
           ))}
         </div>

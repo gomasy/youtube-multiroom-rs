@@ -58,6 +58,7 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [bulkMenuOpen, setBulkMenuOpen] = useState(false);
+  const [renameName, setRenameName] = useState<string | null>(null);
 
   const totalPages = lastPage(total);
   const viewingPlaylist = playlists.find((p) => p.id === viewPlaylist) ?? null;
@@ -257,8 +258,6 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
       showToast(`${t("common.error")}: ${(e as Error).message}`);
     }
   }
-
-  const [renameName, setRenameName] = useState<string | null>(null);
 
   async function submitRename() {
     const name = (renameName ?? "").trim();
