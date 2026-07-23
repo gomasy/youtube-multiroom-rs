@@ -61,6 +61,7 @@
   "history.tracks": "Tracks",
   "history.deletePlaylist": "Delete playlist",
   "history.playlistEmpty": "This playlist is empty. Use the add button in the library to add tracks.",
+  "history.filterPlaceholder": "Filter by title or channel...",
   "history.noTracks": "No tracks",
   "history.dragToReorder": "Drag to reorder",
   "history.addToPlaylist": "Add to playlist",

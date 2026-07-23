@@ -65,9 +65,11 @@ export async function fetchTracks(
   onUnauthorized?: () => void,
   token?: string,
   playlistId?: string | null,
+  filter?: string,
 ): Promise<TracksPage> {
   let url = `/api/tracks?page=${page}&per_page=${perPage}`;
   if (playlistId) url += `&playlist=${encodeURIComponent(playlistId)}`;
+  if (filter) url += `&q=${encodeURIComponent(filter)}`;
   return authJson(
     url,
     "api.fetchTracksFailed",

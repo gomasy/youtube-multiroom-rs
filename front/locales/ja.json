@@ -61,6 +61,7 @@
   "history.tracks": "取得済みトラック",
   "history.deletePlaylist": "プレイリストを削除",
   "history.playlistEmpty": "このプレイリストは空です。ライブラリの ♪＋ ボタンで追加できます。",
+  "history.filterPlaceholder": "タイトル・チャンネル名で絞り込み...",
   "history.noTracks": "トラックがありません",
   "history.dragToReorder": "ドラッグで並べ替え",
   "history.addToPlaylist": "プレイリストに追加",

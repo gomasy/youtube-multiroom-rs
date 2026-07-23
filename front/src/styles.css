@@ -796,6 +796,21 @@ body {
   justify-content: space-between;
   gap: 8px;
 }
+.history-filter {
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+  margin-bottom: 10px;
+  transition: border-color 0.2s;
+}
+.history-filter:focus { border-color: var(--accent); }
+.history-filter::placeholder { color: var(--text-dim); }
+
 .history-empty {
   font-size: 12px;
   color: var(--text-dim);

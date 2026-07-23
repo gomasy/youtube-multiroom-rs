@@ -1030,13 +1030,29 @@ impl AppState {
 
     /// Return tracks for the given page (1-based) and total count.
     /// If playlist_id is given, return in that playlist's track order.
+    /// If filter is given, only include tracks whose title or channel
+    /// contains the substring (case-insensitive).
     pub async fn list_tracks_page(
         &self,
         playlist_id: Option<&str>,
         page: usize,
         per_page: usize,
+        filter: Option<&str>,
     ) -> (Vec<AudioTrack>, usize) {
         let tracks = self.scoped_tracks(playlist_id).await;
+        let tracks = match filter {
+            Some(q) => {
+                let q = q.to_lowercase();
+                tracks
+                    .into_iter()
+                    .filter(|t| {
+                        t.title.to_lowercase().contains(&q)
+                            || t.channel.to_lowercase().contains(&q)
+                    })
+                    .collect()
+            }
+            None => tracks,
+        };
         let total = tracks.len();
         let start = page.saturating_sub(1).saturating_mul(per_page);
         let items = tracks.into_iter().skip(start).take(per_page).collect();

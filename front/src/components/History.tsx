@@ -49,6 +49,9 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
   const listRef = useRef<HTMLDivElement>(null);
   const prevBtnRef = useRef<HTMLButtonElement>(null);
   const nextBtnRef = useRef<HTMLButtonElement>(null);
+  const [filterInput, setFilterInput] = useState("");
+  const [filter, setFilter] = useState("");
+  const filterTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   const totalPages = lastPage(total);
   const viewingPlaylist = playlists.find((p) => p.id === viewPlaylist) ?? null;
@@ -61,7 +64,7 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
 
   useEffect(() => {
     if (!active) return;
-    if (!viewPlaylist && initialData && consumedInitial.current !== initialData) {
+    if (!viewPlaylist && !filter && initialData && consumedInitial.current !== initialData) {
       consumedInitial.current = initialData;
       if (page === initialData.page) {
         setTracks(initialData.tracks);
@@ -71,7 +74,7 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
       }
     }
     let cancelled = false;
-    fetchTracks(page, PER_PAGE, onUnauthorized, undefined, viewPlaylist)
+    fetchTracks(page, PER_PAGE, onUnauthorized, undefined, viewPlaylist, filter || undefined)
       .then((data) => {
         if (cancelled) return;
         setTracks(data.tracks);
@@ -84,7 +87,7 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
     return () => {
       cancelled = true;
     };
-  }, [active, initialData, page, refreshKey, localVersion, viewPlaylist, onUnauthorized]);
+  }, [active, initialData, page, refreshKey, localVersion, viewPlaylist, filter, onUnauthorized]);
 
   useEffect(() => {
     if (flipDir === 0) return;
@@ -102,7 +105,18 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
     setViewPlaylist(playlistId);
     setPage(1);
     setMenuTrackId(null);
+    setFilterInput("");
+    setFilter("");
     resetDrag();
+  }
+
+  function handleFilterChange(value: string) {
+    setFilterInput(value);
+    clearTimeout(filterTimer.current);
+    filterTimer.current = setTimeout(() => {
+      setFilter(value.trim());
+      setPage(1);
+    }, 300);
   }
 
   function updateDropIndex(clientY: number) {
@@ -134,7 +148,7 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
   }
 
   function handleDragStart(e: React.PointerEvent<HTMLElement>, track: Track, index: number) {
-    if (total < 2) return;
+    if (total < 2 || filter) return;
     e.preventDefault();
     listRef.current?.setPointerCapture(e.pointerId);
     dragOrigin.current = { track, globalIndex: (loadedPage - 1) * PER_PAGE + index };
@@ -317,6 +331,14 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
           </button>
         )}
       </div>
+
+      <input
+        type="text"
+        className="history-filter"
+        placeholder={t("history.filterPlaceholder")}
+        value={filterInput}
+        onChange={(e) => handleFilterChange(e.target.value)}
+      />
 
       {total === 0 && (
         <div className="history-empty">

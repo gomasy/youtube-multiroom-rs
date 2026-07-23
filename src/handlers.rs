@@ -327,6 +327,8 @@ pub struct TracksQuery {
     per_page: Option<usize>,
     /// When specified, return tracks in this playlist's order (omit for full library).
     playlist: Option<String>,
+    /// Case-insensitive substring filter on title and channel name.
+    q: Option<String>,
 }
 
 /// GET /api/tracks?page=1&per_page=10&playlist={id}
@@ -342,8 +344,9 @@ pub async fn list_tracks(
     }
     let per_page = query.per_page.unwrap_or(10).clamp(1, 100);
     let page = query.page.unwrap_or(1).max(1);
+    let filter = query.q.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty());
     let (tracks, total) = state
-        .list_tracks_page(query.playlist.as_deref(), page, per_page)
+        .list_tracks_page(query.playlist.as_deref(), page, per_page, filter)
         .await;
     Ok(Json(json!({
         "tracks": tracks,
