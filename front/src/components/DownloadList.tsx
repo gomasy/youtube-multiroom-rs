@@ -3,6 +3,7 @@ import type { DownloadProgress } from "../types";
 
 interface Props {
   downloads: DownloadProgress[];
+  onCancel: () => void;
 }
 
 function statusText(d: DownloadProgress): string {
@@ -20,11 +21,20 @@ function statusText(d: DownloadProgress): string {
   }
 }
 
-export function DownloadList({ downloads }: Props) {
+export function DownloadList({ downloads, onCancel }: Props) {
   if (downloads.length === 0) return null;
+
+  const hasActive = downloads.some((d) => d.status !== "error");
 
   return (
     <div className="downloads-section">
+      {hasActive && (
+        <div className="downloads-header">
+          <button className="text-btn text-btn-danger" onClick={onCancel}>
+            {t("download.cancel")}
+          </button>
+        </div>
+      )}
       {downloads.map((d) => {
         const indeterminate = d.status === "metadata" || d.status === "processing";
         return (

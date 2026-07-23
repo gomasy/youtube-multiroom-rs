@@ -864,6 +864,9 @@ async fn handle_ws_message(
                 state.broadcast_active_playlist().await;
             }
         }
+        "cancel_downloads" => {
+            state.cancel_downloads().await;
+        }
         _ => {}
     }
 }

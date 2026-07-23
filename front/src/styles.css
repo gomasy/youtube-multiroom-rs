@@ -180,6 +180,10 @@ body {
   gap: 8px;
   margin-bottom: 24px;
 }
+.downloads-header {
+  display: flex;
+  justify-content: flex-end;
+}
 .download-item {
   background: var(--surface);
   border: 1px solid var(--border);

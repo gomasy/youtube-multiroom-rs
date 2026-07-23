@@ -133,7 +133,11 @@ export function App() {
           }}
           showToast={showToast}
         />
-        <DownloadList downloads={downloads} />
+        <DownloadList downloads={downloads} onCancel={() => {
+          if (!sendMessage({ type: "cancel_downloads" })) {
+            showToast(t("common.notConnected"));
+          }
+        }} />
         <div className="main-grid">
           <div className="main-left">
             <NowPlaying

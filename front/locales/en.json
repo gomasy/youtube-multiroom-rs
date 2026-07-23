@@ -83,6 +83,7 @@
   "download.metadata": "Fetching info...",
   "download.processing": "Converting...",
   "download.error": "Error",
+  "download.cancel": "Stop all",
 
   "preview.playbackFailed": "Preview playback failed",
   "preview.pause": "Pause preview",

@@ -83,6 +83,7 @@
   "download.metadata": "情報取得中...",
   "download.processing": "変換中...",
   "download.error": "エラー",
+  "download.cancel": "すべて停止",
 
   "preview.playbackFailed": "試聴の再生に失敗しました",
   "preview.pause": "試聴を一時停止",

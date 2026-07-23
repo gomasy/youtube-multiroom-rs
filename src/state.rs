@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
@@ -399,6 +399,9 @@ pub struct AppState {
     /// In-progress download progress (video ID → progress). In-process only;
     /// lost on restart (clients re-sync via the init snapshot).
     downloads: Mutex<HashMap<String, DownloadProgress>>,
+    /// Bumped on cancel; each import captures the value at start and stops
+    /// when it changes, so concurrent imports are all cancelled correctly.
+    import_cancel_gen: AtomicU64,
     /// Per-device per-track consecutive playback failure records (see
     /// record_playback_failure). Tracked per-track so interleaved failures from
     /// the current and ENQUEUE'd next track don't reset each other's count.
@@ -432,6 +435,7 @@ impl AppState {
             order_lock: Mutex::new(()),
             extract_locks: Mutex::new(HashMap::new()),
             downloads: Mutex::new(HashMap::new()),
+            import_cancel_gen: AtomicU64::new(0),
             playback_failures: Mutex::new(HashMap::new()),
         }))
     }
@@ -727,6 +731,20 @@ impl AppState {
                 })
                 .await;
         });
+    }
+
+    /// Cancel all in-progress downloads and clear the progress display.
+    /// A running playlist import will stop after the current video finishes.
+    pub async fn cancel_downloads(&self) {
+        self.import_cancel_gen.fetch_add(1, Ordering::Relaxed);
+        self.update_downloads(|downloads| {
+            if downloads.is_empty() {
+                return false;
+            }
+            downloads.clear();
+            true
+        })
+        .await;
     }
 
     /// Return in-progress downloads sorted by start time (wire format for init / downloads_update).
@@ -1721,9 +1739,17 @@ impl AppState {
 
         let total = video_ids.len();
         let state = self.clone();
+        let cancel_gen = self.import_cancel_gen.load(Ordering::Relaxed);
         tokio::spawn(async move {
             let mut imported = 0;
             for video_id in &video_ids {
+                if state.import_cancel_gen.load(Ordering::Relaxed) != cancel_gen {
+                    tracing::info!(
+                        "Playlist import cancelled: '{}' ({imported}/{total} imported)",
+                        playlist.name
+                    );
+                    break;
+                }
                 let url = format!("https://www.youtube.com/watch?v={video_id}");
                 match state.extract_audio(&url).await {
                     Ok(track) => {
