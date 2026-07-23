@@ -84,6 +84,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .unwrap_or_else(|e| die(e));
 
+    state.restore_sleep_timer().await;
+
     let app = Router::new()
         .route("/api/audio/{audio_id}/stream", get(handlers::stream_audio))
         .route("/api/audio/{audio_id}/live", get(handlers::live_audio))

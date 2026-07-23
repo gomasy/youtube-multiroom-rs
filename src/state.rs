@@ -1360,23 +1360,42 @@ impl AppState {
         let expiry = now_f64() + (minutes as f64) * 60.0;
 
         let mut conn = self.redis.clone();
-        // Store with TTL so it auto-cleans
         let ttl_secs = (minutes * 60) + 10;
         let _: Result<(), _> = conn
             .set_ex::<_, _, ()>(REDIS_KEY_SLEEP_TIMER, expiry, ttl_secs)
             .await;
 
+        self.spawn_sleep_expiry(time::Duration::from_secs(minutes * 60), generation);
+        expiry
+    }
+
+    /// Re-spawn the sleep timer task after a server restart. If a timer is
+    /// still active in Redis, calculate the remaining time and schedule the
+    /// expiry task so the timer actually fires.
+    pub async fn restore_sleep_timer(self: &Arc<Self>) {
+        let Some(expiry) = self.sleep_timer().await else {
+            return;
+        };
+        let remaining_secs = expiry - now_f64();
+        if remaining_secs <= 0.0 {
+            self.cancel_sleep_timer().await;
+            return;
+        }
+        let generation = self.sleep_timer_gen.load(Ordering::Relaxed);
+        self.spawn_sleep_expiry(time::Duration::from_secs_f64(remaining_secs), generation);
+        tracing::info!("Restored sleep timer ({remaining_secs:.0}s remaining)");
+    }
+
+    fn spawn_sleep_expiry(self: &Arc<Self>, delay: time::Duration, generation: u64) {
         let state = self.clone();
         tokio::spawn(async move {
-            time::sleep(time::Duration::from_secs(minutes * 60)).await;
+            time::sleep(delay).await;
             if state.sleep_timer_gen.load(Ordering::Relaxed) != generation {
                 return;
             }
             tracing::info!("Sleep timer expired, stopping all devices");
-            // Clear the timer key
             let mut conn = state.redis.clone();
             let _: Result<(), _> = conn.del::<_, ()>(REDIS_KEY_SLEEP_TIMER).await;
-            // Set mode to off and stop all devices
             state.set_playback_mode("off").await;
             state.broadcast_playback_mode("off").await;
             let device_ids = state.device_ids().await.unwrap_or_default();
@@ -1388,8 +1407,6 @@ impl AppState {
             state.broadcast_devices().await;
             state.broadcast_sleep_timer().await;
         });
-
-        expiry
     }
 
     /// Cancel the sleep timer.
