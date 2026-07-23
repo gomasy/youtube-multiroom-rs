@@ -220,7 +220,7 @@ The Web UI ships a web app manifest and icons, so it can be installed to the hom
 11. Use the filter input at the top of the track list to search by title or channel name (debounced 300 ms, case-insensitive)
 12. Click a playlist name to rename it inline; press Enter to save or Escape to cancel
 13. Press 「選択」 to enter select mode: check individual tracks or 「全選択」 an entire page, then bulk-delete or bulk-add to a playlist in one operation
-14. Set a sleep timer (15 / 30 / 60 / 90 min) below the playback mode selector; when it expires, all devices are stopped and the playback mode is set to off
+14. Set a sleep timer (15 / 30 min, 1 / 3 / 6 h) below the playback mode selector; when it expires, all devices are stopped and the playback mode is set to off
 
 ## Architecture
 
@@ -327,7 +327,7 @@ Pasting a YouTube playlist URL (`youtube.com/playlist?list=...`, or any YouTube 
 
 ### Sleep Timer
 
-A sleep timer can be set from the Web UI (preset durations: 15, 30, 60, 90 minutes). When the timer expires, all devices are stopped and the playback mode is set to "off". The countdown is displayed in real time on all connected clients. Setting a new timer cancels any existing one. The expiry is stored in `youtube:sleep_timer` with a Redis TTL for automatic cleanup; a generation counter prevents stale spawned tasks from firing after cancellation or reset.
+A sleep timer can be set from the Web UI (preset durations: 15 min, 30 min, 1 hour, 3 hours, 6 hours). When the timer expires, all devices are stopped and the playback mode is set to "off". The countdown is displayed in real time on all connected clients. Setting a new timer cancels any existing one. The expiry is stored in `youtube:sleep_timer` with a Redis TTL for automatic cleanup; a generation counter prevents stale spawned tasks from firing after cancellation or reset.
 
 ### Browser Preview
 
