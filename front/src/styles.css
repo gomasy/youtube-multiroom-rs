@@ -525,11 +525,7 @@ body {
 
 /* ── Sleep timer ── */
 .sleep-timer-section { margin-bottom: 24px; }
-.sleep-presets {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
+.sleep-select { width: 100%; }
 .sleep-active {
   display: flex;
   align-items: center;
@@ -746,9 +742,8 @@ body {
   color: var(--text-dim);
   flex-shrink: 0;
 }
-.scope-select {
-  flex: 1;
-  min-width: 0;
+.select,
+.input {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -756,9 +751,15 @@ body {
   font-size: 13px;
   padding: 8px 10px;
   outline: none;
-  cursor: pointer;
 }
-.scope-select:focus { border-color: var(--accent); }
+.select:focus,
+.input:focus { border-color: var(--accent); }
+.input::placeholder { color: var(--text-dim); }
+.select { cursor: pointer; }
+.scope-select {
+  flex: 1;
+  min-width: 0;
+}
 
 /* ── Playlist tabs ── */
 .playlist-bar {
@@ -797,16 +798,9 @@ body {
   gap: 6px;
 }
 .playlist-new-input {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--text);
-  font-size: 13px;
   padding: 6px 10px;
   width: 160px;
-  outline: none;
 }
-.playlist-new-input:focus { border-color: var(--accent); }
 
 /* ── History header (プレイリスト表示の操作付きラベル) ── */
 .history-header {
@@ -824,17 +818,8 @@ body {
 .history-filter {
   flex: 1;
   min-width: 0;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 8px 10px;
-  color: var(--text);
-  font-size: 13px;
-  outline: none;
   transition: border-color 0.2s;
 }
-.history-filter:focus { border-color: var(--accent); }
-.history-filter::placeholder { color: var(--text-dim); }
 .history-toolbar .btn.active {
   border-color: var(--accent);
   color: var(--accent);

@@ -44,7 +44,7 @@ export function PlaybackModeSelector({
           </label>
           <select
             id="playback-scope"
-            className="scope-select"
+            className="select scope-select"
             value={activePlaylist ?? ""}
             onChange={(e) => onActivePlaylistChange(e.target.value || null)}
           >

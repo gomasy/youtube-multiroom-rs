@@ -2,7 +2,6 @@ import { ScrollingText } from "./ScrollingText";
 import { formatDuration } from "../format";
 import type { Track } from "../types";
 
-// Shared thumbnail + title + metadata display for track list and search result rows
 export function TrackRowInfo({ track }: { track: Track }) {
   return (
     <>

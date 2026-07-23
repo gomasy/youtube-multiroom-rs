@@ -1,19 +1,13 @@
 import { useEffect, useState } from "react";
+import { formatTime } from "../format";
 import { t, tFmt } from "../i18n";
 
-const PRESETS = [15, 30, 60, 90];
+const PRESETS = [15, 30, 60, 180, 360];
 
 interface Props {
   expiresAt: number | null;
   onSet: (minutes: number) => void;
   onCancel: () => void;
-}
-
-function formatRemaining(seconds: number): string {
-  if (seconds <= 0) return "0:00";
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
 export function SleepTimer({ expiresAt, onSet, onCancel }: Props) {
@@ -33,23 +27,31 @@ export function SleepTimer({ expiresAt, onSet, onCancel }: Props) {
       <div className="section-label">{t("sleep.label")}</div>
       {active ? (
         <div className="sleep-active">
-          <span className="sleep-remaining">{formatRemaining(remaining)}</span>
+          <span className="sleep-remaining">{formatTime(remaining)}</span>
           <button className="text-btn text-btn-danger" onClick={onCancel}>
             {t("sleep.cancel")}
           </button>
         </div>
       ) : (
-        <div className="sleep-presets">
+        <select
+          className="select sleep-select"
+          value=""
+          onChange={(e) => {
+            const minutes = Number(e.target.value);
+            if (minutes > 0) onSet(minutes);
+          }}
+        >
+          <option value="" disabled>
+            {t("sleep.selectTime")}
+          </option>
           {PRESETS.map((m) => (
-            <button
-              key={m}
-              className="btn btn-outline btn-sm"
-              onClick={() => onSet(m)}
-            >
-              {tFmt("sleep.minutes", { m })}
-            </button>
+            <option key={m} value={m}>
+              {m >= 60 && m % 60 === 0
+                ? tFmt("sleep.hours", { h: m / 60 })
+                : tFmt("sleep.minutes", { m })}
+            </option>
           ))}
-        </div>
+        </select>
       )}
     </div>
   );

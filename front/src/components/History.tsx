@@ -106,7 +106,43 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
     return () => clearInterval(timer);
   }, [flipDir, page, totalPages]);
 
-  if (total === 0 && !viewPlaylist && playlists.length === 0) return null;
+  if (total === 0 && !filter && !viewPlaylist && playlists.length === 0) return null;
+
+  function showError(e: unknown) {
+    showToast(`${t("common.error")}: ${(e as Error).message}`);
+  }
+
+  function renderNameForm(
+    value: string,
+    onChange: (v: string) => void,
+    onSubmit: () => void,
+    onCancel: () => void,
+    submitLabel: string,
+    placeholder?: string,
+  ) {
+    return (
+      <span className="playlist-new">
+        <input
+          type="text"
+          className="input playlist-new-input"
+          placeholder={placeholder}
+          autoFocus
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") onSubmit();
+            if (e.key === "Escape") onCancel();
+          }}
+        />
+        <button className="btn btn-sm" onClick={onSubmit}>
+          {submitLabel}
+        </button>
+        <button className="text-btn" onClick={onCancel}>
+          {t("history.cancel")}
+        </button>
+      </span>
+    );
+  }
 
   function exitSelectMode() {
     setSelectMode(false);
@@ -211,7 +247,7 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
     try {
       await reorderTrack(id, newIndex, onUnauthorized, viewPlaylist);
     } catch (e) {
-      showToast(`${t("common.error")}: ${(e as Error).message}`);
+      showError(e);
     } finally {
       setLocalVersion((v) => v + 1);
     }
@@ -229,7 +265,7 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
       setLocalVersion((v) => v + 1);
       showToast(t("history.trackDeleted"));
     } catch (e) {
-      showToast(`${t("common.error")}: ${(e as Error).message}`);
+      showError(e);
     }
   }
 
@@ -240,7 +276,7 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
       setLocalVersion((v) => v + 1);
       showToast(t("history.removedFromPlaylist"));
     } catch (e) {
-      showToast(`${t("common.error")}: ${(e as Error).message}`);
+      showError(e);
     }
   }
 
@@ -257,7 +293,7 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
       onPlaylistCreated(playlist);
       switchView(playlist.id);
     } catch (e) {
-      showToast(`${t("common.error")}: ${(e as Error).message}`);
+      showError(e);
     }
   }
 
@@ -272,7 +308,7 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
       setRenameName(null);
       showToast(t("history.playlistRenamed"));
     } catch (e) {
-      showToast(`${t("common.error")}: ${(e as Error).message}`);
+      showError(e);
     }
   }
 
@@ -283,7 +319,7 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
       showToast(`${t("history.playlistDeleted")}: ${viewingPlaylist.name}`);
       switchView(null);
     } catch (e) {
-      showToast(`${t("common.error")}: ${(e as Error).message}`);
+      showError(e);
     }
   }
 
@@ -319,7 +355,7 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
       setLocalVersion((v) => v + 1);
       showToast(`${deleted} ${t("history.tracksDeleted")}`);
     } catch (e) {
-      showToast(`${t("common.error")}: ${(e as Error).message}`);
+      showError(e);
     }
   }
 
@@ -331,7 +367,7 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
       showToast(data.message || t("history.addedToPlaylist"));
       exitSelectMode();
     } catch (e) {
-      showToast(`${t("common.error")}: ${(e as Error).message}`);
+      showError(e);
     }
   }
 
@@ -341,7 +377,7 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
       const data = await addToPlaylist(playlistId, trackId, onUnauthorized);
       showToast(data.message || t("history.addedToPlaylist"));
     } catch (e) {
-      showToast(`${t("common.error")}: ${(e as Error).message}`);
+      showError(e);
     }
   }
 
@@ -371,51 +407,23 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
           >
             ＋
           </button>
-        ) : (
-          <span className="playlist-new">
-            <input
-              type="text"
-              className="playlist-new-input"
-              placeholder={t("history.playlistName")}
-              autoFocus
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") submitNewPlaylist();
-                if (e.key === "Escape") setNewName(null);
-              }}
-            />
-            <button className="btn btn-sm" onClick={submitNewPlaylist}>
-              {t("history.create")}
-            </button>
-            <button className="text-btn" onClick={() => setNewName(null)}>
-              {t("history.cancel")}
-            </button>
-          </span>
+        ) : renderNameForm(
+          newName,
+          setNewName,
+          submitNewPlaylist,
+          () => setNewName(null),
+          t("history.create"),
+          t("history.playlistName"),
         )}
       </div>
 
       <div className="section-label history-header">
-        {viewingPlaylist && renameName !== null ? (
-          <span className="playlist-new">
-            <input
-              type="text"
-              className="playlist-new-input"
-              autoFocus
-              value={renameName}
-              onChange={(e) => setRenameName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") submitRename();
-                if (e.key === "Escape") setRenameName(null);
-              }}
-            />
-            <button className="btn btn-sm" onClick={submitRename}>
-              {t("history.rename")}
-            </button>
-            <button className="text-btn" onClick={() => setRenameName(null)}>
-              {t("history.cancel")}
-            </button>
-          </span>
+        {viewingPlaylist && renameName !== null ? renderNameForm(
+          renameName!,
+          setRenameName,
+          submitRename,
+          () => setRenameName(null),
+          t("history.rename"),
         ) : (
           <>
             <span
@@ -442,7 +450,7 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
       <div className="history-toolbar">
         <input
           type="text"
-          className="history-filter"
+          className="input history-filter"
           placeholder={t("history.filterPlaceholder")}
           value={filterInput}
           onChange={(e) => handleFilterChange(e.target.value)}

@@ -310,11 +310,7 @@ fn search_entry(v: &Value) -> Option<AudioTrack> {
         // Flat entries have inconsistent thumbnail formats; use a known URL pattern
         thumbnail: format!("https://i.ytimg.com/vi/{id}/mqdefault.jpg"),
         duration: v["duration"].as_f64().unwrap_or(0.0) as u64,
-        channel: v["channel"]
-            .as_str()
-            .or(v["uploader"].as_str())
-            .unwrap_or("")
-            .to_string(),
+        channel: AudioTrack::extract_channel(v),
         is_live: v["live_status"].as_str() == Some("is_live"),
         created_at: 0.0,
         file_path: String::new(),
@@ -951,11 +947,10 @@ async fn handle_ws_message(
         "set_sleep_timer" => {
             if let Some(minutes) = data["minutes"].as_u64().filter(|&m| m > 0) {
                 state.set_sleep_timer(minutes).await;
-                state.broadcast_sleep_timer().await;
             } else {
                 state.cancel_sleep_timer().await;
-                state.broadcast_sleep_timer().await;
             }
+            state.broadcast_sleep_timer().await;
         }
         _ => {}
     }

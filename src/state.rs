@@ -125,19 +125,21 @@ impl AudioTrack {
         v.to_string()
     }
 
-    /// Build a track from yt-dlp metadata JSON.
-    /// Missing fields are filled with empty values (title falls back to ID).
+    pub(crate) fn extract_channel(meta: &Value) -> String {
+        meta["channel"]
+            .as_str()
+            .or(meta["uploader"].as_str())
+            .unwrap_or("")
+            .to_string()
+    }
+
     fn from_meta(id: &str, meta: &Value, created_at: f64, file_path: String) -> Self {
         Self {
             id: id.to_string(),
             title: meta["title"].as_str().unwrap_or(id).to_string(),
             thumbnail: meta["thumbnail"].as_str().unwrap_or("").to_string(),
             duration: meta["duration"].as_u64().unwrap_or(0),
-            channel: meta["channel"]
-                .as_str()
-                .or(meta["uploader"].as_str())
-                .unwrap_or("")
-                .to_string(),
+            channel: Self::extract_channel(meta),
             is_live: meta["is_live"].as_bool().unwrap_or(false),
             created_at,
             file_path,
@@ -1925,12 +1927,10 @@ impl AppState {
 // Utilities
 // ════════════════════════════════════════
 
-/// Truncate a command's stderr to the first 300 chars for error messages.
-pub fn stderr_snippet(out: &std::process::Output) -> String {
+fn stderr_snippet(out: &std::process::Output) -> String {
     snippet(&String::from_utf8_lossy(&out.stderr))
 }
 
-/// Truncate to the first 300 chars for error messages.
 fn snippet(s: &str) -> String {
     s.chars().take(300).collect()
 }
@@ -2113,7 +2113,7 @@ fn file_mtime_f64(path: &Path) -> f64 {
         .unwrap_or_else(now_f64)
 }
 
-pub fn now_f64() -> f64 {
+fn now_f64() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
