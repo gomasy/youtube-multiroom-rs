@@ -13,6 +13,7 @@ interface WSCallbacks {
   onDownloadsUpdate: (downloads: DownloadProgress[]) => void;
   onPlaylistsUpdate: (playlists: Playlist[]) => void;
   onActivePlaylist: (playlistId: string | null) => void;
+  onSleepTimer: (expiresAt: number | null) => void;
   onPlaylistImportStarted: (name: string, total: number) => void;
   onConnectedChange: (connected: boolean) => void;
 }
@@ -56,6 +57,7 @@ export function useWebSocket(active: boolean, callbacks: WSCallbacks) {
         cbRef.current.onDownloadsUpdate(data.downloads || []);
         cbRef.current.onPlaylistsUpdate(data.playlists || []);
         cbRef.current.onActivePlaylist(data.active_playlist ?? null);
+        cbRef.current.onSleepTimer(data.sleep_timer ?? null);
       } else if (data.type === "device_update") {
         cbRef.current.onDeviceUpdate(data.devices || {});
       } else if (data.type === "tracks_update") {
@@ -72,6 +74,8 @@ export function useWebSocket(active: boolean, callbacks: WSCallbacks) {
         cbRef.current.onPlaylistsUpdate(data.playlists || []);
       } else if (data.type === "active_playlist_update") {
         cbRef.current.onActivePlaylist(data.playlist ?? null);
+      } else if (data.type === "sleep_timer_update") {
+        cbRef.current.onSleepTimer(data.expires_at ?? null);
       } else if (data.type === "playlist_import_result") {
         cbRef.current.onPlaylistImportStarted(data.name, data.total);
       }

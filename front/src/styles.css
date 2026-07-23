@@ -523,6 +523,25 @@ body {
   font-weight: 600;
 }
 
+/* ── Sleep timer ── */
+.sleep-timer-section { margin-bottom: 24px; }
+.sleep-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.sleep-active {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.sleep-remaining {
+  font-size: 20px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
 /* ── Empty states ── */
 .empty-state {
   text-align: center;

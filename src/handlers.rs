@@ -826,6 +826,7 @@ async fn ws_handler(mut socket: WebSocket, state: Arc<AppState>) {
         "downloads": state.downloads_json().await,
         "playlists": state.playlists_json().await,
         "active_playlist": state.active_playlist().await,
+        "sleep_timer": state.sleep_timer().await,
     });
     if socket
         .send(Message::Text(init_msg.to_string().into()))
@@ -942,6 +943,15 @@ async fn handle_ws_message(
         }
         "cancel_downloads" => {
             state.cancel_downloads().await;
+        }
+        "set_sleep_timer" => {
+            if let Some(minutes) = data["minutes"].as_u64().filter(|&m| m > 0) {
+                state.set_sleep_timer(minutes).await;
+                state.broadcast_sleep_timer().await;
+            } else {
+                state.cancel_sleep_timer().await;
+                state.broadcast_sleep_timer().await;
+            }
         }
         _ => {}
     }

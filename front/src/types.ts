@@ -66,6 +66,8 @@ export interface WSInitMessage {
   playlists?: Playlist[];
   /** Loop/shuffle scope playlist ID (null means full library) */
   active_playlist?: string | null;
+  /** Sleep timer expiry (UNIX seconds), null if not set */
+  sleep_timer?: number | null;
 }
 
 export interface WSDeviceUpdateMessage {
@@ -108,6 +110,12 @@ export interface WSActivePlaylistUpdateMessage {
   playlist: string | null;
 }
 
+export interface WSSleepTimerUpdateMessage {
+  type: "sleep_timer_update";
+  /** Expiry time (UNIX seconds), null if cancelled/expired */
+  expires_at: number | null;
+}
+
 /** Response indicating a playlist URL batch import has started (import runs in background) */
 export interface WSPlaylistImportResultMessage {
   type: "playlist_import_result";
@@ -125,4 +133,5 @@ export type WSMessage =
   | WSDownloadsUpdateMessage
   | WSPlaylistsUpdateMessage
   | WSActivePlaylistUpdateMessage
+  | WSSleepTimerUpdateMessage
   | WSPlaylistImportResultMessage;

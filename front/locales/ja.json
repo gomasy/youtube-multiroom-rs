@@ -106,6 +106,10 @@
   "playlistMenu.title": "プレイリストに追加",
   "playlistMenu.empty": "プレイリストがありません。一覧上部の「＋」で作成できます。",
 
+  "sleep.label": "スリープタイマー",
+  "sleep.minutes": "{m}分",
+  "sleep.cancel": "解除",
+
   "common.trackFetched": "取得しました",
   "common.error": "エラー",
   "common.importStarted": "プレイリストから {total} 曲の取り込みを開始しました",

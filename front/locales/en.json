@@ -106,6 +106,10 @@
   "playlistMenu.title": "Add to playlist",
   "playlistMenu.empty": "No playlists. Create one with the \"+\" button above.",
 
+  "sleep.label": "Sleep timer",
+  "sleep.minutes": "{m} min",
+  "sleep.cancel": "Cancel",
+
   "common.trackFetched": "Fetched",
   "common.error": "Error",
   "common.importStarted": "Started importing {total} tracks from playlist",

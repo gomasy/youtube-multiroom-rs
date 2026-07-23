@@ -28,6 +28,7 @@ const REDIS_QUEUE_PREFIX: &str = "youtube:queue";
 const REDIS_KEY_PLAYLISTS: &str = "youtube:playlists";
 const REDIS_PLAYLIST_PREFIX: &str = "youtube:playlist";
 const REDIS_KEY_ACTIVE_PLAYLIST: &str = "youtube:active_playlist";
+const REDIS_KEY_SLEEP_TIMER: &str = "youtube:sleep_timer";
 
 const PLAYLIST_NAME_MAX_CHARS: usize = 100;
 /// Cap for playlist import to avoid expanding effectively-infinite mix lists.
@@ -406,6 +407,9 @@ pub struct AppState {
     /// record_playback_failure). Tracked per-track so interleaved failures from
     /// the current and ENQUEUE'd next track don't reset each other's count.
     playback_failures: Mutex<HashMap<String, HashMap<String, FailureRecord>>>,
+    /// Bumped when the sleep timer is set/cancelled; the spawned timer task
+    /// checks this to know if it's been superseded.
+    sleep_timer_gen: AtomicU64,
 }
 
 impl AppState {
@@ -437,6 +441,7 @@ impl AppState {
             downloads: Mutex::new(HashMap::new()),
             import_cancel_gen: AtomicU64::new(0),
             playback_failures: Mutex::new(HashMap::new()),
+            sleep_timer_gen: AtomicU64::new(0),
         }))
     }
 
@@ -1330,6 +1335,75 @@ impl AppState {
                 false
             }
         }
+    }
+
+    // ── Sleep timer ──
+
+    /// Return the sleep timer expiry as UNIX seconds, or None if not set / expired.
+    pub async fn sleep_timer(&self) -> Option<f64> {
+        let mut conn = self.redis.clone();
+        let expiry: Option<f64> = match conn.get(REDIS_KEY_SLEEP_TIMER).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("Redis error reading sleep timer: {e}");
+                return None;
+            }
+        };
+        expiry.filter(|&t| t > now_f64())
+    }
+
+    /// Set a sleep timer that fires after `minutes` minutes. Spawns a task that
+    /// stops all devices and sets playback mode to "off" when it expires.
+    /// Returns the expiry time (UNIX seconds).
+    pub async fn set_sleep_timer(self: &Arc<Self>, minutes: u64) -> f64 {
+        let generation = self.sleep_timer_gen.fetch_add(1, Ordering::Relaxed) + 1;
+        let expiry = now_f64() + (minutes as f64) * 60.0;
+
+        let mut conn = self.redis.clone();
+        // Store with TTL so it auto-cleans
+        let ttl_secs = (minutes * 60) + 10;
+        let _: Result<(), _> = conn
+            .set_ex::<_, _, ()>(REDIS_KEY_SLEEP_TIMER, expiry, ttl_secs)
+            .await;
+
+        let state = self.clone();
+        tokio::spawn(async move {
+            time::sleep(time::Duration::from_secs(minutes * 60)).await;
+            if state.sleep_timer_gen.load(Ordering::Relaxed) != generation {
+                return;
+            }
+            tracing::info!("Sleep timer expired, stopping all devices");
+            // Clear the timer key
+            let mut conn = state.redis.clone();
+            let _: Result<(), _> = conn.del::<_, ()>(REDIS_KEY_SLEEP_TIMER).await;
+            // Set mode to off and stop all devices
+            state.set_playback_mode("off").await;
+            state.broadcast_playback_mode("off").await;
+            let device_ids = state.device_ids().await.unwrap_or_default();
+            for did in &device_ids {
+                state
+                    .update_device(did, DeviceUpdate::new().status("stopped"))
+                    .await;
+            }
+            state.broadcast_devices().await;
+            state.broadcast_sleep_timer().await;
+        });
+
+        expiry
+    }
+
+    /// Cancel the sleep timer.
+    pub async fn cancel_sleep_timer(&self) {
+        self.sleep_timer_gen.fetch_add(1, Ordering::Relaxed);
+        let mut conn = self.redis.clone();
+        let _: Result<(), _> = conn.del::<_, ()>(REDIS_KEY_SLEEP_TIMER).await;
+    }
+
+    pub async fn broadcast_sleep_timer(&self) {
+        self.broadcast(json!({
+            "type": "sleep_timer_update",
+            "expires_at": self.sleep_timer().await,
+        }));
     }
 
     pub async fn broadcast_playback_mode(&self, mode: &str) {

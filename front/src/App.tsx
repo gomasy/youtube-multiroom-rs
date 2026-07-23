@@ -12,6 +12,7 @@ import { PlaybackModeSelector } from "./components/PlaybackModeSelector";
 import { History } from "./components/History";
 import { AuthModal } from "./components/AuthModal";
 import { ToastContainer, useToast } from "./components/Toast";
+import { SleepTimer } from "./components/SleepTimer";
 import type { Device, DownloadProgress, PlaybackMode, Playlist, Track, TracksPage } from "./types";
 
 export function App() {
@@ -27,6 +28,7 @@ export function App() {
   const [downloads, setDownloads] = useState<DownloadProgress[]>([]);
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [activePlaylist, setActivePlaylist] = useState<string | null>(null);
+  const [sleepTimer, setSleepTimer] = useState<number | null>(null);
   const { toasts, showToast } = useToast();
   const urlInputRef = useRef<UrlInputHandle>(null);
 
@@ -83,6 +85,7 @@ export function App() {
     onDownloadsUpdate: setDownloads,
     onPlaylistsUpdate: setPlaylists,
     onActivePlaylist: setActivePlaylist,
+    onSleepTimer: setSleepTimer,
     onPlaylistImportStarted: handlePlaylistImportStarted,
   });
 
@@ -158,6 +161,19 @@ export function App() {
               playlists={playlists}
               activePlaylist={activePlaylist}
               onActivePlaylistChange={handleActivePlaylistChange}
+            />
+            <SleepTimer
+              expiresAt={sleepTimer}
+              onSet={(minutes) => {
+                if (!sendMessage({ type: "set_sleep_timer", minutes })) {
+                  showToast(t("common.notConnected"));
+                }
+              }}
+              onCancel={() => {
+                if (!sendMessage({ type: "set_sleep_timer", minutes: null })) {
+                  showToast(t("common.notConnected"));
+                }
+              }}
             />
           </div>
           <div className="main-right">
