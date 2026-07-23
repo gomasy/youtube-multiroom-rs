@@ -118,6 +118,8 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
     setViewPlaylist(playlistId);
     setPage(1);
     setMenuTrackId(null);
+    setRenameName(null);
+    clearTimeout(filterTimer.current);
     setFilterInput("");
     setFilter("");
     exitSelectMode();

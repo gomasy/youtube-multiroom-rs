@@ -56,9 +56,9 @@ youtube-multiroom-rs/
 │           ├── NowPlaying.tsx
 │           ├── PlaybackModeSelector.tsx
 │           ├── PreviewPlayer.tsx
-│           ├── SleepTimer.tsx
 │           ├── ScrollingText.tsx
 │           ├── SeekBar.tsx
+│           ├── SleepTimer.tsx
 │           ├── Toast.tsx
 │           ├── TrackRowInfo.tsx
 │           ├── UrlInput.tsx
@@ -226,7 +226,7 @@ The Web UI ships a web app manifest and icons, so it can be installed to the hom
 
 ```
     AppState (Arc)
-    ├── redis: ConnectionManager    # all persistent state
+    ├── redis: ConnectionManager           # all persistent state
     │    ├── youtube:tracks                # track metadata (hash)
     │    ├── youtube:tracks_order          # track display/playback order (list)
     │    ├── youtube:devices               # Echo device states (hash)
@@ -234,16 +234,16 @@ The Web UI ships a web app manifest and icons, so it can be installed to the hom
     │    ├── youtube:playlists             # named playlist metadata (hash)
     │    ├── youtube:playlist:{id}         # playlist track ids in order (list)
     │    ├── youtube:active_playlist       # loop/shuffle selection scope (playlist id)
-    │    ├── youtube:sleep_timer          # sleep timer expiry (UNIX seconds, with TTL)
+    │    ├── youtube:sleep_timer           # sleep timer expiry (UNIX seconds, with TTL)
     │    ├── youtube:pending:{device_id}   # queued play command (10 min TTL)
     │    └── youtube:queue:{device_id}     # play-next queue (list of unique entries)
-    ├── downloads: Mutex<HashMap>   # in-memory download progress
-    └── tx: broadcast::Sender      # real-time sync
+    ├── downloads: Mutex<HashMap>          # in-memory download progress
+    └── tx: broadcast::Sender              # real-time sync
          │
-    ┌────┴─────────────────────────────────────────────────┐
-    │  axum Router                                         │
-    ├──────────────────────────────────────────────────────┤
-    │  GET    /api/audio/{id}/stream  m4a streaming        │
+    ┌────┴──────────────────────────────────────────────────┐
+    │  axum Router                                          │
+    ├───────────────────────────────────────────────────────┤
+    │  GET    /api/audio/{id}/stream  m4a streaming         │
     │  GET    /api/audio/{id}/live    live audio relay      │
     │  GET    /api/audio/{id}/url     signed preview URL    │
     │  GET    /api/search             YouTube search        │
@@ -265,13 +265,13 @@ The Web UI ships a web app manifest and icons, so it can be installed to the hom
     │  POST   /api/queue             add to play-next queue │
     │  DELETE /api/devices/{id}/queue          clear queue  │
     │  DELETE /api/devices/{id}/queue/{entry}  remove item  │
-    │  POST   /api/devices/{id}/seek queue seek              │
+    │  POST   /api/devices/{id}/seek queue seek             │
     │  POST   /api/devices/{id}/stop stop device            │
     │  POST   /alexa                 Alexa webhook          │
     │  WS     /ws                    real-time sync         │
     │  GET    /locales/*             frontend locale JSON   │
     │  GET    /*                     front/dist static      │
-    └──────────────────────────────────────────────────────┘
+    └───────────────────────────────────────────────────────┘
 ```
 
 All state lives in Redis, so tracks, devices, and queued play commands survive server restarts.
