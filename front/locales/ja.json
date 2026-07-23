@@ -69,6 +69,13 @@
   "history.dragToReorder": "ドラッグで並べ替え",
   "history.addToPlaylist": "プレイリストに追加",
   "history.removeFromPlaylist": "プレイリストから外す",
+  "history.selectMode": "選択",
+  "history.cancelSelect": "選択解除",
+  "history.selectAll": "全選択",
+  "history.deselectAll": "全解除",
+  "history.bulkDelete": "一括削除",
+  "history.bulkAddToPlaylist": "一括追加",
+  "history.tracksDeleted": "曲を削除しました",
   "history.deleteTrack": "トラックを削除",
   "history.deleteFailed": "削除に失敗しました",
   "history.trackDeleted": "トラックを削除しました",
@@ -117,5 +124,7 @@
   "api.queueFailed": "キューへの追加に失敗しました",
   "api.removeQueueFailed": "キューからの削除に失敗しました",
   "api.clearQueueFailed": "キューのクリアに失敗しました",
-  "api.renamePlaylistFailed": "プレイリストのリネームに失敗しました"
+  "api.renamePlaylistFailed": "プレイリストのリネームに失敗しました",
+  "api.bulkDeleteFailed": "トラックの一括削除に失敗しました",
+  "api.bulkAddToPlaylistFailed": "プレイリストへの一括追加に失敗しました"
 }

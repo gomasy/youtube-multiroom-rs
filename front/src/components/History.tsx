@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import {
   addToPlaylist,
   authOk,
+  bulkAddToPlaylist,
+  bulkDeleteTracks,
   createPlaylist,
   deletePlaylist,
   fetchTracks,
@@ -53,6 +55,9 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
   const [filterInput, setFilterInput] = useState("");
   const [filter, setFilter] = useState("");
   const filterTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const [selectMode, setSelectMode] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkMenuOpen, setBulkMenuOpen] = useState(false);
 
   const totalPages = lastPage(total);
   const viewingPlaylist = playlists.find((p) => p.id === viewPlaylist) ?? null;
@@ -102,12 +107,19 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
 
   if (total === 0 && !viewPlaylist && playlists.length === 0) return null;
 
+  function exitSelectMode() {
+    setSelectMode(false);
+    setSelected(new Set());
+    setBulkMenuOpen(false);
+  }
+
   function switchView(playlistId: string | null) {
     setViewPlaylist(playlistId);
     setPage(1);
     setMenuTrackId(null);
     setFilterInput("");
     setFilter("");
+    exitSelectMode();
     resetDrag();
   }
 
@@ -274,6 +286,54 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
     }
   }
 
+  function toggleSelect(trackId: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(trackId)) next.delete(trackId);
+      else next.add(trackId);
+      return next;
+    });
+  }
+
+  function selectAllOnPage() {
+    setSelected((prev) => {
+      const pageIds = tracks.map((t) => t.id);
+      const allSelected = pageIds.every((id) => prev.has(id));
+      const next = new Set(prev);
+      if (allSelected) {
+        pageIds.forEach((id) => next.delete(id));
+      } else {
+        pageIds.forEach((id) => next.add(id));
+      }
+      return next;
+    });
+  }
+
+  async function bulkDelete() {
+    if (selected.size === 0) return;
+    try {
+      const { deleted } = await bulkDeleteTracks(Array.from(selected), onUnauthorized);
+      for (const id of selected) onTrackDeleted(id);
+      exitSelectMode();
+      setLocalVersion((v) => v + 1);
+      showToast(`${deleted} ${t("history.tracksDeleted")}`);
+    } catch (e) {
+      showToast(`${t("common.error")}: ${(e as Error).message}`);
+    }
+  }
+
+  async function bulkAddToPlaylistAction(playlistId: string) {
+    if (selected.size === 0) return;
+    setBulkMenuOpen(false);
+    try {
+      const data = await bulkAddToPlaylist(playlistId, Array.from(selected), onUnauthorized);
+      showToast(data.message || t("history.addedToPlaylist"));
+      exitSelectMode();
+    } catch (e) {
+      showToast(`${t("common.error")}: ${(e as Error).message}`);
+    }
+  }
+
   async function addTrackToPlaylist(playlistId: string, trackId: string) {
     setMenuTrackId(null);
     try {
@@ -378,13 +438,59 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
         )}
       </div>
 
-      <input
-        type="text"
-        className="history-filter"
-        placeholder={t("history.filterPlaceholder")}
-        value={filterInput}
-        onChange={(e) => handleFilterChange(e.target.value)}
-      />
+      <div className="history-toolbar">
+        <input
+          type="text"
+          className="history-filter"
+          placeholder={t("history.filterPlaceholder")}
+          value={filterInput}
+          onChange={(e) => handleFilterChange(e.target.value)}
+        />
+        {total > 0 && (
+          <button
+            className={`btn btn-outline btn-sm${selectMode ? " active" : ""}`}
+            onClick={() => { if (selectMode) exitSelectMode(); else setSelectMode(true); }}
+          >
+            {selectMode ? t("history.cancelSelect") : t("history.selectMode")}
+          </button>
+        )}
+      </div>
+
+      {selectMode && tracks.length > 0 && (
+        <div className="bulk-actions">
+          <button className="text-btn" onClick={selectAllOnPage}>
+            {tracks.every((tr) => selected.has(tr.id))
+              ? t("history.deselectAll")
+              : t("history.selectAll")}
+          </button>
+          <span className="bulk-count">{selected.size}</span>
+          <button
+            className="btn btn-sm"
+            disabled={selected.size === 0}
+            onClick={bulkDelete}
+          >
+            {t("history.bulkDelete")}
+          </button>
+          {!viewPlaylist && playlists.length > 0 && (
+            <span className="playlist-menu-anchor">
+              <button
+                className="btn btn-outline btn-sm"
+                disabled={selected.size === 0}
+                onClick={() => setBulkMenuOpen(!bulkMenuOpen)}
+              >
+                {t("history.bulkAddToPlaylist")}
+              </button>
+              {bulkMenuOpen && (
+                <AddToPlaylistMenu
+                  playlists={playlists}
+                  onAdd={(pid) => bulkAddToPlaylistAction(pid)}
+                  onClose={() => setBulkMenuOpen(false)}
+                />
+              )}
+            </span>
+          )}
+        </div>
+      )}
 
       {total === 0 && (
         <div className="history-empty">
@@ -403,20 +509,28 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
       >
         {tracks.map((tr, i) => {
           const isCurrent = currentTrack?.id === tr.id;
+          const isSelected = selected.has(tr.id);
           const classes = ["history-item"];
           if (dragId === tr.id) classes.push("dragging");
           if (dropIndex === i) classes.push("drop-before");
           if (i === tracks.length - 1 && dropIndex === tracks.length) {
             classes.push("drop-after");
           }
+          if (selectMode && isSelected) classes.push("selected");
           return (
             <div
               key={tr.id}
               className={classes.join(" ")}
-              style={isCurrent ? { borderColor: "var(--accent)" } : undefined}
-              onClick={() => onSelectTrack(tr)}
+              style={isCurrent && !selectMode ? { borderColor: "var(--accent)" } : undefined}
+              onClick={() => selectMode ? toggleSelect(tr.id) : onSelectTrack(tr)}
             >
-              {total > 1 && (
+              {selectMode ? (
+                <span className="select-check">
+                  <span className={`select-check-box${isSelected ? " checked" : ""}`}>
+                    {isSelected && <span className="select-check-mark" />}
+                  </span>
+                </span>
+              ) : total > 1 && !filter && (
                 <span
                   className="drag-handle"
                   title={t("history.dragToReorder")}

@@ -69,6 +69,13 @@
   "history.dragToReorder": "Drag to reorder",
   "history.addToPlaylist": "Add to playlist",
   "history.removeFromPlaylist": "Remove from playlist",
+  "history.selectMode": "Select",
+  "history.cancelSelect": "Cancel",
+  "history.selectAll": "Select all",
+  "history.deselectAll": "Deselect all",
+  "history.bulkDelete": "Delete selected",
+  "history.bulkAddToPlaylist": "Add to playlist",
+  "history.tracksDeleted": "track(s) deleted",
   "history.deleteTrack": "Delete track",
   "history.deleteFailed": "Failed to delete",
   "history.trackDeleted": "Track deleted",
@@ -117,5 +124,7 @@
   "api.queueFailed": "Failed to add to queue",
   "api.removeQueueFailed": "Failed to remove from queue",
   "api.clearQueueFailed": "Failed to clear queue",
-  "api.renamePlaylistFailed": "Failed to rename playlist"
+  "api.renamePlaylistFailed": "Failed to rename playlist",
+  "api.bulkDeleteFailed": "Failed to delete tracks",
+  "api.bulkAddToPlaylistFailed": "Failed to add tracks to playlist"
 }

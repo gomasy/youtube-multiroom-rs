@@ -91,6 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/search", get(handlers::search_youtube))
         .route("/api/tracks", get(handlers::list_tracks))
         .route("/api/tracks/reorder", post(handlers::reorder_track))
+        .route("/api/tracks/bulk-delete", post(handlers::bulk_delete_tracks))
         .route("/api/tracks/{track_id}", delete(handlers::delete_track))
         .route(
             "/api/playlists",
@@ -103,6 +104,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/api/playlists/{playlist_id}/tracks",
             post(handlers::add_playlist_track),
+        )
+        .route(
+            "/api/playlists/{playlist_id}/tracks/bulk",
+            post(handlers::bulk_add_playlist_tracks),
         )
         .route(
             "/api/playlists/{playlist_id}/tracks/{track_id}",

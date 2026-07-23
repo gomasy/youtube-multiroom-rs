@@ -796,8 +796,15 @@ body {
   justify-content: space-between;
   gap: 8px;
 }
+.history-toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 10px;
+}
 .history-filter {
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -805,11 +812,58 @@ body {
   color: var(--text);
   font-size: 13px;
   outline: none;
-  margin-bottom: 10px;
   transition: border-color 0.2s;
 }
 .history-filter:focus { border-color: var(--accent); }
 .history-filter::placeholder { color: var(--text-dim); }
+.history-toolbar .btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ── Bulk actions ── */
+.bulk-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.bulk-count {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Select mode checkboxes ── */
+.select-check {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding: 4px 2px;
+}
+.select-check-box {
+  width: 18px; height: 18px;
+  border-radius: 4px;
+  border: 2px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 0.15s, background 0.15s;
+}
+.select-check-box.checked {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+.select-check-mark {
+  width: 8px; height: 8px;
+  background: #fff;
+  border-radius: 2px;
+}
+.history-item.selected {
+  border-color: var(--accent);
+  background: rgba(255, 64, 64, 0.06);
+}
 
 .history-empty {
   font-size: 12px;

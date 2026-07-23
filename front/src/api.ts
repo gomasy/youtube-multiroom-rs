@@ -176,6 +176,31 @@ export async function removeFromPlaylist(
   );
 }
 
+export async function bulkDeleteTracks(
+  trackIds: string[],
+  onUnauthorized?: () => void,
+): Promise<{ deleted: number }> {
+  return authJson(
+    "/api/tracks/bulk-delete",
+    "api.bulkDeleteFailed",
+    { method: "POST", body: JSON.stringify({ track_ids: trackIds }) },
+    onUnauthorized,
+  );
+}
+
+export async function bulkAddToPlaylist(
+  playlistId: string,
+  trackIds: string[],
+  onUnauthorized?: () => void,
+): Promise<{ message?: string }> {
+  return authJson(
+    `/api/playlists/${encodeURIComponent(playlistId)}/tracks/bulk`,
+    "api.bulkAddToPlaylistFailed",
+    { method: "POST", body: JSON.stringify({ track_ids: trackIds }) },
+    onUnauthorized,
+  );
+}
+
 export async function searchYouTube(
   query: string,
   onUnauthorized?: () => void,

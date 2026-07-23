@@ -380,6 +380,61 @@ pub async fn reorder_track(
     Ok(Json(json!({ "status": "ok" })))
 }
 
+#[derive(Deserialize)]
+pub struct BulkDeleteRequest {
+    track_ids: Vec<String>,
+}
+
+/// POST /api/tracks/bulk-delete
+pub async fn bulk_delete_tracks(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BulkDeleteRequest>,
+) -> AppResult<Json<Value>> {
+    let mut deleted = 0u32;
+    for id in &req.track_ids {
+        if state.remove_track(id).await.is_some() {
+            deleted += 1;
+        }
+    }
+    if deleted > 0 {
+        state.broadcast_tracks().await;
+        state.broadcast_devices().await;
+        state.broadcast_playlists().await;
+    }
+    Ok(Json(json!({ "status": "ok", "deleted": deleted })))
+}
+
+#[derive(Deserialize)]
+pub struct BulkPlaylistTrackRequest {
+    track_ids: Vec<String>,
+}
+
+/// POST /api/playlists/:id/tracks/bulk
+pub async fn bulk_add_playlist_tracks(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(playlist_id): Path<String>,
+    Json(req): Json<BulkPlaylistTrackRequest>,
+) -> AppResult<Json<Value>> {
+    playlist_or_404(&state, &playlist_id).await?;
+    let mut added = 0u32;
+    for id in &req.track_ids {
+        if state.get_track(id).await.is_some() && state.add_playlist_track(&playlist_id, id).await {
+            added += 1;
+        }
+    }
+    if added > 0 {
+        state.broadcast_playlists().await;
+        state.broadcast_tracks().await;
+    }
+    let locale = client_locale(&headers, &state);
+    Ok(Json(json!({
+        "status": "ok",
+        "added": added,
+        "message": t!("api_bulk_added_to_playlist", locale = &locale, count = added),
+    })))
+}
+
 /// DELETE /api/tracks/:id
 pub async fn delete_track(
     State(state): State<Arc<AppState>>,
