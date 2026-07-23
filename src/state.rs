@@ -1047,8 +1047,7 @@ impl AppState {
                 tracks
                     .into_iter()
                     .filter(|t| {
-                        t.title.to_lowercase().contains(&q)
-                            || t.channel.to_lowercase().contains(&q)
+                        t.title.to_lowercase().contains(&q) || t.channel.to_lowercase().contains(&q)
                     })
                     .collect()
             }
