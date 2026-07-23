@@ -62,9 +62,11 @@ RUN touch src/main.rs && cargo build --release
 FROM alpine:latest
 # deno is needed as yt-dlp's JS runtime. The apk yt-dlp may lag behind, so we
 # install the latest PyPI release via pipx as before.
+# renovate: datasource=pypi depName=yt-dlp
+ARG YT_DLP_VERSION=2026.7.4
 RUN apk add --no-cache ca-certificates deno python3 libssl3 zlib \
     && apk add --no-cache --virtual .build pipx \
-    && pipx install yt-dlp \
+    && pipx install yt-dlp==${YT_DLP_VERSION} \
     && apk del .build
 ENV PATH="/root/.local/bin:${PATH}"
 WORKDIR /app
