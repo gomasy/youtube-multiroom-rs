@@ -53,7 +53,7 @@ RUN apk add --no-cache musl-dev pkgconf openssl-dev
 ENV RUSTFLAGS="-C target-feature=-crt-static"
 WORKDIR /app
 COPY Cargo.toml Cargo.lock build.rs ./
-RUN mkdir src && echo 'fn main() {}' > src/main.rs && cargo build --release && rm -rf src
+RUN mkdir src && echo 'fn main() {}' > src/main.rs && cargo build --release --locked && rm -rf src
 COPY src/ src/
 # locales/ is embedded into the binary at compile time, so include it in the build context
 COPY locales/ locales/
@@ -62,7 +62,7 @@ COPY locales/ locales/
 ARG GIT_HASH
 ARG BUILD_DATE
 ENV GIT_HASH=${GIT_HASH} BUILD_DATE=${BUILD_DATE}
-RUN touch src/main.rs && cargo build --release
+RUN touch src/main.rs && cargo build --release --locked
 
 # deno is needed as yt-dlp's JS runtime. Copied from the official image below so
 # Renovate can track the version (see the DENO_VERSION ARG at the top of the file).
