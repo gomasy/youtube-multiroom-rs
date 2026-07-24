@@ -1,3 +1,8 @@
+# Declared before the first FROM so it is a global ARG usable in the deno stage's
+# FROM below (a stage-local ARG would not be visible to a later FROM).
+# renovate: datasource=docker depName=denoland/deno extractVersion=^alpine-(?<version>.+)$
+ARG DENO_VERSION=2.9.4
+
 FROM node:24.18.0-alpine AS frontend
 WORKDIR /app/front
 COPY front/package.json front/package-lock.json ./
@@ -59,7 +64,9 @@ ARG BUILD_DATE
 ENV GIT_HASH=${GIT_HASH} BUILD_DATE=${BUILD_DATE}
 RUN touch src/main.rs && cargo build --release
 
-FROM denoland/deno:alpine-2.9.4 AS deno
+# deno is needed as yt-dlp's JS runtime. Copied from the official image below so
+# Renovate can track the version (see the DENO_VERSION ARG at the top of the file).
+FROM denoland/deno:alpine-${DENO_VERSION} AS deno
 
 FROM alpine:latest
 # renovate: datasource=pypi depName=yt-dlp
