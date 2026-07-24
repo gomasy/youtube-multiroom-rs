@@ -75,7 +75,7 @@ RUN apk add --no-cache ca-certificates python3 libssl3 zlib \
     && apk add --no-cache --virtual .build pipx \
     && pipx install yt-dlp==${YT_DLP_VERSION} \
     && apk del .build
-COPY --from=deno /usr/bin/deno /usr/local/bin/
+COPY --from=deno /bin/deno /usr/local/bin/
 ENV PATH="/root/.local/bin:${PATH}"
 WORKDIR /app
 COPY --from=ffmpeg /usr/local/bin/ffmpeg /usr/local/bin/ffprobe /usr/local/bin/
