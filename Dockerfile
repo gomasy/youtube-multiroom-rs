@@ -59,15 +59,16 @@ ARG BUILD_DATE
 ENV GIT_HASH=${GIT_HASH} BUILD_DATE=${BUILD_DATE}
 RUN touch src/main.rs && cargo build --release
 
+FROM denoland/deno:alpine-2.9.4 AS deno
+
 FROM alpine:latest
-# deno is needed as yt-dlp's JS runtime. The apk yt-dlp may lag behind, so we
-# install the latest PyPI release via pipx as before.
 # renovate: datasource=pypi depName=yt-dlp
 ARG YT_DLP_VERSION=2026.7.4
-RUN apk add --no-cache ca-certificates deno python3 libssl3 zlib \
+RUN apk add --no-cache ca-certificates python3 libssl3 zlib \
     && apk add --no-cache --virtual .build pipx \
     && pipx install yt-dlp==${YT_DLP_VERSION} \
     && apk del .build
+COPY --from=deno /usr/bin/deno /usr/local/bin/
 ENV PATH="/root/.local/bin:${PATH}"
 WORKDIR /app
 COPY --from=ffmpeg /usr/local/bin/ffmpeg /usr/local/bin/ffprobe /usr/local/bin/
