@@ -60,6 +60,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
     });
 
+    // Do not swap this expect for a hardcoded default: the i18n! macro's constant
+    // is the single source of truth for the fallback locale.
     let fallback = _RUST_I18N_FALLBACK_LOCALE
         .and_then(|l| l.first())
         .expect("i18n fallback locale must be set")
@@ -169,11 +171,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn shutdown_signal() {
+    // Registration failure degrades to Ctrl-C rather than taking the process down.
+    // `None` then leaves the pattern below unmatched, which disables that branch.
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .expect("failed to listen for SIGTERM");
+        .inspect_err(|e| tracing::warn!("Cannot listen for SIGTERM: {e}; Ctrl-C only"))
+        .ok();
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {}
-        _ = sigterm.recv() => {}
+        Some(_) = async { Some(sigterm.as_mut()?.recv().await) } => {}
     }
     tracing::info!("Shutting down...");
 }

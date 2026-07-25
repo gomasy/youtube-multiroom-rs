@@ -66,7 +66,9 @@ pub async fn require_token(
 
 /// Generate a signed query string ("exp=...&sig=...") for stream URLs.
 pub fn stream_query(secret: &str, audio_id: &str) -> String {
-    let exp = now_secs() + STREAM_URL_TTL_SECS;
+    // exp = 0 (unreadable clock) yields an already-expired URL, which is the
+    // safe outcome: playback fails rather than the URL never expiring.
+    let exp = now_secs().map_or(0, |now| now + STREAM_URL_TTL_SECS);
     let sig = sign(secret, audio_id, exp);
     format!("exp={exp}&sig={sig}")
 }
@@ -92,7 +94,8 @@ fn verify_stream_query(secret: &str, audio_id: &str, query: Option<&str>) -> boo
     let Some(sig) = query_param(query, "sig") else {
         return false;
     };
-    exp >= now_secs() && constant_time_eq(&sign(secret, audio_id, exp), &sig)
+    // An unreadable clock fails closed: no expiry can be trusted
+    now_secs().is_some_and(|now| exp >= now) && constant_time_eq(&sign(secret, audio_id, exp), &sig)
 }
 
 fn sign(secret: &str, audio_id: &str, exp: u64) -> String {
@@ -161,11 +164,12 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
             == 0
 }
 
-fn now_secs() -> u64 {
+/// Seconds since the UNIX epoch, or `None` if the system clock predates 1970.
+fn now_secs() -> Option<u64> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("system clock before UNIX epoch")
-        .as_secs()
+        .ok()
+        .map(|d| d.as_secs())
 }
 
 #[cfg(test)]
@@ -187,12 +191,13 @@ mod tests {
 
     #[test]
     fn rejects_expired_or_tampered_exp() {
-        let exp = now_secs() - 1;
+        let now = now_secs().expect("test host clock is after 1970");
+        let exp = now - 1;
         let q = format!("exp={exp}&sig={}", sign("secret", "abc123", exp));
         assert!(!verify_stream_query("secret", "abc123", Some(&q)));
 
         // Extending exp invalidates the signature
-        let future = now_secs() + 100;
+        let future = now + 100;
         let q = format!("exp={future}&sig={}", sign("secret", "abc123", exp));
         assert!(!verify_stream_query("secret", "abc123", Some(&q)));
     }
