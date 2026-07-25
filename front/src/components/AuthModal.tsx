@@ -1,5 +1,6 @@
 import { useRef } from "react";
 import { checkAuth, setToken } from "../api";
+import { showApiError } from "../errors";
 import { t } from "../i18n";
 import type { TracksPage } from "../types";
 
@@ -15,14 +16,18 @@ export function AuthModal({ onAuthenticated, showToast }: Props) {
     const token = inputRef.current?.value.trim();
     if (!token) return;
 
-    const { authorized, data } = await checkAuth(token);
-    if (!authorized) {
-      showToast(t("auth.invalidToken"));
-      return;
-    }
+    try {
+      const { authorized, data } = await checkAuth(token);
+      if (!authorized) {
+        showToast(t("auth.invalidToken"));
+        return;
+      }
 
-    setToken(token);
-    onAuthenticated(data);
+      setToken(token);
+      onAuthenticated(data);
+    } catch (error) {
+      showApiError(showToast, error);
+    }
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {

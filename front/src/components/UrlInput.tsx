@@ -1,5 +1,6 @@
 import { useRef, useState, useImperativeHandle, forwardRef } from "react";
 import { searchYouTube } from "../api";
+import { showApiError } from "../errors";
 import { t } from "../i18n";
 import { TrackRowInfo } from "./TrackRowInfo";
 import type { Track } from "../types";
@@ -15,8 +16,27 @@ interface Props {
   showToast: (msg: string) => void;
 }
 
+const SCHEME_RE = /^[a-z][a-z\d+.-]*:\/\//i;
+/// Only decides the button label and paste auto-submit. The authoritative check
+/// is parse_youtube_url() in src/state.rs — keep the host list in sync with it.
+const YOUTUBE_HOSTS = new Set([
+  "youtube.com",
+  "www.youtube.com",
+  "m.youtube.com",
+  "music.youtube.com",
+  "youtu.be",
+]);
+
 function isYoutubeUrl(value: string): boolean {
-  return /youtube\.com|youtu\.be/.test(value);
+  try {
+    const url = new URL(SCHEME_RE.test(value) ? value : `https://${value}`);
+    return (
+      (url.protocol === "https:" || url.protocol === "http:") &&
+      YOUTUBE_HOSTS.has(url.hostname.toLowerCase())
+    );
+  } catch {
+    return false;
+  }
 }
 
 export const UrlInput = forwardRef<UrlInputHandle, Props>(function UrlInput(
@@ -27,12 +47,25 @@ export const UrlInput = forwardRef<UrlInputHandle, Props>(function UrlInput(
   const [searching, setSearching] = useState(false);
   const [results, setResults] = useState<Track[] | null>(null);
   const pastedRef = useRef(false);
+  const searchRef = useRef<AbortController>(null);
 
   const busy = extracting || searching;
   const isUrl = isYoutubeUrl(value);
 
+  /// Drop any in-flight search so a late response cannot overwrite the results
+  /// the user is now looking at.
+  function cancelSearch() {
+    searchRef.current?.abort();
+    searchRef.current = null;
+    setSearching(false);
+  }
+
   useImperativeHandle(ref, () => ({
-    clear: () => setValue(""),
+    clear: () => {
+      cancelSearch();
+      setValue("");
+      setResults(null);
+    },
   }));
 
   function submit(input: string) {
@@ -55,13 +88,18 @@ export const UrlInput = forwardRef<UrlInputHandle, Props>(function UrlInput(
   }
 
   async function search(query: string) {
+    cancelSearch();
+    const request = new AbortController();
+    searchRef.current = request;
     setSearching(true);
     try {
-      setResults(await searchYouTube(query, onUnauthorized));
+      const nextResults = await searchYouTube(query, onUnauthorized, request.signal);
+      if (request.signal.aborted) return;
+      setResults(nextResults);
     } catch (e) {
-      showToast(`${t("common.error")}: ${(e as Error).message}`);
+      showApiError(showToast, e);
     } finally {
-      setSearching(false);
+      if (!request.signal.aborted) setSearching(false);
     }
   }
 
@@ -73,6 +111,7 @@ export const UrlInput = forwardRef<UrlInputHandle, Props>(function UrlInput(
 
   function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
     const next = e.target.value;
+    cancelSearch();
     setValue(next);
     if (pastedRef.current) {
       pastedRef.current = false;

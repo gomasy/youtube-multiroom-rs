@@ -49,12 +49,12 @@ pub async fn verify_request(headers: &HeaderMap, body: &[u8]) -> Result<(), Stri
         Err(_) => (header_str(headers, "signature")?, MessageDigest::sha1()),
     };
 
-    validate_cert_url(cert_url)?;
-    let key = fetch_verified_key(cert_url).await?;
-
+    let cert_url = validate_cert_url(cert_url)?;
     let sig = base64::engine::general_purpose::STANDARD
         .decode(sig_b64.trim())
         .map_err(|e| format!("invalid signature base64: {e}"))?;
+    // Reject malformed signatures before doing certificate network I/O.
+    let key = fetch_verified_key(cert_url.as_str()).await?;
 
     let mut verifier =
         Verifier::new(digest, &key).map_err(|e| format!("verifier init failed: {e}"))?;
@@ -92,8 +92,10 @@ fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Result<&'a str, String>
 /// Validate that the certificate URL meets Amazon's requirements (https,
 /// s3.amazonaws.com, port 443, path under /echo.api/).
 /// The url crate's parser normalizes dot segments (..).
-fn validate_cert_url(cert_url: &str) -> Result<(), String> {
-    let u = url::Url::parse(cert_url).map_err(|e| format!("invalid cert URL: {e}"))?;
+/// A query string is left intact — Amazon's requirements do not forbid one, so
+/// rejecting it would break verification outright if one ever appears.
+fn validate_cert_url(cert_url: &str) -> Result<url::Url, String> {
+    let mut u = url::Url::parse(cert_url).map_err(|e| format!("invalid cert URL: {e}"))?;
     if u.scheme() != "https" {
         return Err(format!("cert URL scheme is not https: {cert_url}"));
     }
@@ -106,10 +108,17 @@ fn validate_cert_url(cert_url: &str) -> Result<(), String> {
     if u.port().is_some_and(|p| p != 443) {
         return Err(format!("cert URL port is not 443: {cert_url}"));
     }
+    // Userinfo is never legitimate here and only serves to disguise the host.
+    if !u.username().is_empty() || u.password().is_some() {
+        return Err(format!("cert URL must not contain userinfo: {cert_url}"));
+    }
     if !u.path().starts_with("/echo.api/") {
         return Err(format!("cert URL path is not under /echo.api/: {cert_url}"));
     }
-    Ok(())
+    // Fragments are not sent to the server, so drop it to keep the cache key
+    // canonical instead of letting it multiply entries for the same cert.
+    u.set_fragment(None);
+    Ok(u)
 }
 
 /// Fetch and verify the certificate chain, returning the public key for signature verification (cached).
@@ -224,9 +233,16 @@ mod tests {
             "https://S3.AMAZONAWS.COM/echo.api/cert.pem",
             // Dot segments are normalized back under /echo.api/
             "https://s3.amazonaws.com/echo.api/../echo.api/echo-api-cert.pem",
+            "https://s3.amazonaws.com/echo.api/cert.pem?versionId=1",
         ] {
             assert!(validate_cert_url(url).is_ok(), "should accept {url}");
         }
+    }
+
+    #[test]
+    fn cert_url_fragment_is_dropped() {
+        let u = validate_cert_url("https://s3.amazonaws.com/echo.api/cert.pem#frag").unwrap();
+        assert_eq!(u.as_str(), "https://s3.amazonaws.com/echo.api/cert.pem");
     }
 
     #[test]
@@ -238,6 +254,8 @@ mod tests {
             "https://s3.amazonaws.com/EcHo.aPi/echo-api-cert.pem",
             "https://s3.amazonaws.com/echo.api/../not-echo/cert.pem",
             "https://s3.amazonaws.com.evil.example/echo.api/cert.pem",
+            "https://user@s3.amazonaws.com/echo.api/cert.pem",
+            "https://user:pass@s3.amazonaws.com/echo.api/cert.pem",
             "not a url",
         ] {
             assert!(validate_cert_url(url).is_err(), "should reject {url}");

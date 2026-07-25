@@ -5,7 +5,8 @@
   "scripts": {
     "clean": "rm -rf dist .parcel-cache",
     "dev": "concurrently -n rust,parcel -c cyan,yellow \"cd .. && cargo run\" \"npm run clean && parcel watch\"",
-    "build": "npm run clean && parcel build"
+    "build": "npm run clean && parcel build",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "react": "^19.2.8",

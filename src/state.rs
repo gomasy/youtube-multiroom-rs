@@ -1,6 +1,5 @@
 use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -46,9 +45,11 @@ const DOWNLOAD_ERROR_TTL_SECS: u64 = 60;
 const FAILURE_RESET_SECS: f64 = 60.0;
 /// Per-item timeout for metadata fetches to prevent yt-dlp from stalling.
 const METADATA_TIMEOUT_SECS: u64 = 30;
+/// Grace period for draining yt-dlp's pipes after it exits. Descendants can
+/// inherit the pipes and hold them open, so the drain needs its own bound.
+const OUTPUT_DRAIN_GRACE_SECS: u64 = 5;
 /// Prefix added via --progress-template to distinguish progress lines.
 const PROGRESS_PREFIX: &str = "__progress__ ";
-const VIDEO_ID_PATTERN: &str = "[a-zA-Z0-9_-]{11}";
 
 /// Cached audio format extension. Must be kept in sync with AUDIO_MIME.
 const AUDIO_EXT: &str = "m4a";
@@ -455,7 +456,7 @@ impl AppState {
             locks.entry(video_id.clone()).or_default().clone()
         };
         let guard = lock.lock().await;
-        let result = self.extract_audio_locked(&video_id, url).await;
+        let result = self.extract_audio_locked(&video_id).await;
         drop(guard);
 
         // Clean up the entry if no other callers are waiting (2 = map + self).
@@ -470,11 +471,7 @@ impl AppState {
         result
     }
 
-    async fn extract_audio_locked(
-        self: &Arc<Self>,
-        video_id: &str,
-        url: &str,
-    ) -> Result<AudioTrack, String> {
+    async fn extract_audio_locked(self: &Arc<Self>, video_id: &str) -> Result<AudioTrack, String> {
         // Redis cache check. Entries pointing to old formats (mp3 etc.) are
         // stale w.r.t. AUDIO_MIME, so skip them and re-fetch.
         if let Some(track) = self.get_track(video_id).await {
@@ -492,7 +489,7 @@ impl AppState {
         // Fetch while broadcasting progress to all clients. Remove on success;
         // keep as error display for a while on failure.
         self.begin_download(video_id).await;
-        let result = self.fetch_and_register(video_id, url).await;
+        let result = self.fetch_and_register(video_id).await;
         match &result {
             Ok(_) => self.finish_download(video_id).await,
             Err(e) => self.fail_download(video_id, e).await,
@@ -502,10 +499,13 @@ impl AppState {
 
     /// Fetch metadata → download (non-live) → register in Redis.
     /// Progress is reflected in the downloads progress entry.
-    async fn fetch_and_register(&self, video_id: &str, url: &str) -> Result<AudioTrack, String> {
+    async fn fetch_and_register(&self, video_id: &str) -> Result<AudioTrack, String> {
+        // Never pass the user-supplied URL to yt-dlp. Reconstructing it from the
+        // validated ID prevents deceptive URLs from reaching arbitrary hosts.
+        let url = format!("https://www.youtube.com/watch?v={video_id}");
         // Fetch metadata
         tracing::info!("Fetching metadata: {}", video_id);
-        let meta = fetch_metadata(url).await?;
+        let meta = fetch_metadata(&url).await?;
         let title = meta["title"].as_str().unwrap_or(video_id).to_string();
         let is_live = meta["is_live"].as_bool().unwrap_or(false);
         self.set_download_meta(video_id, &title, is_live).await;
@@ -521,7 +521,7 @@ impl AppState {
 
             // Download audio
             tracing::info!("Downloading: {}", title);
-            if let Err(e) = self.run_download(video_id, url, &output_str).await {
+            if let Err(e) = self.run_download(video_id, &url, &output_str).await {
                 // With --no-part, partial files remain under the final name.
                 // Remove them so they don't get registered as broken tracks on restore.
                 let _ = tokio::fs::remove_file(&output_path).await;
@@ -558,38 +558,26 @@ impl AppState {
         let format_spec = format!("bestaudio[ext={AUDIO_EXT}]/bestaudio");
         // Have yt-dlp emit progress in a machine-readable one-line-per-update format
         let progress_template = format!("download:{PROGRESS_PREFIX}%(progress._percent_str)s");
-        let mut child = Command::new("yt-dlp")
-            .args([
-                "-f",
-                &format_spec,
-                "-x",
-                "--audio-format",
-                AUDIO_EXT,
-                "-o",
-                output_str,
-                "--no-playlist",
-                "--no-part",
-                "--newline",
-                "--progress-template",
-                &progress_template,
-                url,
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("Download error: {e}"))?;
+        let mut child = spawn_yt_dlp([
+            "-f",
+            &format_spec,
+            "-x",
+            "--audio-format",
+            AUDIO_EXT,
+            "-o",
+            output_str,
+            "--no-playlist",
+            "--no-part",
+            "--newline",
+            "--progress-template",
+            &progress_template,
+            url,
+        ])
+        .map_err(|e| format!("Download error: {e}"))?;
 
         // Drain stderr in a separate task to prevent pipe-full blocking;
         // its content is only used for error messages.
-        let stderr = child.stderr.take();
-        let stderr_task = tokio::spawn(async move {
-            let mut buf = Vec::new();
-            if let Some(mut stderr) = stderr {
-                let _ = stderr.read_to_end(&mut buf).await;
-            }
-            buf
-        });
+        let stderr_task = child.stderr.take().map(spawn_reader);
 
         // Read progress lines as raw bytes with lossy conversion. lines() would
         // error on non-UTF-8, stopping the reader and closing the pipe, which
@@ -616,7 +604,10 @@ impl AppState {
             .await
             .map_err(|e| format!("Download error: {e}"))?;
         if !status.success() {
-            let stderr_buf = stderr_task.await.unwrap_or_default();
+            let stderr_buf = match stderr_task {
+                Some(task) => drain_output(task).await.unwrap_or_default(),
+                None => Vec::new(),
+            };
             return Err(format!(
                 "Failed to download audio: {}",
                 snippet(&String::from_utf8_lossy(&stderr_buf))
@@ -1927,10 +1918,6 @@ impl AppState {
 // Utilities
 // ════════════════════════════════════════
 
-fn stderr_snippet(out: &std::process::Output) -> String {
-    snippet(&String::from_utf8_lossy(&out.stderr))
-}
-
 fn snippet(s: &str) -> String {
     s.chars().take(300).collect()
 }
@@ -1951,16 +1938,86 @@ fn parse_progress_percent(line: &str) -> Option<f64> {
 /// Run yt-dlp and return stdout on success within the timeout.
 /// On failure or timeout, return an error message (including stderr snippet).
 pub async fn run_yt_dlp(args: &[&str], timeout: time::Duration) -> Result<Vec<u8>, String> {
-    let cmd = Command::new("yt-dlp").args(args).output();
-    let out = time::timeout(timeout, cmd)
-        .await
-        .map_err(|_| "yt-dlp timed out".to_string())?
-        .map_err(|e| format!("Failed to run yt-dlp: {e}"))?;
+    let mut child = spawn_yt_dlp(args).map_err(|e| format!("Failed to run yt-dlp: {e}"))?;
 
-    if !out.status.success() {
-        return Err(format!("yt-dlp failed: {}", stderr_snippet(&out)));
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or("Failed to capture yt-dlp stdout")?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or("Failed to capture yt-dlp stderr")?;
+    let stdout_task = spawn_reader(stdout);
+    let stderr_task = spawn_reader(stderr);
+
+    let status = match time::timeout(timeout, child.wait()).await {
+        Ok(result) => result.map_err(|e| format!("Failed to wait for yt-dlp: {e}"))?,
+        Err(_) => {
+            if let Err(e) = child.kill().await {
+                tracing::warn!("Failed to kill timed-out yt-dlp process: {e}");
+            }
+            // Descendant processes may inherit the pipes, so do not wait for
+            // EOF after the timed-out parent has been killed and reaped.
+            stdout_task.abort();
+            stderr_task.abort();
+            return Err("yt-dlp timed out".to_string());
+        }
+    };
+    let Some(stdout) = drain_output(stdout_task).await else {
+        stderr_task.abort();
+        return Err("yt-dlp output drain timed out".to_string());
+    };
+    let stderr = drain_output(stderr_task).await.unwrap_or_default();
+
+    if !status.success() {
+        return Err(format!(
+            "yt-dlp failed: {}",
+            snippet(&String::from_utf8_lossy(&stderr))
+        ));
     }
-    Ok(out.stdout)
+    Ok(stdout)
+}
+
+/// Spawn yt-dlp with no stdin and both output streams piped. Every yt-dlp
+/// invocation goes through here so the stdio setup cannot drift between them.
+fn spawn_yt_dlp<I, S>(args: I) -> std::io::Result<tokio::process::Child>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    Command::new("yt-dlp")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+}
+
+/// Drain a pipe into a buffer on its own task. Reading the pipes concurrently
+/// is what keeps a chatty child from blocking on a full pipe.
+fn spawn_reader<R>(mut pipe: R) -> tokio::task::JoinHandle<Vec<u8>>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut buf = Vec::new();
+        let _ = pipe.read_to_end(&mut buf).await;
+        buf
+    })
+}
+
+/// Await a pipe-drain task, giving up after the grace period so a descendant
+/// holding the pipe open cannot block the caller forever.
+async fn drain_output(mut task: tokio::task::JoinHandle<Vec<u8>>) -> Option<Vec<u8>> {
+    let grace = time::Duration::from_secs(OUTPUT_DRAIN_GRACE_SECS);
+    match time::timeout(grace, &mut task).await {
+        Ok(joined) => Some(joined.unwrap_or_default()),
+        Err(_) => {
+            task.abort();
+            None
+        }
+    }
 }
 
 /// Fetch metadata JSON via yt-dlp (no download).
@@ -2035,51 +2092,78 @@ pub fn classify_url(url: &str) -> UrlKind {
     }
 }
 
-/// Extract a YouTube playlist ID from the list= parameter. Validation is
-/// minimal — whether it can be expanded is left to yt-dlp, so that auth-gated
-/// lists (WL etc.) return error messages to the user.
-fn extract_playlist_id(url: &str) -> Option<String> {
-    use std::sync::OnceLock;
+/// Parse an HTTP(S) URL on one of the supported YouTube hosts. This is the
+/// authoritative host check; isYoutubeUrl() in front/src/components/UrlInput.tsx
+/// mirrors the host list for UI purposes only, so keep the two in sync.
+fn parse_youtube_url(value: &str) -> Option<url::Url> {
+    let parsed = url::Url::parse(value)
+        .or_else(|_| url::Url::parse(&format!("https://{value}")))
+        .ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = parsed.host_str()?;
+    if matches!(
+        host,
+        "youtube.com" | "www.youtube.com" | "m.youtube.com" | "music.youtube.com" | "youtu.be"
+    ) {
+        Some(parsed)
+    } else {
+        None
+    }
+}
 
-    static RE: OnceLock<Option<Regex>> = OnceLock::new();
-    let re = RE
-        .get_or_init(|| Regex::new(r"youtube\.com/\S*[?&]list=([a-zA-Z0-9_-]{2,})").ok())
-        .as_ref()?;
-    Some(re.captures(url)?.get(1)?.as_str().to_string())
+/// Extract a YouTube playlist ID from the list= parameter. Whether the list can
+/// be expanded is left to yt-dlp, so auth-gated lists such as WL remain valid.
+fn extract_playlist_id(url: &str) -> Option<String> {
+    let parsed = parse_youtube_url(url)?;
+    if parsed.host_str()? == "youtu.be" {
+        return None;
+    }
+    parsed
+        .query_pairs()
+        .find(|(key, value)| key == "list" && is_playlist_id(value))
+        .map(|(_, value)| value.into_owned())
+}
+
+/// Character set shared by YouTube video and playlist IDs.
+fn is_id_chars(s: &str) -> bool {
+    s.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
 }
 
 /// Check whether a string matches the YouTube video ID format.
 fn is_video_id(s: &str) -> bool {
-    use std::sync::OnceLock;
-
-    static RE: OnceLock<Option<Regex>> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(&format!("^{VIDEO_ID_PATTERN}$")).ok())
-        .as_ref()
-        .is_some_and(|re| re.is_match(s))
+    s.len() == 11 && is_id_chars(s)
 }
 
 fn extract_video_id(url: &str) -> Option<String> {
-    use std::sync::OnceLock;
-
-    static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
-    let patterns = PATTERNS.get_or_init(|| {
-        [
-            format!(r"(?:youtube\.com/watch\?.*v=|youtu\.be/)({VIDEO_ID_PATTERN})"),
-            format!(r"youtube\.com/embed/({VIDEO_ID_PATTERN})"),
-            format!(r"youtube\.com/shorts/({VIDEO_ID_PATTERN})"),
-            format!(r"youtube\.com/live/({VIDEO_ID_PATTERN})"),
-        ]
-        .iter()
-        .filter_map(|p| Regex::new(p).ok())
-        .collect()
-    });
-
-    for re in patterns {
-        if let Some(caps) = re.captures(url) {
-            return caps.get(1).map(|m| m.as_str().to_string());
+    let parsed = parse_youtube_url(url)?;
+    let host = parsed.host_str()?;
+    let candidate = if host == "youtu.be" {
+        parsed.path_segments()?.next()
+    } else if parsed.path() == "/watch" {
+        return parsed
+            .query_pairs()
+            .find(|(key, value)| key == "v" && is_video_id(value))
+            .map(|(_, value)| value.into_owned());
+    } else {
+        let mut segments = parsed.path_segments()?;
+        match (segments.next(), segments.next()) {
+            (Some("embed" | "shorts" | "live"), id) => id,
+            _ => None,
         }
+    }?;
+
+    if is_video_id(candidate) {
+        Some(candidate.to_string())
+    } else {
+        None
     }
-    None
+}
+
+fn is_playlist_id(value: &str) -> bool {
+    value.len() >= 2 && is_id_chars(value)
 }
 
 /// List {video_id}.m4a files in audio_cache as (video_id, path) pairs.
@@ -2132,6 +2216,7 @@ mod tests {
             "https://www.youtube.com/embed/dQw4w9WgXcQ",
             "https://www.youtube.com/shorts/dQw4w9WgXcQ",
             "https://www.youtube.com/live/dQw4w9WgXcQ",
+            "www.youtube.com/watch?v=dQw4w9WgXcQ",
         ] {
             assert_eq!(
                 extract_video_id(url).as_deref(),
@@ -2140,6 +2225,19 @@ mod tests {
             );
         }
         assert_eq!(extract_video_id("https://example.com/watch?v=x"), None);
+        assert_eq!(
+            extract_video_id("http://127.0.0.1/youtube.com/watch?v=dQw4w9WgXcQ"),
+            None
+        );
+        assert_eq!(
+            extract_video_id("https://youtube.com.evil.example/watch?v=dQw4w9WgXcQ"),
+            None
+        );
+        assert_eq!(
+            extract_video_id("HTTPS://WWW.YOUTUBE.COM/watch?feature=share&v=dQw4w9WgXcQ")
+                .as_deref(),
+            Some("dQw4w9WgXcQ")
+        );
     }
 
     #[test]
@@ -2425,6 +2523,10 @@ mod tests {
         ));
         assert!(matches!(
             classify_url("https://www.youtube.com/feed/library"),
+            UrlKind::Unknown
+        ));
+        assert!(matches!(
+            classify_url("https://youtube.com.evil.example/playlist?list=PL0123456789abcdefghij"),
             UrlKind::Unknown
         ));
     }

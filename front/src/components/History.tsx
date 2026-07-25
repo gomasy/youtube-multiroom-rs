@@ -12,6 +12,7 @@ import {
   reorderTrack,
   PER_PAGE,
 } from "../api";
+import { showApiError } from "../errors";
 import { t } from "../i18n";
 import { TrackRowInfo } from "./TrackRowInfo";
 import { AddToPlaylistMenu } from "./AddToPlaylistMenu";
@@ -90,7 +91,10 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
         const last = lastPage(data.total);
         if (page > last) setPage(last);
       })
-      .catch(() => {});
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        showError(error);
+      });
     return () => {
       cancelled = true;
     };
@@ -109,7 +113,7 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
   if (total === 0 && !filter && !viewPlaylist && playlists.length === 0) return null;
 
   function showError(e: unknown) {
-    showToast(`${t("common.error")}: ${(e as Error).message}`);
+    showApiError(showToast, e);
   }
 
   function renderNameForm(
@@ -153,6 +157,8 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
   function switchView(playlistId: string | null) {
     setViewPlaylist(playlistId);
     setPage(1);
+    setTracks([]);
+    setTotal(0);
     setMenuTrackId(null);
     setRenameName(null);
     clearTimeout(filterTimer.current);

@@ -5,6 +5,10 @@ export const PER_PAGE = 10;
 
 let apiToken = localStorage.getItem("api_token");
 
+/// Thrown on a 401. Callers that already react via onUnauthorized (auth modal)
+/// can use this to avoid also showing a redundant error toast.
+export class UnauthorizedError extends Error {}
+
 export function getToken(): string | null {
   return apiToken;
 }
@@ -32,7 +36,7 @@ async function authFetch(
   const res = await fetch(url, options);
   if (res.status === 401) {
     onUnauthorized?.();
-    throw new Error(t("api.unauthorized"));
+    throw new UnauthorizedError(t("api.unauthorized"));
   }
   return res;
 }
@@ -102,11 +106,12 @@ export async function reorderTrack(
 export async function getStreamUrl(
   trackId: string,
   onUnauthorized?: () => void,
+  signal?: AbortSignal,
 ): Promise<string> {
   const data = await authJson<{ url: string }>(
     `/api/audio/${encodeURIComponent(trackId)}/url`,
     "api.streamUrlFailed",
-    {},
+    { signal },
     onUnauthorized,
   );
   return data.url;
@@ -204,11 +209,12 @@ export async function bulkAddToPlaylist(
 export async function searchYouTube(
   query: string,
   onUnauthorized?: () => void,
+  signal?: AbortSignal,
 ): Promise<Track[]> {
   const data = await authJson<{ results?: Track[] }>(
     `/api/search?q=${encodeURIComponent(query)}`,
     "api.searchFailed",
-    {},
+    { signal },
     onUnauthorized,
   );
   return data.results ?? [];
@@ -274,13 +280,13 @@ export async function clearQueue(
 export async function checkAuth(
   token?: string,
 ): Promise<{ authorized: boolean; data: TracksPage | null }> {
-  let unauthorized = false;
   try {
-    const data = await fetchTracks(1, PER_PAGE, () => {
-      unauthorized = true;
-    }, token);
+    const data = await fetchTracks(1, PER_PAGE, undefined, token);
     return { authorized: true, data };
-  } catch {
-    return { authorized: !unauthorized, data: null };
+  } catch (error) {
+    if (error instanceof UnauthorizedError) {
+      return { authorized: false, data: null };
+    }
+    throw error;
   }
 }

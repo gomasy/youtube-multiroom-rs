@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { authOk, playTracks, queueNext, removeQueueItem, clearQueue } from "../api";
+import { showApiError } from "../errors";
 import { t } from "../i18n";
 import { ScrollingText } from "./ScrollingText";
 import { SeekBar } from "./SeekBar";
@@ -29,6 +30,14 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
   const [queueing, setQueueing] = useState(false);
   const entries = Object.values(devices);
 
+  useEffect(() => {
+    const deviceIds = new Set(Object.keys(devices));
+    setSelectedDevices((prev) => {
+      const next = new Set([...prev].filter((id) => deviceIds.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [devices]);
+
   function toggleDevice(deviceId: string) {
     setSelectedDevices((prev) => {
       const next = new Set(prev);
@@ -41,7 +50,7 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
   function selectAll() {
     const allIds = Object.keys(devices);
     setSelectedDevices((prev) =>
-      prev.size === allIds.length ? new Set() : new Set(allIds),
+      allIds.every((id) => prev.has(id)) ? new Set() : new Set(allIds),
     );
   }
 
@@ -61,7 +70,7 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
       onDeviceDeleted(deviceId);
       showToast(t("devices.deleted"));
     } catch (e) {
-      showToast(`${t("common.error")}: ${(e as Error).message}`);
+      showApiError(showToast, e);
     }
   }
 
@@ -78,7 +87,7 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
       );
       showToast(t("devices.seekQueued"));
     } catch (e) {
-      showToast(`${t("common.error")}: ${(e as Error).message}`);
+      showApiError(showToast, e);
     }
   }
 
@@ -105,7 +114,7 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
       const data = await call(currentTrack.id, Array.from(selectedDevices), onUnauthorized);
       showToast(data.message || fallbackMsg);
     } catch (e) {
-      showToast(`${t("common.error")}: ${(e as Error).message}`);
+      showApiError(showToast, e);
     } finally {
       setBusy(false);
     }
@@ -115,7 +124,7 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
   const queueOnSelected = () => sendToSelected(queueNext, setQueueing, t("devices.queuedNext"));
 
   function catchToast(action: Promise<unknown>) {
-    action.catch((e) => showToast(`${t("common.error")}: ${(e as Error).message}`));
+    action.catch((e: unknown) => showApiError(showToast, e));
   }
 
   const canPlay = !!currentTrack && selectedDevices.size > 0;

@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { checkAuth } from "./api";
+import { showApiError } from "./errors";
 import { t, tFmt } from "./i18n";
 import { useWebSocket } from "./hooks";
 import { Header } from "./components/Header";
@@ -33,18 +34,45 @@ export function App() {
   const urlInputRef = useRef<UrlInputHandle>(null);
 
   const [extracting, setExtracting] = useState(false);
-  const onUnauthorized = useCallback(() => setShowAuth(true), []);
+  const onUnauthorized = useCallback(() => {
+    setWsActive(false);
+    setConnected(false);
+    setExtracting(false);
+    setShowAuth(true);
+  }, []);
 
   useEffect(() => {
-    checkAuth().then(({ authorized, data }) => {
-      if (!authorized) {
-        setShowAuth(true);
-      } else {
-        setInitialTracks(data);
-        setWsActive(true);
-      }
-    });
-  }, []);
+    let cancelled = false;
+    let retryTimer: number | undefined;
+    let errorReported = false;
+
+    function verifyAuth() {
+      void checkAuth()
+        .then(({ authorized, data }) => {
+          if (cancelled) return;
+          if (!authorized) {
+            setShowAuth(true);
+          } else {
+            setInitialTracks(data);
+            setWsActive(true);
+          }
+        })
+        .catch((error: unknown) => {
+          if (cancelled) return;
+          if (!errorReported) {
+            showApiError(showToast, error);
+            errorReported = true;
+          }
+          retryTimer = window.setTimeout(verifyAuth, 3000);
+        });
+    }
+
+    verifyAuth();
+    return () => {
+      cancelled = true;
+      if (retryTimer !== undefined) clearTimeout(retryTimer);
+    };
+  }, [showToast]);
 
   const handleExtractResult = useCallback((track: Track) => {
     setExtracting(false);

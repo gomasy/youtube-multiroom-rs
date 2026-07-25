@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { getStreamUrl } from "../api";
+import { showApiError } from "../errors";
 import { formatTime } from "../format";
 import { t } from "../i18n";
 import { PauseIcon, PlayIcon } from "./icons";
@@ -15,6 +16,7 @@ interface Props {
 export function PreviewPlayer({ track, onUnauthorized, showToast }: Props) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const srcLoadedRef = useRef(false);
+  const requestRef = useRef<AbortController>(null);
   const [playing, setPlaying] = useState(false);
   const [loading, setLoading] = useState(false);
   const [position, setPosition] = useState(0);
@@ -23,7 +25,12 @@ export function PreviewPlayer({ track, onUnauthorized, showToast }: Props) {
 
   useEffect(() => {
     const audio = audioRef.current;
-    return () => audio?.pause();
+    return () => {
+      requestRef.current?.abort();
+      audio?.pause();
+      audio?.removeAttribute("src");
+      audio?.load();
+    };
   }, []);
 
   async function toggle() {
@@ -35,15 +42,19 @@ export function PreviewPlayer({ track, onUnauthorized, showToast }: Props) {
     }
     try {
       if (!srcLoadedRef.current) {
+        const request = new AbortController();
+        requestRef.current = request;
         setLoading(true);
-        audio.src = await getStreamUrl(track.id, onUnauthorized);
+        const src = await getStreamUrl(track.id, onUnauthorized, request.signal);
+        if (request.signal.aborted) return;
+        audio.src = src;
         srcLoadedRef.current = true;
       }
       await audio.play();
     } catch (e) {
-      showToast(`${t("common.error")}: ${(e as Error).message}`);
+      showApiError(showToast, e);
     } finally {
-      setLoading(false);
+      if (!requestRef.current?.signal.aborted) setLoading(false);
     }
   }
 
