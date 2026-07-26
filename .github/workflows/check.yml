@@ -1,6 +1,7 @@
 name: Check
 
 on:
+  workflow_call:
   workflow_dispatch:
   push:
     branches:
@@ -11,7 +12,6 @@ permissions:
 
 jobs:
   rustfmt:
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -19,7 +19,6 @@ jobs:
         run: cargo fmt --all --check
 
   test:
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
     runs-on: ubuntu-latest
     steps:
       # build.rs derives the version string from the git hash and commit date,
@@ -29,7 +28,6 @@ jobs:
         run: cargo test --locked
 
   typecheck:
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

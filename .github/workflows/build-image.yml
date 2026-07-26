@@ -15,8 +15,12 @@ permissions:
   packages: write
 
 jobs:
+  checks:
+    uses: ./.github/workflows/check.yml
+
   build-image:
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    needs:
+      - checks
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -84,7 +88,7 @@ jobs:
           retention-days: 1
 
   merge-images:
-    if: "github.event_name != 'pull_request' && !contains(github.event.head_commit.message, '[skip ci]')"
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     needs:
       - build-image
