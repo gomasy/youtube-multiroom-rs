@@ -18,10 +18,27 @@ interface WSCallbacks {
   onConnectedChange: (connected: boolean) => void;
 }
 
+/// Reconnect backoff. Doubles per consecutive failure so a server that stays
+/// down is not hammered once every 3 seconds by every open tab.
+const RECONNECT_BASE_MS = 1000;
+const RECONNECT_MAX_MS = 30000;
+
+/// A frame we cannot parse is not worth tearing the connection down for, so
+/// report it and let the socket carry on.
+function parseMessage(raw: string): WSMessage | null {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    console.warn("Ignoring malformed WebSocket message");
+    return null;
+  }
+}
+
 export function useWebSocket(active: boolean, callbacks: WSCallbacks) {
   const wsRef = useRef<WebSocket | null>(null);
   const keepAliveRef = useRef<ReturnType<typeof setInterval>>(undefined);
   const reconnectRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const retriesRef = useRef(0);
   const cbRef = useRef(callbacks);
   cbRef.current = callbacks;
 
@@ -35,12 +52,18 @@ export function useWebSocket(active: boolean, callbacks: WSCallbacks) {
     wsRef.current = ws;
 
     ws.onopen = () => {
+      retriesRef.current = 0;
       cbRef.current.onConnectedChange(true);
     };
 
     ws.onclose = () => {
       cbRef.current.onConnectedChange(false);
-      reconnectRef.current = setTimeout(connect, 3000);
+      const delay = Math.min(
+        RECONNECT_BASE_MS * 2 ** retriesRef.current,
+        RECONNECT_MAX_MS,
+      );
+      retriesRef.current += 1;
+      reconnectRef.current = setTimeout(connect, delay);
     };
 
     ws.onerror = () => {
@@ -48,7 +71,8 @@ export function useWebSocket(active: boolean, callbacks: WSCallbacks) {
     };
 
     ws.onmessage = (event) => {
-      const data: WSMessage = JSON.parse(event.data);
+      const data = parseMessage(event.data);
+      if (!data) return;
       if (data.type === "init") {
         if (data.version) cbRef.current.onVersion(data.version);
         cbRef.current.onInit(data.devices || {});
