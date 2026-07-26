@@ -1,0 +1,45 @@
+name: Check
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - '**'
+
+permissions:
+  contents: read
+
+jobs:
+  rustfmt:
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+  test:
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    runs-on: ubuntu-latest
+    steps:
+      # build.rs derives the version string from the git hash and commit date,
+      # so the checkout has to keep .git or it degrades to "unknown".
+      - uses: actions/checkout@v7
+      - name: Run tests
+        run: cargo test --locked
+
+  typecheck:
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.18.0
+          cache: npm
+          cache-dependency-path: front/package-lock.json
+      - name: Type-check frontend
+        working-directory: front
+        run: |
+          npm ci
+          npm run typecheck

@@ -14,7 +14,7 @@ youtube-multiroom-rs/
 │   ├── renovate.json          # Renovate dependency updates
 │   └── workflows/
 │       ├── build-image.yml    # Container image build (ghcr.io)
-│       ├── lint.yml           # rustfmt check
+│       ├── check.yml          # rustfmt, cargo test, frontend typecheck
 │       └── release.yml        # Binary release build (GitHub Releases)
 ├── locales/
 │   ├── en.yml                 # English message catalog (backend)
