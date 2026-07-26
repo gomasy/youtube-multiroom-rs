@@ -37,6 +37,10 @@ const PLAYLIST_FLAT_TIMEOUT_SECS: u64 = 60;
 /// Pending command TTL in seconds (expired by Redis key TTL).
 const PENDING_TTL_SECS: u64 = 600;
 
+/// Upper bound for the sleep timer. Anything longer is indistinguishable from a
+/// bogus value, and `minutes * 60` must not be allowed to overflow u64.
+const MAX_SLEEP_TIMER_MINUTES: u64 = 24 * 60;
+
 /// Keep failed download progress visible for a while so reloading clients can
 /// still see the error.
 const DOWNLOAD_ERROR_TTL_SECS: u64 = 60;
@@ -54,6 +58,22 @@ const PROGRESS_PREFIX: &str = "__progress__ ";
 /// Cached audio format extension. Must be kept in sync with AUDIO_MIME.
 const AUDIO_EXT: &str = "m4a";
 pub const AUDIO_MIME: &str = "audio/mp4";
+
+/// Log the result of a fire-and-forget Redis command. These callers have no
+/// meaningful recovery, but dropping the error silently would hide a broken
+/// Redis behind seemingly successful operations.
+///
+/// A macro rather than a function so the awaited result is bound before the
+/// format arguments are built: `fmt::Arguments` is not `Send`, and holding one
+/// across the await would make every enclosing future non-`Send`.
+macro_rules! warn_redis {
+    ($what:literal, $result:expr) => {{
+        let result: redis::RedisResult<()> = $result;
+        if let Err(e) = result {
+            tracing::warn!("Redis error {}: {e}", format_args!($what));
+        }
+    }};
+}
 
 fn pending_key(device_id: &str) -> String {
     format!("{REDIS_PENDING_PREFIX}:{device_id}")
@@ -120,10 +140,13 @@ pub struct AudioTrack {
 }
 
 impl AudioTrack {
-    fn to_redis_json(&self) -> String {
-        let mut v = serde_json::to_value(self).expect("AudioTrack serializes to JSON");
+    /// Redis representation: the API shape plus the internal file path, which is
+    /// serde(skip)ped so it never reaches clients. Callers report the failure
+    /// rather than panicking, matching write_device.
+    fn to_redis_json(&self) -> serde_json::Result<String> {
+        let mut v = serde_json::to_value(self)?;
         v["file_path"] = json!(self.file_path);
-        v.to_string()
+        Ok(v.to_string())
     }
 
     pub(crate) fn extract_channel(meta: &Value) -> String {
@@ -444,6 +467,14 @@ impl AppState {
         }))
     }
 
+    /// Resolve a client-advertised language code to a locale we ship, falling
+    /// back to the server-wide default. Single home for that policy: the HTTP
+    /// layer feeds it the X-App-Lang header, the Alexa layer request.locale.
+    pub fn locale_or_default(&self, code: Option<&str>) -> String {
+        code.and_then(crate::resolve_locale)
+            .unwrap_or_else(|| self.locale.clone())
+    }
+
     // ── Audio extraction ──
 
     pub async fn extract_audio(self: &Arc<Self>, url: &str) -> Result<AudioTrack, String> {
@@ -531,15 +562,28 @@ impl AppState {
             AudioTrack::from_meta(video_id, &meta, now_f64(), output_str)
         };
 
+        // Registration is the step that makes the track visible, so a failure
+        // here must surface as an error rather than reporting a phantom success.
+        let json_str = track
+            .to_redis_json()
+            .map_err(|e| format!("Failed to serialize track: {e}"))?;
         let mut conn = self.redis.clone();
-        let _: Result<(), _> = conn
-            .hset(REDIS_KEY_TRACKS, video_id, track.to_redis_json())
-            .await;
-        // Prepend to the order list (remove first to avoid duplicates on re-fetch)
+        conn.hset::<_, _, _, ()>(REDIS_KEY_TRACKS, video_id, json_str)
+            .await
+            .map_err(|e| format!("Failed to register track: {e}"))?;
+        // Prepend to the order list (remove first to avoid duplicates on re-fetch).
+        // Order is cosmetic — list_tracks appends unordered tracks — so failures
+        // here are logged rather than failing the whole fetch.
         {
             let _guard = self.order_lock.lock().await;
-            let _: Result<(), _> = conn.lrem(REDIS_KEY_TRACKS_ORDER, 0, video_id).await;
-            let _: Result<(), _> = conn.lpush(REDIS_KEY_TRACKS_ORDER, video_id).await;
+            warn_redis!(
+                "removing {video_id} from track order",
+                conn.lrem(REDIS_KEY_TRACKS_ORDER, 0, video_id).await
+            );
+            warn_redis!(
+                "prepending {video_id} to track order",
+                conn.lpush(REDIS_KEY_TRACKS_ORDER, video_id).await
+            );
         }
 
         tracing::info!("Ready: {} ({}s)", track.title, track.duration);
@@ -776,12 +820,15 @@ impl AppState {
         }
 
         let mut conn = self.redis.clone();
-        let _: Result<(), _> = conn.hdel(REDIS_KEY_TRACKS, id).await;
+        warn_redis!("deleting track {id}", conn.hdel(REDIS_KEY_TRACKS, id).await);
         {
             // Serialize with reorder's read-then-replace to prevent a deletion
             // from being silently undone by a concurrent reorder write-back.
             let _guard = self.order_lock.lock().await;
-            let _: Result<(), _> = conn.lrem(REDIS_KEY_TRACKS_ORDER, 0, id).await;
+            warn_redis!(
+                "removing {id} from track order",
+                conn.lrem(REDIS_KEY_TRACKS_ORDER, 0, id).await
+            );
 
             // Remove from all playlist track lists in a single pipeline round-trip
             let playlists = self.playlists().await;
@@ -818,21 +865,33 @@ impl AppState {
             }
         };
         for key in keys {
-            let json_str: Option<String> = conn.get(&key).await.unwrap_or_default();
+            let json_str: Option<String> = match conn.get(&key).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!("Redis error reading pending command {key}: {e}");
+                    continue;
+                }
+            };
             if json_str
                 .and_then(|s| serde_json::from_str::<PendingCommand>(&s).ok())
                 .is_some_and(|cmd| cmd.track.id == id)
             {
-                let _: Result<(), _> = conn.del(&key).await;
+                warn_redis!("clearing pending command {key}", conn.del(&key).await);
             }
         }
 
         for mut dev in self.all_devices().await.into_values() {
             // Also remove the deleted track from each device's Up Next queue
             let key = queue_key(&dev.device_id);
-            let entries: Vec<String> = conn.lrange(&key, 0, -1).await.unwrap_or_default();
+            let entries: Vec<String> = conn.lrange(&key, 0, -1).await.unwrap_or_else(|e| {
+                tracing::warn!("Redis error reading queue for {}: {e}", dev.device_id);
+                Vec::new()
+            });
             for entry in entries.iter().filter(|e| token_track_id(e) == id) {
-                let _: Result<(), _> = conn.lrem(&key, 0, entry).await;
+                warn_redis!(
+                    "removing queue entry {entry}",
+                    conn.lrem(&key, 0, entry).await
+                );
             }
             if dev.current_track.as_ref().is_some_and(|t| t.id == id) {
                 dev.current_track = None;
@@ -848,7 +907,11 @@ impl AppState {
     /// (pre-reorder data or freshly restored) are appended newest-first.
     pub async fn list_tracks(&self) -> Vec<AudioTrack> {
         let mut conn = self.redis.clone();
-        let all: HashMap<String, String> = conn.hgetall(REDIS_KEY_TRACKS).await.unwrap_or_default();
+        let all: HashMap<String, String> =
+            conn.hgetall(REDIS_KEY_TRACKS).await.unwrap_or_else(|e| {
+                tracing::warn!("Redis error reading tracks: {e}");
+                HashMap::new()
+            });
         let mut by_id: HashMap<String, AudioTrack> = all
             .values()
             .filter_map(|s| AudioTrack::from_redis_json(s))
@@ -941,22 +1004,31 @@ impl AppState {
 
         let state = self.clone();
         tokio::spawn(async move {
+            // Clear the flag on drop so a panic or early return cannot leave it
+            // latched, which would disable restore for the rest of the process.
+            let _guard = RestoreGuard(&state);
             tracing::info!(
                 "Tracks key missing: restoring {} track(s) from audio_cache",
                 cached.len()
             );
             for (video_id, path) in cached {
                 let track = state.refetch_track_metadata(&video_id, &path).await;
+                let json_str = match track.to_redis_json() {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!("Failed to serialize restored track {video_id}: {e}");
+                        continue;
+                    }
+                };
                 let mut conn = state.redis.clone();
                 if let Err(e) = conn
-                    .hset::<_, _, _, ()>(REDIS_KEY_TRACKS, &video_id, track.to_redis_json())
+                    .hset::<_, _, _, ()>(REDIS_KEY_TRACKS, &video_id, json_str)
                     .await
                 {
                     tracing::warn!("Redis error restoring track {video_id}: {e}");
                 }
             }
             state.broadcast_tracks().await;
-            state.restoring.store(false, Ordering::SeqCst);
             tracing::info!("Track restore finished");
         });
     }
@@ -1123,12 +1195,26 @@ impl AppState {
         dev
     }
 
-    pub async fn update_device(&self, device_id: &str, upd: DeviceUpdate) {
+    /// Apply an update to a device. Returns false if the device is not
+    /// registered, so callers needing a 404 don't have to read it first.
+    pub async fn update_device(&self, device_id: &str, upd: DeviceUpdate) -> bool {
         let Some(mut dev) = self.get_device(device_id).await else {
-            return;
+            return false;
         };
         dev.apply(upd, now_f64());
         self.write_device(&dev).await;
+        true
+    }
+
+    /// Whether a device is registered, without paying to deserialize it.
+    pub async fn device_exists(&self, device_id: &str) -> bool {
+        let mut conn = self.redis.clone();
+        conn.hexists(REDIS_KEY_DEVICES, device_id)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("Redis error checking device {device_id}: {e}");
+                false
+            })
     }
 
     /// Record the actual stop position. If still "playing", transition to "paused".
@@ -1148,9 +1234,18 @@ impl AppState {
     pub async fn remove_device(&self, device_id: &str) -> Option<DeviceState> {
         let device = self.get_device(device_id).await?;
         let mut conn = self.redis.clone();
-        let _: Result<(), _> = conn.hdel(REDIS_KEY_DEVICES, device_id).await;
-        let _: Result<(), _> = conn.del(pending_key(device_id)).await;
-        let _: Result<(), _> = conn.del(queue_key(device_id)).await;
+        warn_redis!(
+            "deleting device {device_id}",
+            conn.hdel(REDIS_KEY_DEVICES, device_id).await
+        );
+        warn_redis!(
+            "clearing pending for {device_id}",
+            conn.del(pending_key(device_id)).await
+        );
+        warn_redis!(
+            "clearing queue for {device_id}",
+            conn.del(queue_key(device_id)).await
+        );
         self.clear_playback_failures(device_id).await;
         Some(device)
     }
@@ -1178,16 +1273,17 @@ impl AppState {
         self.playback_failures.lock().await.remove(device_id);
     }
 
-    /// Return device states with their Up Next queues attached. Queue track
-    /// references are resolved in a single HMGET across all devices to minimize
-    /// round-trips (called from every Alexa webhook response path).
+    /// Return device states with their Up Next queues attached. Called from
+    /// every Alexa webhook response path and every broadcast, so it is held to
+    /// three round-trips regardless of device count: HGETALL for the devices,
+    /// one pipeline for all queues, one HMGET for the tracks they reference.
     pub async fn devices_json(&self) -> Value {
         let devices = self.all_devices().await;
-
-        let mut queues: HashMap<String, Vec<String>> = HashMap::new();
-        for id in devices.keys() {
-            queues.insert(id.clone(), self.queue_entries(id).await);
+        if devices.is_empty() {
+            return Value::Object(serde_json::Map::new());
         }
+
+        let mut queues = self.queues_for(devices.keys()).await;
         let tracks = self.fetch_tracks_for(queues.values().flatten()).await;
 
         let mut map = serde_json::Map::new();
@@ -1210,6 +1306,25 @@ impl AppState {
             }
         }
         Value::Object(map)
+    }
+
+    /// Read every device's queue in one pipeline round-trip. On error each
+    /// device gets an empty queue, matching the per-device fallback.
+    async fn queues_for(
+        &self,
+        device_ids: impl Iterator<Item = &String>,
+    ) -> HashMap<String, Vec<String>> {
+        let ids: Vec<&String> = device_ids.collect();
+        let mut pipe = redis::pipe();
+        for id in &ids {
+            pipe.lrange(queue_key(id), 0, -1);
+        }
+        let mut conn = self.redis.clone();
+        let queues: Vec<Vec<String>> = pipe.query_async(&mut conn).await.unwrap_or_else(|e| {
+            tracing::warn!("Redis error reading device queues: {e}");
+            vec![Vec::new(); ids.len()]
+        });
+        ids.into_iter().cloned().zip(queues).collect()
     }
 
     /// Fetch tracks referenced by queue entries in a single HMGET.
@@ -1257,7 +1372,7 @@ impl AppState {
 
     /// Notify clients that the track list changed (content is re-fetched via REST).
     pub async fn broadcast_tracks(&self) {
-        self.broadcast(json!({ "type": "tracks_update" }));
+        self.broadcast(tracks_update_message());
     }
 
     /// Broadcast playlist list/content changes to all clients.
@@ -1342,19 +1457,31 @@ impl AppState {
 
     /// Set a sleep timer that fires after `minutes` minutes. Spawns a task that
     /// stops all devices and sets playback mode to "off" when it expires.
-    /// Returns the expiry time (UNIX seconds).
-    pub async fn set_sleep_timer(self: &Arc<Self>, minutes: u64) -> f64 {
+    /// Returns the expiry time (UNIX seconds), or None if `minutes` is out of
+    /// range.
+    ///
+    /// The range is owned here rather than at the caller: `minutes` arrives
+    /// straight from a WebSocket payload, and `minutes * 60` would overflow u64
+    /// on an absurd value. Rejected rather than clamped — a client asking for a
+    /// year of sleep timer is not asking for a day — which also leaves a running
+    /// timer undisturbed by a nonsense request.
+    pub async fn set_sleep_timer(self: &Arc<Self>, minutes: u64) -> Option<f64> {
+        if !(1..=MAX_SLEEP_TIMER_MINUTES).contains(&minutes) {
+            tracing::warn!("Rejecting out-of-range sleep timer: {minutes} minutes");
+            return None;
+        }
         let generation = self.sleep_timer_gen.fetch_add(1, Ordering::Relaxed) + 1;
         let expiry = now_f64() + (minutes as f64) * 60.0;
 
         let mut conn = self.redis.clone();
         let ttl_secs = (minutes * 60) + 10;
-        let _: Result<(), _> = conn
-            .set_ex::<_, _, ()>(REDIS_KEY_SLEEP_TIMER, expiry, ttl_secs)
-            .await;
+        warn_redis!(
+            "writing sleep timer",
+            conn.set_ex(REDIS_KEY_SLEEP_TIMER, expiry, ttl_secs).await
+        );
 
         self.spawn_sleep_expiry(time::Duration::from_secs(minutes * 60), generation);
-        expiry
+        Some(expiry)
     }
 
     /// Re-spawn the sleep timer task after a server restart. If a timer is
@@ -1383,10 +1510,16 @@ impl AppState {
             }
             tracing::info!("Sleep timer expired, stopping all devices");
             let mut conn = state.redis.clone();
-            let _: Result<(), _> = conn.del::<_, ()>(REDIS_KEY_SLEEP_TIMER).await;
+            warn_redis!(
+                "clearing expired sleep timer",
+                conn.del(REDIS_KEY_SLEEP_TIMER).await
+            );
             state.set_playback_mode("off").await;
             state.broadcast_playback_mode("off").await;
-            let device_ids = state.device_ids().await.unwrap_or_default();
+            let device_ids = state.device_ids().await.unwrap_or_else(|e| {
+                tracing::warn!("Redis error listing devices for sleep timer: {e}");
+                Vec::new()
+            });
             for did in &device_ids {
                 state
                     .update_device(did, DeviceUpdate::new().status("stopped"))
@@ -1401,7 +1534,10 @@ impl AppState {
     pub async fn cancel_sleep_timer(&self) {
         self.sleep_timer_gen.fetch_add(1, Ordering::Relaxed);
         let mut conn = self.redis.clone();
-        let _: Result<(), _> = conn.del::<_, ()>(REDIS_KEY_SLEEP_TIMER).await;
+        warn_redis!(
+            "cancelling sleep timer",
+            conn.del(REDIS_KEY_SLEEP_TIMER).await
+        );
     }
 
     pub async fn broadcast_sleep_timer(&self) {
@@ -1471,37 +1607,21 @@ impl AppState {
     /// Discard a queued command.
     pub async fn clear_pending(&self, device_id: &str) {
         let mut conn = self.redis.clone();
-        if let Err(e) = conn.del::<_, ()>(pending_key(device_id)).await {
-            tracing::warn!("Redis error clearing pending for {device_id}: {e}");
-        }
+        warn_redis!(
+            "clearing pending for {device_id}",
+            conn.del(pending_key(device_id)).await
+        );
     }
 
     // ── Up Next queue ──
 
-    /// Append a track to the device's Up Next queue. Returns false on Redis error.
-    pub async fn push_queue(&self, device_id: &str, track_id: &str) -> bool {
+    /// Append a track to the device's Up Next queue. The Redis error is passed
+    /// through so callers can tell a write failure from a rejected request.
+    pub async fn push_queue(&self, device_id: &str, track_id: &str) -> redis::RedisResult<()> {
         let mut conn = self.redis.clone();
-        match conn
-            .rpush::<_, _, ()>(queue_key(device_id), new_token(track_id))
+        conn.rpush(queue_key(device_id), new_token(track_id))
             .await
-        {
-            Ok(()) => true,
-            Err(e) => {
-                tracing::warn!("Redis error pushing queue for {device_id}: {e}");
-                false
-            }
-        }
-    }
-
-    /// Return a device's queue entries (track resolution is done by devices_json).
-    async fn queue_entries(&self, device_id: &str) -> Vec<String> {
-        let mut conn = self.redis.clone();
-        conn.lrange(queue_key(device_id), 0, -1)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!("Redis error reading queue for {device_id}: {e}");
-                Vec::new()
-            })
+            .inspect_err(|e| tracing::warn!("Redis error pushing queue for {device_id}: {e}"))
     }
 
     /// Peek at the front of the queue as (entry, track) without consuming.
@@ -1547,9 +1667,10 @@ impl AppState {
     /// Clear the entire queue.
     pub async fn clear_queue(&self, device_id: &str) {
         let mut conn = self.redis.clone();
-        if let Err(e) = conn.del::<_, ()>(queue_key(device_id)).await {
-            tracing::warn!("Redis error clearing queue for {device_id}: {e}");
-        }
+        warn_redis!(
+            "clearing queue for {device_id}",
+            conn.del(queue_key(device_id)).await
+        );
     }
 
     // ── Playlists ──
@@ -1566,7 +1687,7 @@ impl AppState {
             name: name.to_string(),
             created_at: now_f64(),
         };
-        let json_str = serde_json::to_string(&playlist).expect("Playlist serializes to JSON");
+        let json_str = serialize_playlist(&playlist)?;
         let mut conn = self.redis.clone();
         match conn
             .hset::<_, _, _, ()>(REDIS_KEY_PLAYLISTS, &playlist.id, json_str)
@@ -1591,7 +1712,9 @@ impl AppState {
             return false;
         };
         playlist.name = name.to_string();
-        let json_str = serde_json::to_string(&playlist).expect("Playlist serializes to JSON");
+        let Some(json_str) = serialize_playlist(&playlist) else {
+            return false;
+        };
         let mut conn = self.redis.clone();
         match conn
             .hset::<_, _, _, ()>(REDIS_KEY_PLAYLISTS, playlist_id, json_str)
@@ -1653,10 +1776,16 @@ impl AppState {
         if removed == 0 {
             return false;
         }
-        let _: Result<(), _> = conn.del(playlist_key(playlist_id)).await;
+        warn_redis!(
+            "deleting playlist tracks for {playlist_id}",
+            conn.del(playlist_key(playlist_id)).await
+        );
         // If this was the active playlist, revert to the full library
         if self.raw_active_playlist().await.as_deref() == Some(playlist_id) {
-            let _: Result<(), _> = conn.del(REDIS_KEY_ACTIVE_PLAYLIST).await;
+            warn_redis!(
+                "clearing active playlist",
+                conn.del(REDIS_KEY_ACTIVE_PLAYLIST).await
+            );
         }
         true
     }
@@ -1911,6 +2040,29 @@ impl AppState {
                 None
             }
         }
+    }
+}
+
+/// The "track list changed, re-fetch it" nudge. Tracks are paginated over REST
+/// rather than pushed, so this frame carries no payload. Shared with the
+/// WebSocket resync path so the message shape has one definition.
+pub fn tracks_update_message() -> Value {
+    json!({ "type": "tracks_update" })
+}
+
+/// Serialize a playlist for Redis, reporting rather than panicking on failure.
+fn serialize_playlist(playlist: &Playlist) -> Option<String> {
+    serde_json::to_string(playlist)
+        .inspect_err(|e| tracing::warn!("Failed to serialize playlist {}: {e}", playlist.id))
+        .ok()
+}
+
+/// Releases `AppState::restoring` when the restore task ends, however it ends.
+struct RestoreGuard<'a>(&'a AppState);
+
+impl Drop for RestoreGuard<'_> {
+    fn drop(&mut self) {
+        self.0.restoring.store(false, Ordering::SeqCst);
     }
 }
 
@@ -2252,7 +2404,7 @@ mod tests {
             created_at: 1.0,
             file_path: String::new(),
         };
-        let restored = AudioTrack::from_redis_json(&track.to_redis_json()).unwrap();
+        let restored = AudioTrack::from_redis_json(&track.to_redis_json().unwrap()).unwrap();
         assert!(restored.is_live);
         assert!(restored.file_path.is_empty());
     }

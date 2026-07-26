@@ -1,7 +1,7 @@
 use crate::alexa::handle_alexa;
 use crate::state::{
-    AUDIO_MIME, AppState, AudioTrack, DeviceUpdate, PlayRequest, ReorderOutcome, ReorderRequest,
-    SeekRequest, UrlKind, classify_url, run_yt_dlp,
+    AUDIO_MIME, AppState, AudioTrack, DeviceState, DeviceUpdate, PlayRequest, ReorderOutcome,
+    ReorderRequest, SeekRequest, UrlKind, classify_url, run_yt_dlp, tracks_update_message,
 };
 use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message, WebSocket};
@@ -15,6 +15,7 @@ use std::io::SeekFrom;
 use std::sync::Arc;
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::sync::broadcast;
 use tokio_util::io::ReaderStream;
 
 type AppResult<T> = Result<T, AppError>;
@@ -160,9 +161,9 @@ pub async fn live_audio(
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .collect();
-    let (cdn_url, acodec) = match lines.as_slice() {
-        [urls @ .., acodec] if !urls.is_empty() => (urls[0], *acodec),
-        _ => return Err(AppError::internal("yt-dlp returned empty stream URL")),
+    // At least one URL line plus the acodec line; extra URL lines are ignored
+    let [cdn_url, .., acodec] = lines.as_slice() else {
+        return Err(AppError::internal("yt-dlp returned empty stream URL"));
     };
 
     // AAC can be remuxed as-is; other codecs (Opus, etc.) need transcoding
@@ -605,15 +606,18 @@ async fn track_or_404(state: &AppState, track_id: &str) -> AppResult<AudioTrack>
         .ok_or_else(|| AppError::not_found("Track not found"))
 }
 
+async fn device_or_404(state: &AppState, device_id: &str) -> AppResult<DeviceState> {
+    state
+        .get_device(device_id)
+        .await
+        .ok_or_else(|| AppError::not_found("Device not found"))
+}
+
 /// Resolve the response locale for this request. The client advertises its
-/// locale via the X-App-Lang header (derived from navigator.language); when
-/// absent or unrecognized we fall back to the server-wide APP_LANG default.
+/// locale via the X-App-Lang header (derived from navigator.language); the
+/// fallback policy itself lives in AppState::locale_or_default.
 fn client_locale(headers: &HeaderMap, state: &AppState) -> String {
-    headers
-        .get("x-app-lang")
-        .and_then(|v| v.to_str().ok())
-        .and_then(crate::resolve_locale)
-        .unwrap_or_else(|| state.locale.clone())
+    state.locale_or_default(headers.get("x-app-lang").and_then(|v| v.to_str().ok()))
 }
 
 /// Queue a track for playback on each device's pending slot and broadcast state.
@@ -648,17 +652,24 @@ pub async fn queue_next(
     let locale = client_locale(&headers, &state);
     let track = track_or_404(&state, &req.track_id).await?;
     let mut queued = Vec::new();
+    let mut write_error = None;
     for did in &req.device_ids {
         // Only queue on registered devices to avoid orphaned Redis keys
-        if state.get_device(did).await.is_none() {
+        if !state.device_exists(did).await {
             continue;
         }
-        if state.push_queue(did, &track.id).await {
-            queued.push(did.clone());
+        match state.push_queue(did, &track.id).await {
+            Ok(()) => queued.push(did.clone()),
+            Err(e) => write_error = Some(e),
         }
     }
     if queued.is_empty() {
-        return Err(AppError::bad_request("No valid devices"));
+        // A device that exists but could not be written to is our fault, not a
+        // malformed request, so don't report it as one
+        return Err(match write_error {
+            Some(e) => AppError::internal(format!("Failed to queue track: {e}")),
+            None => AppError::bad_request("No valid devices"),
+        });
     }
     state.broadcast_devices().await;
 
@@ -691,10 +702,15 @@ pub async fn remove_queue_item(
 pub async fn clear_queue(
     State(state): State<Arc<AppState>>,
     Path(device_id): Path<String>,
-) -> Json<Value> {
+) -> AppResult<Json<Value>> {
+    // DEL cannot tell "no device" from "empty queue", so existence is checked
+    // separately — but only for existence, not for the device's contents
+    if !state.device_exists(&device_id).await {
+        return Err(AppError::not_found("Device not found"));
+    }
     state.clear_queue(&device_id).await;
     state.broadcast_devices().await;
-    Json(json!({ "status": "ok" }))
+    Ok(Json(json!({ "status": "ok" })))
 }
 
 /// POST /api/devices/:id/seek
@@ -707,10 +723,7 @@ pub async fn seek_device(
     Path(device_id): Path<String>,
     Json(req): Json<SeekRequest>,
 ) -> AppResult<Json<Value>> {
-    let dev = state
-        .get_device(&device_id)
-        .await
-        .ok_or_else(|| AppError::not_found("Device not found"))?;
+    let dev = device_or_404(&state, &device_id).await?;
     let track = dev
         .current_track
         .ok_or_else(|| AppError::bad_request("Device has no track to seek"))?;
@@ -739,12 +752,17 @@ pub async fn seek_device(
 pub async fn stop_device(
     State(state): State<Arc<AppState>>,
     Path(device_id): Path<String>,
-) -> Json<Value> {
-    state
+) -> AppResult<Json<Value>> {
+    // update_device already reads the device, so let it report the 404 rather
+    // than paying for a second lookup
+    if !state
         .update_device(&device_id, DeviceUpdate::new().status("stopped"))
-        .await;
+        .await
+    {
+        return Err(AppError::not_found("Device not found"));
+    }
     state.broadcast_devices().await;
-    Json(json!({ "status": "ok" }))
+    Ok(Json(json!({ "status": "ok" })))
 }
 
 /// DELETE /api/devices/:id
@@ -808,6 +826,36 @@ pub async fn ws_upgrade(State(state): State<Arc<AppState>>, ws: WebSocketUpgrade
     ws.on_upgrade(move |socket| ws_handler(socket, state))
 }
 
+/// Snapshot of the pushed state a client mirrors. Deliberately excludes the
+/// track list, which the client pages in over REST — callers that also need
+/// tracks refreshed must send tracks_update_message() alongside it. Applied
+/// idempotently by the client, so resending is always safe.
+///
+/// The six reads are independent, so they are issued together: the Redis
+/// connection is multiplexed, and this runs on both connect and lag resync,
+/// where the client is already behind.
+async fn init_message(state: &AppState) -> String {
+    let (devices, playback_mode, downloads, playlists, active_playlist, sleep_timer) = tokio::join!(
+        state.devices_json(),
+        state.playback_mode(),
+        state.downloads_json(),
+        state.playlists_json(),
+        state.active_playlist(),
+        state.sleep_timer(),
+    );
+    json!({
+        "type": "init",
+        "version": crate::VERSION,
+        "devices": devices,
+        "playback_mode": playback_mode,
+        "downloads": downloads,
+        "playlists": playlists,
+        "active_playlist": active_playlist,
+        "sleep_timer": sleep_timer,
+    })
+    .to_string()
+}
+
 async fn ws_handler(mut socket: WebSocket, state: Arc<AppState>) {
     tracing::info!("WebSocket client connected");
 
@@ -818,18 +866,8 @@ async fn ws_handler(mut socket: WebSocket, state: Arc<AppState>) {
 
     // Send initial state (track list is fetched via REST pagination).
     // Include in-progress downloads so the progress display is restored after reload.
-    let init_msg = json!({
-        "type": "init",
-        "version": crate::VERSION,
-        "devices": state.devices_json().await,
-        "playback_mode": state.playback_mode().await,
-        "downloads": state.downloads_json().await,
-        "playlists": state.playlists_json().await,
-        "active_playlist": state.active_playlist().await,
-        "sleep_timer": state.sleep_timer().await,
-    });
     if socket
-        .send(Message::Text(init_msg.to_string().into()))
+        .send(Message::Text(init_message(&state).await.into()))
         .await
         .is_err()
     {
@@ -842,9 +880,33 @@ async fn ws_handler(mut socket: WebSocket, state: Arc<AppState>) {
     loop {
         tokio::select! {
             // Server → client (broadcast)
-            Ok(msg) = rx.recv() => {
-                if socket.send(Message::Text(msg.into())).await.is_err() {
-                    break;
+            broadcast = rx.recv() => {
+                // Must be matched exhaustively rather than with `Ok(msg) = ...`:
+                // select! disables a branch whose pattern fails to match, so a
+                // single Lagged error would stall every later broadcast until
+                // another branch happened to fire.
+                match broadcast {
+                    Ok(msg) => {
+                        if socket.send(Message::Text(msg.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    // This client fell behind and the skipped messages are gone.
+                    // Resend the full snapshot plus a tracks_update so it
+                    // re-syncs everything instead of drifting silently.
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("WebSocket client lagged by {n} message(s); resyncing");
+                        let init = init_message(&state).await;
+                        let tracks = tracks_update_message().to_string();
+                        if socket.send(Message::Text(init.into())).await.is_err()
+                            || socket.send(Message::Text(tracks.into())).await.is_err()
+                        {
+                            break;
+                        }
+                    }
+                    // Only possible once every sender is gone, which cannot
+                    // happen while this task holds an Arc<AppState>.
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
 
@@ -945,10 +1007,17 @@ async fn handle_ws_message(
             state.cancel_downloads().await;
         }
         "set_sleep_timer" => {
-            if let Some(minutes) = data["minutes"].as_u64().filter(|&m| m > 0) {
-                state.set_sleep_timer(minutes).await;
-            } else {
-                state.cancel_sleep_timer().await;
+            match data["minutes"].as_u64() {
+                // Absent, null or zero all mean "no timer"
+                None | Some(0) => state.cancel_sleep_timer().await,
+                Some(minutes) => {
+                    // The valid range belongs to set_sleep_timer; a rejected
+                    // value leaves any running timer alone, so there is nothing
+                    // to broadcast
+                    if state.set_sleep_timer(minutes).await.is_none() {
+                        return;
+                    }
+                }
             }
             state.broadcast_sleep_timer().await;
         }

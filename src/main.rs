@@ -60,11 +60,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
     });
 
-    // Do not swap this expect for a hardcoded default: the i18n! macro's constant
-    // is the single source of truth for the fallback locale.
+    // Do not swap this for a hardcoded default: the i18n! macro's constant is
+    // the single source of truth for the fallback locale. Reported through die()
+    // like every other fatal startup condition rather than as a panic.
     let fallback = _RUST_I18N_FALLBACK_LOCALE
         .and_then(|l| l.first())
-        .expect("i18n fallback locale must be set")
+        .unwrap_or_else(|| die("i18n fallback locale is not set"))
         .to_string();
     let (locale, locale_src) = match std::env::var("APP_LANG")
         .ok()
@@ -136,7 +137,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/devices/{device_id}/seek", post(handlers::seek_device))
         .route("/api/devices/{device_id}/stop", post(handlers::stop_device))
         .route("/alexa", post(handlers::alexa_webhook))
-        .route("/ws", get(handlers::ws_upgrade))
+        .route(auth::WS_PATH, get(handlers::ws_upgrade))
+        // route_layer only wraps the routes registered above it, which is what
+        // makes the two static services below deliberately public: the browser
+        // must be able to load the app shell and its message catalogs in order
+        // to show the login prompt that obtains a token in the first place.
+        // Anything that touches user data must be registered above this layer.
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_token,

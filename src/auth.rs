@@ -18,6 +18,11 @@ type HmacSha256 = Hmac<Sha256>;
 /// for Range requests throughout long tracks, so the TTL must be generous.
 const STREAM_URL_TTL_SECS: u64 = 24 * 3600;
 
+/// The one path that accepts `?token=`. main.rs registers the route from this
+/// constant so a rename cannot silently disable query-token auth; it must also
+/// match the URL built by useWebSocket() in front/src/hooks.ts.
+pub const WS_PATH: &str = "/ws";
+
 pub async fn require_token(
     State(state): State<Arc<AppState>>,
     request: Request,
@@ -50,8 +55,7 @@ pub async fn require_token(
         .and_then(|v| v.strip_prefix("Bearer "))
         .is_some_and(|token| constant_time_eq(token, expected));
 
-    let query_ok = query_param(request.uri().query(), "token")
-        .is_some_and(|token| constant_time_eq(&token, expected));
+    let query_ok = verify_query_token(expected, path, request.uri().query());
 
     if header_ok || query_ok {
         next.run(request).await
@@ -85,6 +89,15 @@ pub fn stream_path(api_token: Option<&str>, audio_id: &str, is_live: bool) -> St
         path.push_str(&stream_query(secret, audio_id));
     }
     path
+}
+
+/// Whether `?token=` authenticates this request. Only the WebSocket handshake
+/// qualifies — the browser WebSocket API cannot attach headers. Accepting it
+/// everywhere would spread the token into proxy logs, browser history and
+/// Referer headers for requests that have no need for it.
+fn verify_query_token(expected: &str, path: &str, query: Option<&str>) -> bool {
+    path == WS_PATH
+        && query_param(query, "token").is_some_and(|token| constant_time_eq(&token, expected))
 }
 
 fn verify_stream_query(secret: &str, audio_id: &str, query: Option<&str>) -> bool {
@@ -227,6 +240,19 @@ mod tests {
         assert_eq!(audio_endpoint_id("/api/audio/abc123/live"), Some("abc123"));
         assert_eq!(audio_endpoint_id("/api/audio/abc123/other"), None);
         assert_eq!(audio_endpoint_id("/api/tracks"), None);
+    }
+
+    #[test]
+    fn query_token_is_accepted_only_on_the_ws_path() {
+        let q = Some("token=secret");
+        assert!(verify_query_token("secret", "/ws", q));
+        // Every other endpoint must use the Authorization header
+        assert!(!verify_query_token("secret", "/api/tracks", q));
+        assert!(!verify_query_token("secret", "/api/play", q));
+        assert!(!verify_query_token("secret", "/ws/", q));
+        // Wrong or missing token is still rejected on /ws
+        assert!(!verify_query_token("secret", "/ws", Some("token=wrong")));
+        assert!(!verify_query_token("secret", "/ws", None));
     }
 
     #[test]

@@ -19,12 +19,18 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 
 /// Allowed timestamp skew (Amazon specifies max 150 seconds).
 const TIMESTAMP_TOLERANCE_SECS: i64 = 150;
 /// Timeout for fetching the certificate chain.
 const CERT_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+/// Cap on cert fetches in flight. /alexa is unauthenticated, so anyone can make
+/// this endpoint issue an outbound request by naming a cert URL we have not
+/// cached. Steady-state traffic reuses the cache and never reaches the fetch,
+/// so a small cap is generous for real Alexa requests while keeping a flood of
+/// forged URLs from tying up connections and sockets.
+const CERT_FETCH_MAX_INFLIGHT: usize = 4;
 /// Hostname required in the certificate's SAN.
 const ECHO_API_SAN: &str = "echo-api.amazon.com";
 
@@ -38,6 +44,35 @@ struct CachedKey {
 fn cert_cache() -> &'static Mutex<HashMap<String, CachedKey>> {
     static CACHE: OnceLock<Mutex<HashMap<String, CachedKey>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Look up a still-valid cached key for this certificate URL.
+async fn cached_key(cert_url: &str) -> Option<PKey<Public>> {
+    let cache = cert_cache().lock().await;
+    cache
+        .get(cert_url)
+        .filter(|c| SystemTime::now() < c.not_after)
+        .map(|c| c.key.clone())
+}
+
+fn cert_fetch_slots() -> &'static Semaphore {
+    static SLOTS: OnceLock<Semaphore> = OnceLock::new();
+    SLOTS.get_or_init(|| Semaphore::new(CERT_FETCH_MAX_INFLIGHT))
+}
+
+/// Shared HTTP client for cert fetches, so connections and the TLS session
+/// cache are reused across requests instead of rebuilt per fetch.
+fn cert_http_client() -> Result<&'static reqwest::Client, String> {
+    static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(CERT_FETCH_TIMEOUT)
+                .build()
+                .map_err(|e| format!("http client init failed: {e}"))
+        })
+        .as_ref()
+        .map_err(Clone::clone)
 }
 
 /// Verify request body authenticity using signature headers and the certificate chain.
@@ -123,19 +158,28 @@ fn validate_cert_url(cert_url: &str) -> Result<url::Url, String> {
 
 /// Fetch and verify the certificate chain, returning the public key for signature verification (cached).
 async fn fetch_verified_key(cert_url: &str) -> Result<PKey<Public>, String> {
-    {
-        let cache = cert_cache().lock().await;
-        if let Some(c) = cache.get(cert_url)
-            && SystemTime::now() < c.not_after
-        {
-            return Ok(c.key.clone());
-        }
+    if let Some(key) = cached_key(cert_url).await {
+        return Ok(key);
     }
 
-    let pem = reqwest::Client::builder()
-        .timeout(CERT_FETCH_TIMEOUT)
-        .build()
-        .map_err(|e| format!("http client init failed: {e}"))?
+    // Queue rather than fail fast: a burst of genuine Alexa events at cold start
+    // would otherwise have most of its requests rejected. The wait is bounded so
+    // a flood cannot make requests pile up indefinitely either.
+    let _slot = tokio::time::timeout(CERT_FETCH_TIMEOUT, cert_fetch_slots().acquire())
+        .await
+        .map_err(|_| "timed out waiting for a certificate fetch slot".to_string())?
+        .map_err(|e| format!("certificate fetch semaphore closed: {e}"))?;
+
+    // A request ahead of us in the queue may have fetched the same certificate
+    // while we waited, which is what a cold-start burst looks like once the
+    // permits are taken. The first CERT_FETCH_MAX_INFLIGHT requests never wait,
+    // so they still duplicate one fetch between them — bounded and one-off, and
+    // cheaper than the per-URL single-flight map it would take to avoid.
+    if let Some(key) = cached_key(cert_url).await {
+        return Ok(key);
+    }
+
+    let pem = cert_http_client()?
         .get(cert_url)
         .send()
         .await
