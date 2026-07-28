@@ -74,7 +74,8 @@ youtube-multiroom-rs/
 │           ├── TrackRowInfo.tsx
 │           ├── UrlInput.tsx
 │           └── icons.tsx      # Shared inline SVG icons
-├── alexa_interaction_model.json
+├── alexa_interaction_model.json     # Alexa interaction model (Japanese)
+├── alexa_interaction_model_en.json  # Alexa interaction model (English)
 └── README.md
 ```
 
@@ -203,13 +204,14 @@ The binary, `front/dist/`, `yt-dlp`, and `ffmpeg` are needed on the Pi.
 ## Alexa Skill Setup
 
 1. Create a custom skill on the [Alexa Developer Console](https://developer.amazon.com/alexa/console/ask)
-2. Invocation name: `youtube プレーヤー`
-3. Interaction Model > JSON Editor: paste `alexa_interaction_model.json`
-4. Interfaces > Enable **Audio Player**
-5. Endpoint > HTTPS > `https://<your-tunnel-url>/alexa`
-6. Test > Set to **Development**
+2. Interaction Model > JSON Editor: paste the model for the skill's language — `alexa_interaction_model.json` (Japanese, invocation name `youtube プレーヤー`) or `alexa_interaction_model_en.json` (English, invocation name `youtube player`). Both declare the same intents; only the invocation name and the sample utterances differ
+3. Interfaces > Enable **Audio Player**
+4. Endpoint > HTTPS > `https://<your-tunnel-url>/alexa`
+5. Test > Set to **Development**
 
-When upgrading from an older version, re-paste `alexa_interaction_model.json` and rebuild the model — `AMAZON.NextIntent` / `AMAZON.PreviousIntent` (voice skip) were added.
+A skill can carry several languages: add each one under Build > Language settings and paste the matching model into that language's JSON editor. The backend answers in the language the device reports (`request.locale`), so an Echo set to English gets the English replies from `locales/en.yml` regardless of which model was built.
+
+When upgrading from an older version, re-paste the model and rebuild it — `AMAZON.NextIntent` / `AMAZON.PreviousIntent` (voice skip) were added.
 
 ## PWA
 
