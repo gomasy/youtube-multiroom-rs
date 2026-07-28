@@ -10,18 +10,28 @@ youtube-multiroom-rs/
 ├── Cargo.toml
 ├── build.rs               # Embed git hash & build date
 ├── Dockerfile
+├── .env.example           # Environment variable template
 ├── .github/
 │   ├── renovate.json          # Renovate dependency updates
 │   └── workflows/
 │       ├── build-image.yml    # Container image build (ghcr.io)
-│       ├── check.yml          # rustfmt, cargo test, frontend typecheck
+│       ├── check.yml          # clippy, rustfmt, cargo test, frontend typecheck
 │       └── release.yml        # Binary release build (GitHub Releases)
 ├── locales/
 │   ├── en.yml                 # English message catalog (backend)
 │   └── ja.yml                 # Japanese message catalog (backend)
 ├── src/
 │   ├── main.rs        # Entry point & router
-│   ├── state.rs       # Shared state, audio & device management
+│   ├── state/         # Shared state (AppState), split by subject
+│   │   ├── mod.rs         # AppState itself; re-exports the whole module API
+│   │   ├── model.rs       # Wire/storage types and AudioPlayer tokens
+│   │   ├── track.rs       # Audio library: registration, ordering, selection
+│   │   ├── device.rs      # Per-device state, pending commands, play-next queues
+│   │   ├── playback.rs    # Playback mode & sleep timer
+│   │   ├── playlist.rs    # Named playlists & YouTube playlist import
+│   │   ├── download.rs    # Audio downloading and progress reporting
+│   │   ├── ytdlp.rs       # yt-dlp invocation & process group reaping
+│   │   └── url.rs         # YouTube URL / video ID validation
 │   ├── handlers.rs    # HTTP / WebSocket handlers
 │   ├── auth.rs        # Bearer token authentication middleware
 │   ├── alexa.rs       # Alexa skill handler
@@ -38,6 +48,7 @@ youtube-multiroom-rs/
 │       ├── index.tsx
 │       ├── App.tsx
 │       ├── api.ts         # Auth-aware fetch wrapper
+│       ├── errors.ts      # Turns a rejected API call into a toast
 │       ├── format.ts      # Shared time/duration formatters
 │       ├── hooks.ts       # WebSocket hook
 │       ├── i18n.ts        # Frontend i18n runtime (locale detection & lookup)
