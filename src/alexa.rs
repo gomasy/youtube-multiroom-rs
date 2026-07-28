@@ -16,8 +16,8 @@ struct ReqCtx<'a> {
     device_id: String,
     base_url: &'a str,
     /// Language for spoken responses (Alexa sends the user's locale per request,
-    /// so an Echo set to English gets English replies even when APP_LANG says
-    /// otherwise). Falls back to the server-wide default.
+    /// so an Echo set to Japanese gets Japanese replies). Falls back to the
+    /// built-in default locale.
     locale: String,
     /// Whether this response may carry speech. Only spoken or launched sessions
     /// may; AudioPlayer and PlaybackController responses are directives only.
@@ -42,7 +42,7 @@ pub async fn handle_alexa(state: &Arc<AppState>, body: Value, base_url: &str) ->
         return alexa_response(json!({}));
     }
 
-    let locale = state.locale_or_default(body["request"]["locale"].as_str());
+    let locale = crate::locale_or_default(body["request"]["locale"].as_str());
     let can_speak = matches!(req_type, "LaunchRequest" | "IntentRequest");
 
     // Every remaining request type acts on one specific device. Without a

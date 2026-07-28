@@ -71,10 +71,7 @@ pub async fn stream_audio(
     Path(audio_id): Path<String>,
     headers: HeaderMap,
 ) -> AppResult<Response> {
-    let track = state
-        .get_track(&audio_id)
-        .await
-        .ok_or_else(|| AppError::not_found("Audio not found"))?;
+    let track = track_or_404(&state, &audio_id).await?;
 
     let mut file = fs::File::open(&track.file_path)
         .await
@@ -382,15 +379,24 @@ pub async fn reorder_track(
     Ok(Json(json!({ "status": "ok" })))
 }
 
+/// Body shared by every endpoint that acts on a set of tracks.
 #[derive(Deserialize)]
-pub struct BulkDeleteRequest {
+pub struct TrackIdsRequest {
     track_ids: Vec<String>,
+}
+
+/// Announce a track deletion. Deleting a track also strips it from playlists
+/// and from device queues, so all three views have to be refreshed together.
+async fn broadcast_track_removal(state: &AppState) {
+    state.broadcast_tracks().await;
+    state.broadcast_devices().await;
+    state.broadcast_playlists().await;
 }
 
 /// POST /api/tracks/bulk-delete
 pub async fn bulk_delete_tracks(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<BulkDeleteRequest>,
+    Json(req): Json<TrackIdsRequest>,
 ) -> AppResult<Json<Value>> {
     let mut deleted = 0u32;
     for id in &req.track_ids {
@@ -399,16 +405,9 @@ pub async fn bulk_delete_tracks(
         }
     }
     if deleted > 0 {
-        state.broadcast_tracks().await;
-        state.broadcast_devices().await;
-        state.broadcast_playlists().await;
+        broadcast_track_removal(&state).await;
     }
     Ok(Json(json!({ "status": "ok", "deleted": deleted })))
-}
-
-#[derive(Deserialize)]
-pub struct BulkPlaylistTrackRequest {
-    track_ids: Vec<String>,
 }
 
 /// POST /api/playlists/:id/tracks/bulk
@@ -416,7 +415,7 @@ pub async fn bulk_add_playlist_tracks(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(playlist_id): Path<String>,
-    Json(req): Json<BulkPlaylistTrackRequest>,
+    Json(req): Json<TrackIdsRequest>,
 ) -> AppResult<Json<Value>> {
     playlist_or_404(&state, &playlist_id).await?;
     let mut added = 0u32;
@@ -429,7 +428,7 @@ pub async fn bulk_add_playlist_tracks(
         state.broadcast_playlists().await;
         state.broadcast_tracks().await;
     }
-    let locale = client_locale(&headers, &state);
+    let locale = client_locale(&headers);
     Ok(Json(json!({
         "status": "ok",
         "added": added,
@@ -441,7 +440,7 @@ pub async fn bulk_add_playlist_tracks(
 pub async fn bulk_remove_playlist_tracks(
     State(state): State<Arc<AppState>>,
     Path(playlist_id): Path<String>,
-    Json(req): Json<BulkPlaylistTrackRequest>,
+    Json(req): Json<TrackIdsRequest>,
 ) -> AppResult<Json<Value>> {
     playlist_or_404(&state, &playlist_id).await?;
     let removed = state
@@ -467,10 +466,7 @@ pub async fn delete_track(
         .remove_track(&track_id)
         .await
         .ok_or_else(|| AppError::not_found("Track not found"))?;
-    state.broadcast_tracks().await;
-    state.broadcast_devices().await;
-    // Update playlist counts for any playlists that contained this track
-    state.broadcast_playlists().await;
+    broadcast_track_removal(&state).await;
     Ok(Json(json!({ "status": "ok" })))
 }
 
@@ -479,11 +475,11 @@ pub async fn delete_track(
 // ════════════════════════════════════════
 
 async fn playlist_or_404(state: &AppState, playlist_id: &str) -> AppResult<()> {
-    state
-        .get_playlist(playlist_id)
-        .await
-        .map(|_| ())
-        .ok_or_else(|| AppError::not_found("Playlist not found"))
+    if state.playlist_exists(playlist_id).await {
+        Ok(())
+    } else {
+        Err(AppError::not_found("Playlist not found"))
+    }
 }
 
 /// GET /api/playlists
@@ -565,7 +561,7 @@ pub async fn add_playlist_track(
     state.broadcast_playlists().await;
     // Notify clients viewing this playlist to refresh their track list
     state.broadcast_tracks().await;
-    let locale = client_locale(&headers, &state);
+    let locale = client_locale(&headers);
     Ok(Json(json!({
         "status": "ok",
         "message": t!("api_added_to_playlist", locale = &locale, title = &track.title),
@@ -602,7 +598,7 @@ pub async fn play_on_devices(
     Json(req): Json<PlayRequest>,
 ) -> AppResult<Json<Value>> {
     let track = track_or_404(&state, &req.track_id).await?;
-    let locale = client_locale(&headers, &state);
+    let locale = client_locale(&headers);
     queue_on_devices(&state, track, req.device_ids, &locale).await
 }
 
@@ -613,7 +609,7 @@ pub async fn play_on_all(
     Json(req): Json<PlayRequest>,
 ) -> AppResult<Json<Value>> {
     let track = track_or_404(&state, &req.track_id).await?;
-    let locale = client_locale(&headers, &state);
+    let locale = client_locale(&headers);
     let device_ids = state
         .device_ids()
         .await
@@ -637,9 +633,9 @@ async fn device_or_404(state: &AppState, device_id: &str) -> AppResult<DeviceSta
 
 /// Resolve the response locale for this request. The client advertises its
 /// locale via the X-App-Lang header (derived from navigator.language); the
-/// fallback policy itself lives in AppState::locale_or_default.
-fn client_locale(headers: &HeaderMap, state: &AppState) -> String {
-    state.locale_or_default(headers.get("x-app-lang").and_then(|v| v.to_str().ok()))
+/// fallback policy itself lives in crate::locale_or_default.
+fn client_locale(headers: &HeaderMap) -> String {
+    crate::locale_or_default(headers.get("x-app-lang").and_then(|v| v.to_str().ok()))
 }
 
 /// Queue a track for playback on each device's pending slot and broadcast state.
@@ -671,7 +667,7 @@ pub async fn queue_next(
     headers: HeaderMap,
     Json(req): Json<PlayRequest>,
 ) -> AppResult<Json<Value>> {
-    let locale = client_locale(&headers, &state);
+    let locale = client_locale(&headers);
     let track = track_or_404(&state, &req.track_id).await?;
     let mut queued = Vec::new();
     let mut write_error = None;

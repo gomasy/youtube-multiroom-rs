@@ -1,0 +1,203 @@
+//! Shared application state.
+//!
+//! `AppState` owns the Redis connection, the WebSocket broadcast channel and
+//! the in-process bookkeeping that outlives a single request (download
+//! progress, per-video download locks, playback failure counters). Its methods
+//! are grouped by subject into sibling modules, each contributing its own
+//! `impl AppState` block:
+//!
+//! - [`model`] — wire types, and the tokens identifying a queued play
+//! - [`track`] — the audio library: registration, ordering, selection
+//! - [`device`] — per-device state, pending commands, Up Next queues
+//! - [`playback`] — playback mode and the sleep timer
+//! - [`playlist`] — named playlists and YouTube playlist import
+//! - [`download`] — downloading audio and reporting progress
+//! - [`ytdlp`] — running yt-dlp and reaping its process group
+//! - [`url`] — recognizing YouTube URLs
+//!
+//! The modules are private: everything the rest of the crate uses is
+//! re-exported here, so `crate::state::X` stays the single import path.
+
+use model::{DownloadProgress, FailureRecord};
+use redis::aio::ConnectionManager;
+use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::{Mutex, broadcast};
+use tokio::time;
+use tokio_util::sync::CancellationToken;
+
+mod device;
+mod download;
+mod model;
+mod playback;
+mod playlist;
+mod track;
+mod url;
+mod ytdlp;
+
+pub use model::{
+    AudioTrack, DeviceState, DeviceUpdate, PendingCommand, PlayRequest, ReorderOutcome,
+    ReorderRequest, SeekRequest, auto_token, is_auto_token, new_token, token_track_id,
+};
+pub use url::{UrlKind, classify_url};
+pub use ytdlp::{DownloadError, run_yt_dlp};
+
+pub(crate) const REDIS_KEY_ACTIVE_PLAYLIST: &str = "youtube:active_playlist";
+pub(crate) const REDIS_KEY_DEVICES: &str = "youtube:devices";
+pub(crate) const REDIS_KEY_PLAYBACK_MODE: &str = "youtube:playback_mode";
+pub(crate) const REDIS_KEY_PLAYLISTS: &str = "youtube:playlists";
+pub(crate) const REDIS_KEY_SLEEP_TIMER: &str = "youtube:sleep_timer";
+pub(crate) const REDIS_KEY_TRACKS: &str = "youtube:tracks";
+pub(crate) const REDIS_KEY_TRACKS_ORDER: &str = "youtube:tracks_order";
+pub(crate) const REDIS_PENDING_PREFIX: &str = "youtube:pending";
+const REDIS_PLAYLIST_PREFIX: &str = "youtube:playlist";
+/// Each entry is a unique "{track_id}#{millis}" string used as the AudioPlayer
+/// token, so playback events can match and consume entries by value.
+const REDIS_QUEUE_PREFIX: &str = "youtube:queue";
+
+/// Cached audio format extension. Must be kept in sync with AUDIO_MIME.
+pub(crate) const AUDIO_EXT: &str = "m4a";
+pub const AUDIO_MIME: &str = "audio/mp4";
+
+/// Log the result of a fire-and-forget Redis command. These callers have no
+/// meaningful recovery, but dropping the error silently would hide a broken
+/// Redis behind seemingly successful operations.
+///
+/// A macro rather than a function so the awaited result is bound before the
+/// format arguments are built: `fmt::Arguments` is not `Send`, and holding one
+/// across the await would make every enclosing future non-`Send`.
+macro_rules! warn_redis {
+    ($what:literal, $result:expr) => {{
+        let result: redis::RedisResult<()> = $result;
+        if let Err(e) = result {
+            tracing::warn!("Redis error {}: {e}", format_args!($what));
+        }
+    }};
+}
+pub(crate) use warn_redis;
+
+pub(crate) fn pending_key(device_id: &str) -> String {
+    format!("{REDIS_PENDING_PREFIX}:{device_id}")
+}
+
+pub(crate) fn queue_key(device_id: &str) -> String {
+    format!("{REDIS_QUEUE_PREFIX}:{device_id}")
+}
+
+pub(crate) fn playlist_key(playlist_id: &str) -> String {
+    format!("{REDIS_PLAYLIST_PREFIX}:{playlist_id}")
+}
+
+pub struct AppState {
+    redis: ConnectionManager,
+    pub tx: broadcast::Sender<String>,
+    pub cache_dir: PathBuf,
+    pub api_token: Option<String>,
+    /// Whether track restoration from audio_cache is in progress (prevents
+    /// concurrent runs).
+    restoring: AtomicBool,
+    /// Serializes modifications to youtube:tracks_order so reorder's
+    /// read-then-replace and extract/remove's LPUSH/LREM don't interleave.
+    order_lock: Mutex<()>,
+    /// Per-video lock to prevent concurrent downloads from writing the same
+    /// output file simultaneously.
+    extract_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// In-progress download progress (video ID → progress). In-process only;
+    /// lost on restart (clients re-sync via the init snapshot).
+    downloads: Mutex<HashMap<String, DownloadProgress>>,
+    /// Shared cancellation generation. Cancelling swaps this token so work
+    /// already in progress stops while subsequently started work is unaffected.
+    download_cancel: Mutex<CancellationToken>,
+    /// Per-device per-track consecutive playback failure records (see
+    /// record_playback_failure). Tracked per-track so interleaved failures from
+    /// the current and ENQUEUE'd next track don't reset each other's count.
+    playback_failures: Mutex<HashMap<String, HashMap<String, FailureRecord>>>,
+    /// Bumped when the sleep timer is set/cancelled; the spawned timer task
+    /// checks this to know if it's been superseded.
+    sleep_timer_gen: AtomicU64,
+}
+
+impl AppState {
+    pub async fn new(
+        api_token: Option<String>,
+        redis_url: &str,
+    ) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
+        let (tx, _) = broadcast::channel::<String>(256);
+        let cache_dir = std::env::current_dir()
+            .unwrap_or_default()
+            .join("audio_cache");
+        std::fs::create_dir_all(&cache_dir).ok();
+
+        let client = redis::Client::open(redis_url)?;
+        let redis = time::timeout(time::Duration::from_secs(5), ConnectionManager::new(client))
+            .await
+            .map_err(|_| format!("Redis connection timed out ({redis_url})"))??;
+
+        Ok(Arc::new(Self {
+            redis,
+            tx,
+            cache_dir,
+            api_token,
+            restoring: AtomicBool::new(false),
+            order_lock: Mutex::new(()),
+            extract_locks: Mutex::new(HashMap::new()),
+            downloads: Mutex::new(HashMap::new()),
+            download_cancel: Mutex::new(CancellationToken::new()),
+            playback_failures: Mutex::new(HashMap::new()),
+            sleep_timer_gen: AtomicU64::new(0),
+        }))
+    }
+
+    // ── Broadcast ──
+
+    /// Send a message to all connected WebSocket clients (no-op if no subscribers).
+    pub(crate) fn broadcast(&self, msg: Value) {
+        let _ = self.tx.send(msg.to_string());
+    }
+
+    pub async fn broadcast_devices(&self) {
+        self.broadcast(json!({
+            "type": "device_update",
+            "devices": self.devices_json().await,
+        }));
+    }
+
+    /// Notify clients that the track list changed (content is re-fetched via REST).
+    pub async fn broadcast_tracks(&self) {
+        self.broadcast(tracks_update_message());
+    }
+
+    /// Broadcast playlist list/content changes to all clients.
+    pub async fn broadcast_playlists(&self) {
+        self.broadcast(json!({
+            "type": "playlists_update",
+            "playlists": self.playlists_json().await,
+        }));
+    }
+
+    /// Broadcast active playlist (selection scope) changes to all clients.
+    pub async fn broadcast_active_playlist(&self) {
+        self.broadcast(json!({
+            "type": "active_playlist_update",
+            "playlist": self.active_playlist().await,
+        }));
+    }
+}
+
+/// The "track list changed, re-fetch it" nudge. Tracks are paginated over REST
+/// rather than pushed, so this frame carries no payload. Shared with the
+/// WebSocket resync path so the message shape has one definition.
+pub fn tracks_update_message() -> Value {
+    json!({ "type": "tracks_update" })
+}
+
+pub(crate) fn now_f64() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
+}

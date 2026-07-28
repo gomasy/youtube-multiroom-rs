@@ -96,7 +96,6 @@ cargo build --release
 | `REDIS_URL` | Yes | Redis connection URL (e.g. `redis://127.0.0.1/`) |
 | `API_TOKEN` | No | Bearer token for API authentication |
 | `LISTEN_ADDR` | No | Address and port to listen on (default: `0.0.0.0:8888`) |
-| `APP_LANG` | No | Default response language (e.g. `en`, `ja`). Unrecognized values fall back to the default catalog. Defaults to `ja` |
 
 Variables can also be placed in a `.env` file in the working directory (loaded automatically at startup; real environment variables take precedence). See `.env.example`.
 
@@ -112,7 +111,7 @@ UI text and Alexa voice responses are translated through per-language catalogs �
 - **Backend**: `locales/*.yml` (e.g. `en.yml`, `ja.yml`), embedded into the binary at compile time via `rust-i18n`. Adding or changing a language requires a recompile.
 - **Frontend**: `front/locales/*.json`, loaded on demand at runtime via `fetch()`. The Web UI detects the browser language (`navigator.language`) and loads only the matching catalog (plus `en` as fallback). It also sends the language via the `X-App-Lang` header so the backend resolves the matching catalog per request.
 
-The active server-wide language (set via `APP_LANG`) is printed at startup.
+The language is resolved per request — the `X-App-Lang` header for the Web UI, `request.locale` for Alexa, so an Echo set to Japanese gets Japanese replies. Requests advertising no language, or one with no catalog, fall back to `en`.
 
 **Add a language** — create a file named after its code and translate every key:
 

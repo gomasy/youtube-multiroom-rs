@@ -4,7 +4,27 @@ mod auth;
 mod handlers;
 mod state;
 
-rust_i18n::i18n!("locales", fallback = "ja");
+rust_i18n::i18n!("locales", fallback = "en");
+
+/// Locale used when a request advertises no language, or one we don't ship.
+///
+/// Do not swap this for a hardcoded default: the i18n! macro's constant is the
+/// single source of truth for the fallback locale. Reported through die() like
+/// every other fatal condition rather than as a panic.
+pub fn fallback_locale() -> &'static str {
+    _RUST_I18N_FALLBACK_LOCALE
+        .and_then(|l| l.first())
+        .copied()
+        .unwrap_or_else(|| die("i18n fallback locale is not set"))
+}
+
+/// Resolve a client-advertised language code to a locale we ship, falling back
+/// to the built-in default. Single home for that policy: the HTTP layer feeds it
+/// the X-App-Lang header, the Alexa layer request.locale.
+pub fn locale_or_default(code: Option<&str>) -> String {
+    code.and_then(resolve_locale)
+        .unwrap_or_else(|| fallback_locale().to_string())
+}
 
 /// Resolve a language code to the best available locale, or `None` if unknown.
 fn resolve_locale(code: &str) -> Option<String> {
@@ -60,30 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
     });
 
-    // Do not swap this for a hardcoded default: the i18n! macro's constant is
-    // the single source of truth for the fallback locale. Reported through die()
-    // like every other fatal startup condition rather than as a panic.
-    let fallback = _RUST_I18N_FALLBACK_LOCALE
-        .and_then(|l| l.first())
-        .unwrap_or_else(|| die("i18n fallback locale is not set"))
-        .to_string();
-    let (locale, locale_src) = match std::env::var("APP_LANG")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-    {
-        Some(s) => {
-            let resolved = resolve_locale(&s).unwrap_or_else(|| {
-                tracing::warn!(
-                    "APP_LANG=\"{s}\" is not a known language; defaulting to \"{fallback}\""
-                );
-                fallback.clone()
-            });
-            (resolved, format!("APP_LANG={s}"))
-        }
-        None => (fallback, "default".to_string()),
-    };
-
-    let state = AppState::new(api_token, &redis_url, locale.clone())
+    let state = AppState::new(api_token, &redis_url)
         .await
         .unwrap_or_else(|e| die(e));
 
@@ -164,7 +161,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Redis    = {}", redact_url(&redis_url));
     println!("  Web UI   → http://localhost:{}", addr.port());
     println!("  Alexa    → POST /alexa");
-    println!("  Lang     → {} ({})", locale, locale_src);
     if auth_enabled {
         println!("  Auth     → API_TOKEN is set");
     } else {
@@ -253,11 +249,8 @@ mod tests {
     }
 
     #[test]
-    fn fallback_locale_is_ja() {
-        let fallback = super::_RUST_I18N_FALLBACK_LOCALE
-            .and_then(|l| l.first())
-            .copied();
-        assert_eq!(fallback, Some("ja"));
+    fn fallback_locale_is_en() {
+        assert_eq!(super::fallback_locale(), "en");
     }
 
     #[test]
