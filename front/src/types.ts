@@ -94,6 +94,10 @@ export interface WSExtractAudioErrorMessage {
   error: string;
 }
 
+export interface WSExtractAudioCancelledMessage {
+  type: "extract_audio_cancelled";
+}
+
 export interface WSDownloadsUpdateMessage {
   type: "downloads_update";
   downloads: DownloadProgress[];
@@ -130,6 +134,7 @@ export type WSMessage =
   | WSPlaybackModeUpdateMessage
   | WSExtractAudioResultMessage
   | WSExtractAudioErrorMessage
+  | WSExtractAudioCancelledMessage
   | WSDownloadsUpdateMessage
   | WSPlaylistsUpdateMessage
   | WSActivePlaylistUpdateMessage

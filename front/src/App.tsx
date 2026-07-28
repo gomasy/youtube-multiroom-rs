@@ -110,6 +110,7 @@ export function App() {
     onPlaybackMode: setPlaybackMode,
     onExtractResult: handleExtractResult,
     onExtractError: handleExtractError,
+    onExtractCancelled: () => setExtracting(false),
     onDownloadsUpdate: setDownloads,
     onPlaylistsUpdate: setPlaylists,
     onActivePlaylist: setActivePlaylist,

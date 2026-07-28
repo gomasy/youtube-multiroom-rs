@@ -2,7 +2,7 @@ use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -12,6 +12,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{Mutex, broadcast};
 use tokio::time;
+use tokio_util::sync::CancellationToken;
 
 const REDIS_KEY_ACTIVE_PLAYLIST: &str = "youtube:active_playlist";
 const REDIS_KEY_DEVICES: &str = "youtube:devices";
@@ -52,12 +53,63 @@ const METADATA_TIMEOUT_SECS: u64 = 30;
 /// Grace period for draining yt-dlp's pipes after it exits. Descendants can
 /// inherit the pipes and hold them open, so the drain needs its own bound.
 const OUTPUT_DRAIN_GRACE_SECS: u64 = 5;
+/// Give yt-dlp and its ffmpeg descendants a short chance to exit cleanly before
+/// killing the whole process group.
+const PROCESS_TERMINATE_GRACE_MILLIS: u64 = 500;
 /// Prefix added via --progress-template to distinguish progress lines.
 const PROGRESS_PREFIX: &str = "__progress__ ";
+/// Subdirectory of the cache holding one isolated directory per download
+/// attempt. Nothing here is ever served, so a leftover from a crash is garbage.
+const DOWNLOAD_STAGING_DIR: &str = ".downloads";
+/// Tries before giving up on finding an unused staging directory name.
+const STAGING_DIR_ATTEMPTS: u32 = 16;
+/// Distinguishes concurrent staging directories for the same video.
+static DOWNLOAD_ATTEMPT_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Cached audio format extension. Must be kept in sync with AUDIO_MIME.
 const AUDIO_EXT: &str = "m4a";
 pub const AUDIO_MIME: &str = "audio/mp4";
+
+/// Failure of a yt-dlp-backed operation. Cancellation is a separate variant
+/// rather than a recognizable message so callers cannot mistake a user-visible
+/// error for a stop request (or the reverse) by comparing strings.
+#[derive(Debug)]
+pub enum DownloadError {
+    Cancelled,
+    Failed(String),
+}
+
+impl DownloadError {
+    /// Prefix a failure with context. Cancellation carries no message, so it
+    /// passes through untouched.
+    fn context(self, context: &str) -> Self {
+        match self {
+            Self::Cancelled => Self::Cancelled,
+            Self::Failed(message) => Self::Failed(format!("{context}: {message}")),
+        }
+    }
+}
+
+impl std::fmt::Display for DownloadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cancelled => f.write_str("Download cancelled"),
+            Self::Failed(message) => f.write_str(message),
+        }
+    }
+}
+
+impl From<String> for DownloadError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+impl From<&str> for DownloadError {
+    fn from(message: &str) -> Self {
+        Self::Failed(message.to_string())
+    }
+}
 
 /// Log the result of a fire-and-forget Redis command. These callers have no
 /// meaningful recovery, but dropping the error silently would hide a broken
@@ -422,9 +474,9 @@ pub struct AppState {
     /// In-progress download progress (video ID → progress). In-process only;
     /// lost on restart (clients re-sync via the init snapshot).
     downloads: Mutex<HashMap<String, DownloadProgress>>,
-    /// Bumped on cancel; each import captures the value at start and stops
-    /// when it changes, so concurrent imports are all cancelled correctly.
-    import_cancel_gen: AtomicU64,
+    /// Shared cancellation generation. Cancelling swaps this token so work
+    /// already in progress stops while subsequently started work is unaffected.
+    download_cancel: Mutex<CancellationToken>,
     /// Per-device per-track consecutive playback failure records (see
     /// record_playback_failure). Tracked per-track so interleaved failures from
     /// the current and ENQUEUE'd next track don't reset each other's count.
@@ -461,7 +513,7 @@ impl AppState {
             order_lock: Mutex::new(()),
             extract_locks: Mutex::new(HashMap::new()),
             downloads: Mutex::new(HashMap::new()),
-            import_cancel_gen: AtomicU64::new(0),
+            download_cancel: Mutex::new(CancellationToken::new()),
             playback_failures: Mutex::new(HashMap::new()),
             sleep_timer_gen: AtomicU64::new(0),
         }))
@@ -477,7 +529,11 @@ impl AppState {
 
     // ── Audio extraction ──
 
-    pub async fn extract_audio(self: &Arc<Self>, url: &str) -> Result<AudioTrack, String> {
+    pub async fn extract_audio(
+        self: &Arc<Self>,
+        url: &str,
+        cancel: &CancellationToken,
+    ) -> Result<AudioTrack, DownloadError> {
         let video_id = extract_video_id(url).ok_or("Could not recognize YouTube URL")?;
 
         // Serialize concurrent requests for the same video. Subsequent callers
@@ -486,26 +542,55 @@ impl AppState {
             let mut locks = self.extract_locks.lock().await;
             locks.entry(video_id.clone()).or_default().clone()
         };
-        let guard = lock.lock().await;
-        let result = self.extract_audio_locked(&video_id).await;
-        drop(guard);
-
-        // Clean up the entry if no other callers are waiting (2 = map + self).
-        let mut locks = self.extract_locks.lock().await;
-        if locks
-            .get(&video_id)
-            .is_some_and(|l| Arc::strong_count(l) <= 2)
-        {
-            locks.remove(&video_id);
-        }
+        // Waiting behind another download of the same video must stay
+        // interruptible, and a cancellation that lands while queued still
+        // applies once the lock is finally handed over.
+        let guard = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => None,
+            guard = lock.lock() => Some(guard),
+        };
+        let result = match guard {
+            Some(guard) if !cancel.is_cancelled() => {
+                let result = self.extract_audio_locked(&video_id, cancel).await;
+                drop(guard);
+                result
+            }
+            _ => Err(DownloadError::Cancelled),
+        };
+        self.release_extract_lock(&video_id, &lock).await;
 
         result
     }
 
-    async fn extract_audio_locked(self: &Arc<Self>, video_id: &str) -> Result<AudioTrack, String> {
+    /// Drop the per-video lock entry once this caller is the last user, so the
+    /// map does not grow one entry per video for the lifetime of the process.
+    async fn release_extract_lock(&self, video_id: &str, lock: &Arc<Mutex<()>>) {
+        // The map and this caller account for two references. Any additional
+        // reference belongs to another active or waiting caller.
+        let mut locks = self.extract_locks.lock().await;
+        if locks
+            .get(video_id)
+            .is_some_and(|current| Arc::ptr_eq(current, lock) && Arc::strong_count(lock) <= 2)
+        {
+            locks.remove(video_id);
+        }
+    }
+
+    async fn extract_audio_locked(
+        self: &Arc<Self>,
+        video_id: &str,
+        cancel: &CancellationToken,
+    ) -> Result<AudioTrack, DownloadError> {
         // Redis cache check. Entries pointing to old formats (mp3 etc.) are
         // stale w.r.t. AUDIO_MIME, so skip them and re-fetch.
         if let Some(track) = self.get_track(video_id).await {
+            // A stop can land during the Redis lookup above. The cache-miss
+            // path re-checks inside fetch_and_register, so only the hit needs
+            // its own check to avoid reporting success after a cancellation.
+            if cancel.is_cancelled() {
+                return Err(DownloadError::Cancelled);
+            }
             if track.is_live {
                 tracing::info!("Cache hit (live): {}", video_id);
                 return Ok(track);
@@ -520,57 +605,102 @@ impl AppState {
         // Fetch while broadcasting progress to all clients. Remove on success;
         // keep as error display for a while on failure.
         self.begin_download(video_id).await;
-        let result = self.fetch_and_register(video_id).await;
+        let result = self.fetch_and_register(video_id, cancel).await;
         match &result {
-            Ok(_) => self.finish_download(video_id).await,
-            Err(e) => self.fail_download(video_id, e).await,
+            // A cancelled download is not a failure to report; clear it like a
+            // completed one so no stale error lingers in the progress display.
+            Ok(_) | Err(DownloadError::Cancelled) => self.finish_download(video_id).await,
+            Err(e) => self.fail_download(video_id, &e.to_string()).await,
         }
         result
     }
 
     /// Fetch metadata → download (non-live) → register in Redis.
     /// Progress is reflected in the downloads progress entry.
-    async fn fetch_and_register(&self, video_id: &str) -> Result<AudioTrack, String> {
+    async fn fetch_and_register(
+        &self,
+        video_id: &str,
+        cancel: &CancellationToken,
+    ) -> Result<AudioTrack, DownloadError> {
         // Never pass the user-supplied URL to yt-dlp. Reconstructing it from the
         // validated ID prevents deceptive URLs from reaching arbitrary hosts.
         let url = format!("https://www.youtube.com/watch?v={video_id}");
         // Fetch metadata
         tracing::info!("Fetching metadata: {}", video_id);
-        let meta = fetch_metadata(&url).await?;
+        let meta = fetch_metadata(&url, Some(cancel)).await?;
         let title = meta["title"].as_str().unwrap_or(video_id).to_string();
         let is_live = meta["is_live"].as_bool().unwrap_or(false);
         self.set_download_meta(video_id, &title, is_live).await;
+        if cancel.is_cancelled() {
+            return Err(DownloadError::Cancelled);
+        }
 
         // Live streams cannot be saved as files; register metadata only and
         // resolve the CDN URL at playback time (handlers::live_audio).
+        let mut published_path = None;
         let track = if is_live {
             tracing::info!("Live stream detected, skipping download: {}", video_id);
             AudioTrack::from_meta(video_id, &meta, now_f64(), String::new())
         } else {
             let output_path = self.cache_dir.join(format!("{video_id}.{AUDIO_EXT}"));
             let output_str = output_path.to_string_lossy().to_string();
+            let staging_dir = self.create_staging_dir(video_id).await?;
+            let staged_path = staging_dir.join(format!("{video_id}.{AUDIO_EXT}"));
 
-            // Download audio
+            // Download into the staging directory, then publish. Nothing this
+            // attempt wrote is visible until publishing succeeds, so a failure
+            // or cancellation only has to discard the whole directory.
             tracing::info!("Downloading: {}", title);
-            if let Err(e) = self.run_download(video_id, &url, &output_str).await {
-                // With --no-part, partial files remain under the final name.
-                // Remove them so they don't get registered as broken tracks on restore.
-                let _ = tokio::fs::remove_file(&output_path).await;
-                return Err(e);
-            }
+            let published = match self
+                .run_download(video_id, &url, &staged_path, cancel)
+                .await
+            {
+                Ok(()) => {
+                    self.publish_download(cancel, &staged_path, &output_path)
+                        .await
+                }
+                // Cancellation and failure both leave partial files behind,
+                // and both are discarded with the staging directory below.
+                Err(e) => Err(e),
+            };
+            remove_staging_dir(&staging_dir).await;
+            published?;
+            published_path = Some(output_path);
 
             AudioTrack::from_meta(video_id, &meta, now_f64(), output_str)
         };
 
         // Registration is the step that makes the track visible, so a failure
         // here must surface as an error rather than reporting a phantom success.
-        let json_str = track
-            .to_redis_json()
-            .map_err(|e| format!("Failed to serialize track: {e}"))?;
+        let json_str = match track.to_redis_json() {
+            Ok(json) => json,
+            Err(e) => {
+                if let Some(path) = &published_path {
+                    let _ = tokio::fs::remove_file(path).await;
+                }
+                return Err(DownloadError::Failed(format!(
+                    "Failed to serialize track: {e}"
+                )));
+            }
+        };
+        if is_live {
+            // Live tracks never publish a file, so their commit point is this
+            // check instead. The guard is released before the Redis call below:
+            // holding it across Redis I/O would let a stalled Redis delay
+            // stopping unrelated yt-dlp processes.
+            let _commit_guard = self.download_cancel.lock().await;
+            if cancel.is_cancelled() {
+                return Err(DownloadError::Cancelled);
+            }
+        }
+        // Past this point the track is committed. Redis may have applied HSET
+        // even if the response was lost, so a published file is deliberately
+        // left in place: a registered track must never point at a missing
+        // cache, and the cache scanner can recover it if HSET truly failed.
         let mut conn = self.redis.clone();
         conn.hset::<_, _, _, ()>(REDIS_KEY_TRACKS, video_id, json_str)
             .await
-            .map_err(|e| format!("Failed to register track: {e}"))?;
+            .map_err(|e| DownloadError::Failed(format!("Failed to register track: {e}")))?;
         // Prepend to the order list (remove first to avoid duplicates on re-fetch).
         // Order is cosmetic — list_tracks appends unordered tracks — so failures
         // here are logged rather than failing the whole fetch.
@@ -590,14 +720,59 @@ impl AppState {
         Ok(track)
     }
 
-    /// Download audio with yt-dlp. Read progress lines from stdout and
-    /// update the download progress entry with the percentage until done.
+    /// Create an empty directory owned by a single download attempt. The name
+    /// only has to be unique among live attempts; the retry covers a leftover
+    /// directory from a crashed run that happens to collide.
+    async fn create_staging_dir(&self, video_id: &str) -> Result<PathBuf, String> {
+        let root = self.cache_dir.join(DOWNLOAD_STAGING_DIR);
+        tokio::fs::create_dir_all(&root)
+            .await
+            .map_err(|e| format!("Failed to create download staging directory: {e}"))?;
+
+        for _ in 0..STAGING_DIR_ATTEMPTS {
+            let seq = DOWNLOAD_ATTEMPT_SEQ.fetch_add(1, Ordering::Relaxed);
+            let path = root.join(format!("{video_id}-{}-{seq:x}", std::process::id()));
+            match tokio::fs::create_dir(&path).await {
+                Ok(()) => return Ok(path),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(format!("Failed to create download staging directory: {e}")),
+            }
+        }
+        Err("Failed to allocate a download staging directory".to_string())
+    }
+
+    /// Move a finished download into the cache under the cancellation lock, so
+    /// cancellation and publication cannot interleave: either the stop wins and
+    /// no file appears, or the file is already published and stays.
+    async fn publish_download(
+        &self,
+        cancel: &CancellationToken,
+        staged_path: &Path,
+        output_path: &Path,
+    ) -> Result<(), DownloadError> {
+        let _commit_guard = self.download_cancel.lock().await;
+        if cancel.is_cancelled() {
+            return Err(DownloadError::Cancelled);
+        }
+        Ok(link_into_cache(staged_path, output_path).await?)
+    }
+
+    /// Download audio with yt-dlp into `staged_path`. Read progress lines from
+    /// stdout and update the download progress entry with the percentage until
+    /// done. `staged_path` is an absolute path inside the attempt's staging
+    /// directory, so yt-dlp's .part file and post-processing intermediates are
+    /// written there too and never touch the served cache.
     async fn run_download(
         &self,
         video_id: &str,
         url: &str,
-        output_str: &str,
-    ) -> Result<(), String> {
+        staged_path: &Path,
+        cancel: &CancellationToken,
+    ) -> Result<(), DownloadError> {
+        if cancel.is_cancelled() {
+            return Err(DownloadError::Cancelled);
+        }
+        let staged_str = staged_path.to_string_lossy().to_string();
         // Prefer AAC source so no re-encode is needed for AUDIO_EXT (remux only)
         let format_spec = format!("bestaudio[ext={AUDIO_EXT}]/bestaudio");
         // Have yt-dlp emit progress in a machine-readable one-line-per-update format
@@ -609,9 +784,8 @@ impl AppState {
             "--audio-format",
             AUDIO_EXT,
             "-o",
-            output_str,
+            &staged_str,
             "--no-playlist",
-            "--no-part",
             "--newline",
             "--progress-template",
             &progress_template,
@@ -631,7 +805,15 @@ impl AppState {
             let mut buf = Vec::new();
             loop {
                 buf.clear();
-                match reader.read_until(b'\n', &mut buf).await {
+                let read = tokio::select! {
+                    read = reader.read_until(b'\n', &mut buf) => read,
+                    _ = cancel.cancelled() => {
+                        stop_yt_dlp(&mut child).await;
+                        abort_reader(stderr_task);
+                        return Err(DownloadError::Cancelled);
+                    }
+                };
+                match read {
                     Ok(0) | Err(_) => break,
                     Ok(_) => {
                         let line = String::from_utf8_lossy(&buf);
@@ -643,19 +825,25 @@ impl AppState {
             }
         }
 
-        let status = child
-            .wait()
-            .await
-            .map_err(|e| format!("Download error: {e}"))?;
+        let status = tokio::select! {
+            result = child.wait() => result.map_err(|e| format!("Download error: {e}"))?,
+            _ = cancel.cancelled() => {
+                stop_yt_dlp(&mut child).await;
+                abort_reader(stderr_task);
+                return Err(DownloadError::Cancelled);
+            }
+        };
         if !status.success() {
+            // Only the failure path needs stderr, and draining it is bounded
+            // (descendants can keep the pipe open), so success must not pay it.
             let stderr_buf = match stderr_task {
                 Some(task) => drain_output(task).await.unwrap_or_default(),
                 None => Vec::new(),
             };
-            return Err(format!(
+            return Err(DownloadError::Failed(format!(
                 "Failed to download audio: {}",
                 snippet(&String::from_utf8_lossy(&stderr_buf))
-            ));
+            )));
         }
         Ok(())
     }
@@ -771,10 +959,36 @@ impl AppState {
         });
     }
 
-    /// Cancel all in-progress downloads and clear the progress display.
-    /// A running playlist import will stop after the current video finishes.
+    /// Token for work starting now. Capture it before spawning so a stop that
+    /// arrives immediately afterwards still cancels the request.
+    pub async fn download_token(&self) -> CancellationToken {
+        self.download_cancel.lock().await.clone()
+    }
+
+    /// Drop staging directories orphaned by a crash or a hard kill. Only safe
+    /// at startup, when no download of this process owns one yet.
+    pub async fn clear_download_staging(&self) {
+        let root = self.cache_dir.join(DOWNLOAD_STAGING_DIR);
+        if let Err(e) = tokio::fs::remove_dir_all(&root).await
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                "Failed to clear download staging directory {}: {e}",
+                root.display()
+            );
+        }
+    }
+
+    /// Cancel all work started under the current token. Each active yt-dlp
+    /// process observes this token, stops its process group, and removes only its
+    /// own staging directory before returning.
     pub async fn cancel_downloads(&self) {
-        self.import_cancel_gen.fetch_add(1, Ordering::Relaxed);
+        // The guard is held until the stale progress snapshot has been cleared,
+        // so a download that already picked up the replacement token cannot
+        // have its progress entry erased by this call.
+        let mut token = self.download_cancel.lock().await;
+        token.cancel();
+        *token = CancellationToken::new();
         self.update_downloads(|downloads| {
             if downloads.is_empty() {
                 return false;
@@ -1037,7 +1251,7 @@ impl AppState {
     /// the file can still be played, so return minimal info with the ID as title.
     async fn refetch_track_metadata(&self, video_id: &str, path: &Path) -> AudioTrack {
         let url = format!("https://www.youtube.com/watch?v={video_id}");
-        let meta = match fetch_metadata(&url).await {
+        let meta = match fetch_metadata(&url, None).await {
             Ok(meta) => meta,
             Err(e) => {
                 tracing::warn!("Metadata refetch failed for {video_id}: {e}");
@@ -1830,6 +2044,32 @@ impl AppState {
         }
     }
 
+    /// Remove multiple tracks from one playlist without touching the library,
+    /// cache files, queues, or any other playlist.
+    pub async fn remove_playlist_tracks(
+        &self,
+        playlist_id: &str,
+        track_ids: &[String],
+    ) -> redis::RedisResult<u64> {
+        let unique_ids: HashSet<&str> = track_ids.iter().map(String::as_str).collect();
+        if unique_ids.is_empty() {
+            return Ok(0);
+        }
+
+        // Serialize with reorder's read-then-replace so a concurrent write-back
+        // cannot restore an entry removed by this operation.
+        let _guard = self.order_lock.lock().await;
+        let key = playlist_key(playlist_id);
+        let mut pipe = redis::pipe();
+        pipe.atomic();
+        for track_id in unique_ids {
+            pipe.lrem(&key, 0, track_id);
+        }
+        let mut conn = self.redis.clone();
+        let removed: Vec<u64> = pipe.query_async(&mut conn).await?;
+        Ok(removed.into_iter().sum())
+    }
+
     async fn playlist_track_ids(&self, playlist_id: &str) -> Vec<String> {
         let mut conn = self.redis.clone();
         conn.lrange(playlist_key(playlist_id), 0, -1)
@@ -1931,10 +2171,11 @@ impl AppState {
     pub async fn import_playlist(
         self: &Arc<Self>,
         list_id: &str,
-    ) -> Result<PlaylistImportInfo, String> {
+        cancel: &CancellationToken,
+    ) -> Result<PlaylistImportInfo, DownloadError> {
         let url = format!("https://www.youtube.com/playlist?list={list_id}");
         let items = format!("1:{PLAYLIST_IMPORT_MAX}");
-        let stdout = run_yt_dlp(
+        let stdout = run_yt_dlp_cancellable(
             &[
                 "--dump-single-json",
                 "--flat-playlist",
@@ -1943,9 +2184,10 @@ impl AppState {
                 &url,
             ],
             time::Duration::from_secs(PLAYLIST_FLAT_TIMEOUT_SECS),
+            Some(cancel),
         )
         .await
-        .map_err(|e| format!("Failed to expand playlist: {e}"))?;
+        .map_err(|e| e.context("Failed to expand playlist"))?;
         let meta: Value = serde_json::from_slice(&stdout)
             .map_err(|e| format!("Failed to parse playlist metadata: {e}"))?;
 
@@ -1960,7 +2202,10 @@ impl AppState {
             }
         }
         if video_ids.is_empty() {
-            return Err("Playlist has no importable videos".to_string());
+            return Err("Playlist has no importable videos".into());
+        }
+        if cancel.is_cancelled() {
+            return Err(DownloadError::Cancelled);
         }
 
         // Truncate playlist name to the creation limit (fall back to list ID if title is unknown)
@@ -1974,7 +2219,11 @@ impl AppState {
             .collect();
 
         // Append to an existing playlist with the same name (avoid duplicates on re-import)
-        let playlist = match self.playlists().await.into_iter().find(|p| p.name == name) {
+        let playlists = self.playlists().await;
+        if cancel.is_cancelled() {
+            return Err(DownloadError::Cancelled);
+        }
+        let playlist = match playlists.into_iter().find(|p| p.name == name) {
             Some(p) => p,
             None => {
                 let p = self
@@ -1986,13 +2235,22 @@ impl AppState {
             }
         };
 
+        // Spawning the worker is the import commit point. The potentially slow
+        // Redis work above stays outside this lock so Stop all is never blocked
+        // from terminating unrelated active processes.
+        let _commit_guard = self.download_cancel.lock().await;
+        if cancel.is_cancelled() {
+            // A newly created playlist may already be visible to another client;
+            // leave it empty rather than risk deleting concurrent user changes.
+            return Err(DownloadError::Cancelled);
+        }
         let total = video_ids.len();
         let state = self.clone();
-        let cancel_gen = self.import_cancel_gen.load(Ordering::Relaxed);
+        let cancel = cancel.clone();
         tokio::spawn(async move {
             let mut imported = 0;
             for video_id in &video_ids {
-                if state.import_cancel_gen.load(Ordering::Relaxed) != cancel_gen {
+                if cancel.is_cancelled() {
                     tracing::info!(
                         "Playlist import cancelled: '{}' ({imported}/{total} imported)",
                         playlist.name
@@ -2000,13 +2258,20 @@ impl AppState {
                     break;
                 }
                 let url = format!("https://www.youtube.com/watch?v={video_id}");
-                match state.extract_audio(&url).await {
+                match state.extract_audio(&url, &cancel).await {
                     Ok(track) => {
                         state.add_playlist_track(&playlist.id, &track.id).await;
                         // Reflect each successfully imported track in the lists
                         state.broadcast_tracks().await;
                         state.broadcast_playlists().await;
                         imported += 1;
+                    }
+                    Err(DownloadError::Cancelled) => {
+                        tracing::info!(
+                            "Playlist import cancelled: '{}' ({imported}/{total} imported)",
+                            playlist.name
+                        );
+                        break;
                     }
                     // Failures are shown via download progress error display; log only
                     Err(e) => tracing::warn!("Playlist import: skipping {video_id}: {e}"),
@@ -2074,6 +2339,28 @@ fn snippet(s: &str) -> String {
     s.chars().take(300).collect()
 }
 
+/// Discard one attempt's staging directory along with any partial or
+/// post-processing files yt-dlp left in it.
+async fn remove_staging_dir(path: &Path) {
+    if let Err(e) = tokio::fs::remove_dir_all(path).await
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(
+            "Failed to remove download staging directory {}: {e}",
+            path.display()
+        );
+    }
+}
+
+/// Publish a staged file into the cache. Hard linking is atomic and fails
+/// rather than clobbering an existing cache entry, so a download that finishes
+/// alongside an already-cached copy can never truncate what is being served.
+async fn link_into_cache(staged_path: &Path, output_path: &Path) -> Result<(), String> {
+    tokio::fs::hard_link(staged_path, output_path)
+        .await
+        .map_err(|e| format!("Failed to publish downloaded audio: {e}"))
+}
+
 /// Extract the percentage from a yt-dlp progress line (PROGRESS_PREFIX + " 23.4%" etc.).
 /// Returns None for non-progress lines or indeterminate values ("N/A" / non-finite),
 /// since f64::parse accepts "nan"/"inf" which become null in JSON.
@@ -2090,6 +2377,23 @@ fn parse_progress_percent(line: &str) -> Option<f64> {
 /// Run yt-dlp and return stdout on success within the timeout.
 /// On failure or timeout, return an error message (including stderr snippet).
 pub async fn run_yt_dlp(args: &[&str], timeout: time::Duration) -> Result<Vec<u8>, String> {
+    // Without a token the run is uncancellable, so DownloadError::Cancelled is
+    // unreachable here and the message form loses nothing.
+    run_yt_dlp_cancellable(args, timeout, None)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// As `run_yt_dlp`, but a cancelled token stops the process group and returns
+/// `DownloadError::Cancelled`.
+async fn run_yt_dlp_cancellable(
+    args: &[&str],
+    timeout: time::Duration,
+    cancel: Option<&CancellationToken>,
+) -> Result<Vec<u8>, DownloadError> {
+    if cancel.is_some_and(CancellationToken::is_cancelled) {
+        return Err(DownloadError::Cancelled);
+    }
     let mut child = spawn_yt_dlp(args).map_err(|e| format!("Failed to run yt-dlp: {e}"))?;
 
     let stdout = child
@@ -2103,36 +2407,58 @@ pub async fn run_yt_dlp(args: &[&str], timeout: time::Duration) -> Result<Vec<u8
     let stdout_task = spawn_reader(stdout);
     let stderr_task = spawn_reader(stderr);
 
-    let status = match time::timeout(timeout, child.wait()).await {
-        Ok(result) => result.map_err(|e| format!("Failed to wait for yt-dlp: {e}"))?,
-        Err(_) => {
-            if let Err(e) = child.kill().await {
-                tracing::warn!("Failed to kill timed-out yt-dlp process: {e}");
-            }
+    enum WaitOutcome {
+        Exited(std::io::Result<std::process::ExitStatus>),
+        TimedOut,
+        Cancelled,
+    }
+    let outcome = tokio::select! {
+        result = time::timeout(timeout, child.wait()) => match result {
+            Ok(status) => WaitOutcome::Exited(status),
+            Err(_) => WaitOutcome::TimedOut,
+        },
+        _ = wait_for_cancellation(cancel) => WaitOutcome::Cancelled,
+    };
+    let status = match outcome {
+        WaitOutcome::Exited(result) => {
+            result.map_err(|e| format!("Failed to wait for yt-dlp: {e}"))?
+        }
+        WaitOutcome::TimedOut => {
+            stop_yt_dlp(&mut child).await;
             // Descendant processes may inherit the pipes, so do not wait for
             // EOF after the timed-out parent has been killed and reaped.
             stdout_task.abort();
             stderr_task.abort();
-            return Err("yt-dlp timed out".to_string());
+            return Err("yt-dlp timed out".into());
+        }
+        WaitOutcome::Cancelled => {
+            stop_yt_dlp(&mut child).await;
+            stdout_task.abort();
+            stderr_task.abort();
+            return Err(DownloadError::Cancelled);
         }
     };
     let Some(stdout) = drain_output(stdout_task).await else {
         stderr_task.abort();
-        return Err("yt-dlp output drain timed out".to_string());
+        return Err("yt-dlp output drain timed out".into());
     };
     let stderr = drain_output(stderr_task).await.unwrap_or_default();
 
     if !status.success() {
-        return Err(format!(
+        return Err(DownloadError::Failed(format!(
             "yt-dlp failed: {}",
             snippet(&String::from_utf8_lossy(&stderr))
-        ));
+        )));
     }
     Ok(stdout)
 }
 
 /// Spawn yt-dlp with no stdin and both output streams piped. Every yt-dlp
 /// invocation goes through here so the stdio setup cannot drift between them.
+///
+/// Its own process group is what makes cancellation reliable: yt-dlp spawns
+/// ffmpeg for post-processing, and signalling the group reaches the whole tree
+/// rather than leaving an orphan writing to the staging directory.
 fn spawn_yt_dlp<I, S>(args: I) -> std::io::Result<tokio::process::Child>
 where
     I: IntoIterator<Item = S>,
@@ -2143,7 +2469,51 @@ where
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .process_group(0)
+        .kill_on_drop(true)
         .spawn()
+}
+
+async fn wait_for_cancellation(cancel: Option<&CancellationToken>) {
+    match cancel {
+        Some(cancel) => cancel.cancelled().await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+fn signal_yt_dlp_group(pid: u32, signal: libc::c_int) {
+    // spawn_yt_dlp puts yt-dlp in a process group whose ID is its PID. A
+    // negative target sends the signal to yt-dlp and descendants such as ffmpeg.
+    let result = unsafe { libc::kill(-(pid as libc::pid_t), signal) };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            tracing::warn!("Failed to signal yt-dlp process group {pid}: {error}");
+        }
+    }
+}
+
+async fn stop_yt_dlp(child: &mut tokio::process::Child) {
+    if let Some(pid) = child.id() {
+        signal_yt_dlp_group(pid, libc::SIGTERM);
+        // Do not reap the group leader during this grace period. Keeping its PID
+        // reserved prevents a recycled process group from receiving SIGKILL.
+        time::sleep(time::Duration::from_millis(PROCESS_TERMINATE_GRACE_MILLIS)).await;
+        signal_yt_dlp_group(pid, libc::SIGKILL);
+    } else if let Err(e) = child.start_kill() {
+        tracing::warn!("Failed to kill yt-dlp process: {e}");
+    }
+    if let Err(e) = child.wait().await {
+        tracing::warn!("Failed to reap yt-dlp process: {e}");
+    }
+}
+
+/// Stop draining a pipe whose output is no longer wanted. The task would
+/// otherwise linger until EOF, which a surviving descendant can delay.
+fn abort_reader(task: Option<tokio::task::JoinHandle<Vec<u8>>>) {
+    if let Some(task) = task {
+        task.abort();
+    }
 }
 
 /// Drain a pipe into a buffer on its own task. Reading the pipes concurrently
@@ -2173,15 +2543,19 @@ async fn drain_output(mut task: tokio::task::JoinHandle<Vec<u8>>) -> Option<Vec<
 }
 
 /// Fetch metadata JSON via yt-dlp (no download).
-async fn fetch_metadata(url: &str) -> Result<Value, String> {
-    let stdout = run_yt_dlp(
+async fn fetch_metadata(
+    url: &str,
+    cancel: Option<&CancellationToken>,
+) -> Result<Value, DownloadError> {
+    let stdout = run_yt_dlp_cancellable(
         &["--dump-json", "--no-download", url],
         time::Duration::from_secs(METADATA_TIMEOUT_SECS),
+        cancel,
     )
     .await
-    .map_err(|e| format!("Failed to fetch metadata: {e}"))?;
+    .map_err(|e| e.context("Failed to fetch metadata"))?;
 
-    serde_json::from_slice(&stdout).map_err(|e| format!("Failed to parse metadata: {e}"))
+    Ok(serde_json::from_slice(&stdout).map_err(|e| format!("Failed to parse metadata: {e}"))?)
 }
 
 /// Return the next (dir=1) or previous (dir=-1) track relative to current_id.
@@ -2558,6 +2932,93 @@ mod tests {
         assert_eq!(
             parse_progress_percent(&format!("{PROGRESS_PREFIX}inf%")),
             None
+        );
+    }
+
+    #[test]
+    fn adding_context_leaves_cancellation_recognizable() {
+        // Callers wrap yt-dlp failures with their own context. A stop request
+        // must survive that untouched, or it gets shown to the user as an error.
+        let cancelled = DownloadError::Cancelled.context("Failed to expand playlist");
+        assert!(matches!(cancelled, DownloadError::Cancelled));
+
+        let failed =
+            DownloadError::Failed("no such video".to_string()).context("Failed to expand playlist");
+        assert_eq!(
+            failed.to_string(),
+            "Failed to expand playlist: no such video"
+        );
+    }
+
+    fn staging_test_dir(label: &str) -> PathBuf {
+        let seq = DOWNLOAD_ATTEMPT_SEQ.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "youtube-multiroom-{label}-{}-{seq}",
+            std::process::id()
+        ))
+    }
+
+    #[tokio::test]
+    async fn publishing_download_never_overwrites_existing_cache() {
+        let root = staging_test_dir("publish");
+        let attempt = root.join("attempt");
+        tokio::fs::create_dir_all(&attempt).await.unwrap();
+        let staged = attempt.join("track.m4a");
+        let output = root.join("track.m4a");
+        tokio::fs::write(&staged, b"new").await.unwrap();
+        tokio::fs::write(&output, b"existing").await.unwrap();
+
+        assert!(link_into_cache(&staged, &output).await.is_err());
+        assert_eq!(tokio::fs::read(&output).await.unwrap(), b"existing");
+
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn staging_cleanup_only_removes_the_target_attempt() {
+        let root = staging_test_dir("cleanup");
+        let attempt = root.join("attempt-a");
+        let other = root.join("attempt-b");
+        tokio::fs::create_dir_all(&attempt).await.unwrap();
+        tokio::fs::create_dir_all(&other).await.unwrap();
+        tokio::fs::write(attempt.join("track.m4a.part"), b"partial")
+            .await
+            .unwrap();
+        tokio::fs::write(other.join("keep.m4a.part"), b"other")
+            .await
+            .unwrap();
+
+        remove_staging_dir(&attempt).await;
+
+        assert!(!attempt.exists());
+        assert_eq!(
+            tokio::fs::read(other.join("keep.m4a.part")).await.unwrap(),
+            b"other"
+        );
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stopping_yt_dlp_terminates_its_process_group() {
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 30 & wait"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap();
+
+        stop_yt_dlp(&mut child).await;
+
+        assert!(child.try_wait().unwrap().is_some());
+        let result = unsafe { libc::kill(-(pid as libc::pid_t), 0) };
+        assert_eq!(result, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
         );
     }
 

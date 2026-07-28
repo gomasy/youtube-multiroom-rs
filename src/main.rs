@@ -87,6 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .unwrap_or_else(|e| die(e));
 
+    state.clear_download_staging().await;
     state.restore_sleep_timer().await;
 
     let app = Router::new()
@@ -116,6 +117,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/api/playlists/{playlist_id}/tracks/bulk",
             post(handlers::bulk_add_playlist_tracks),
+        )
+        .route(
+            "/api/playlists/{playlist_id}/tracks/bulk-remove",
+            post(handlers::bulk_remove_playlist_tracks),
         )
         .route(
             "/api/playlists/{playlist_id}/tracks/{track_id}",

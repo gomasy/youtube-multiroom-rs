@@ -219,7 +219,7 @@ The Web UI ships a web app manifest and icons, so it can be installed to the hom
 10. Use the ▶ button under 選択中のトラック (Now Playing) to preview the selected track in the browser before sending it to the Echos
 11. Use the filter input at the top of the track list to search by title or channel name (debounced 300 ms, case-insensitive)
 12. Click a playlist name to rename it inline; press Enter to save or Escape to cancel
-13. Press 「選択」 to enter select mode: check individual tracks or 「全選択」 an entire page, then bulk-delete or bulk-add to a playlist in one operation
+13. Press 「選択」 to enter select mode: check individual tracks or 「全選択」 an entire page, then bulk-delete or bulk-add to a playlist in one operation. In a playlist view, the remove action only removes entries from that playlist and keeps the tracks in the library
 14. Set a sleep timer (15 / 30 min, 1 / 3 / 6 h) below the playback mode selector; when it expires, all devices are stopped and the playback mode is set to off
 
 ## Architecture
@@ -257,6 +257,7 @@ The Web UI ships a web app manifest and icons, so it can be installed to the hom
     │  DELETE /api/playlists/{id}     delete playlist       │
     │  POST   /api/playlists/{id}/tracks       add track    │
     │  POST   /api/playlists/{id}/tracks/bulk  bulk add     │
+    │  POST   /api/playlists/{id}/tracks/bulk-remove remove │
     │  DELETE /api/playlists/{id}/tracks/{tid} remove track │
     │  GET    /api/devices            device list           │
     │  DELETE /api/devices/{id}       delete device         │
@@ -283,7 +284,9 @@ If the track metadata hash is ever lost (e.g. Redis was wiped), the next `GET /a
 
 ### Download Progress
 
-Download progress is tracked server-side in memory and broadcast to all WebSocket clients via `downloads_update` messages. This means every connected browser (including tabs opened after a download started) sees the same real-time progress. The progress goes through four stages: `metadata` (resolving title and format), `downloading` (with a percentage), `processing` (yt-dlp post-processing / m4a conversion), and on failure `error` (displayed for 60 seconds then cleared). Progress is not persisted to Redis — it resets on server restart.
+Download progress is tracked server-side in memory and broadcast to all WebSocket clients via `downloads_update` messages. This means every connected browser (including tabs opened after a download started) sees the same real-time progress. The progress goes through four stages: `metadata` (resolving title and format), `downloading` (with a percentage), `processing` (yt-dlp post-processing / m4a conversion), and on failure `error` (displayed for 60 seconds then cleared). Progress is not persisted to Redis — it resets on server restart. 「すべて停止」 terminates the active yt-dlp process groups (including ffmpeg descendants) and removes their staging directories; completed cache files and downloads started after the cancellation are left intact.
+
+Each download attempt writes into its own directory under `audio_cache/.downloads/`, so partial and post-processing files are never visible to the cache scanner or the stream endpoint. A finished file is published into `audio_cache/` with a hard link, which is atomic and refuses to overwrite an existing entry — a download that completes alongside a cached copy can never truncate what is being served. The whole staging root is discarded at startup, cleaning up after a crash or a hard kill.
 
 ### Track Ordering
 
@@ -336,8 +339,8 @@ The Now Playing card has a small preview player to check a track in the browser 
 ### WebSocket Protocol
 
 Audio extraction is handled via WebSocket to avoid reverse proxy read timeouts.
-The client sends `{ "type": "extract_audio", "url": "..." }` and receives `extract_audio_result` or `extract_audio_error`; a playlist URL instead answers with `playlist_import_result` (`name`, `total`) once the background import has started.
-The client can also send `{ "type": "set_playback_mode", "mode": "off" | "loop" | "shuffle" }`, `{ "type": "set_active_playlist", "playlist": "<id>" | null }`, `{ "type": "set_sleep_timer", "minutes": <number> | null }` (null or 0 cancels), and `{ "type": "ping" }` (answered with `pong`).
+The client sends `{ "type": "extract_audio", "url": "..." }` and receives `extract_audio_result`, `extract_audio_error`, or `extract_audio_cancelled`; a playlist URL instead answers with `playlist_import_result` (`name`, `total`) once the background import has started.
+The client can also send `{ "type": "cancel_downloads" }`, `{ "type": "set_playback_mode", "mode": "off" | "loop" | "shuffle" }`, `{ "type": "set_active_playlist", "playlist": "<id>" | null }`, `{ "type": "set_sleep_timer", "minutes": <number> | null }` (null or 0 cancels), and `{ "type": "ping" }` (answered with `pong`).
 
 On connect, the server sends an `init` message containing the current device map, playback mode, in-progress downloads, playlists, active playlist, and sleep timer expiry
 (the track list is fetched separately via `GET /api/tracks`).
@@ -395,6 +398,7 @@ sudo systemctl enable --now yt-multiroom
 | DELETE | `/api/playlists/{id}` | Yes | Delete a playlist (tracks are kept) |
 | POST | `/api/playlists/{id}/tracks` | Yes | Add a track to a playlist (`track_id`) |
 | POST | `/api/playlists/{id}/tracks/bulk` | Yes | Bulk-add tracks to a playlist (`track_ids`) |
+| POST | `/api/playlists/{id}/tracks/bulk-remove` | Yes | Bulk-remove tracks from one playlist (`track_ids`; library tracks are kept) |
 | DELETE | `/api/playlists/{id}/tracks/{track_id}` | Yes | Remove a track from a playlist |
 | GET | `/api/devices` | Yes | List connected devices |
 | DELETE | `/api/devices/{id}` | Yes | Delete a device |

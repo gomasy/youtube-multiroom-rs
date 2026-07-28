@@ -4,6 +4,7 @@ import {
   authOk,
   bulkAddToPlaylist,
   bulkDeleteTracks,
+  bulkRemoveFromPlaylist,
   createPlaylist,
   deletePlaylist,
   fetchTracks,
@@ -13,7 +14,7 @@ import {
   PER_PAGE,
 } from "../api";
 import { showApiError } from "../errors";
-import { t } from "../i18n";
+import { t, tFmt } from "../i18n";
 import { TrackRowInfo } from "./TrackRowInfo";
 import { AddToPlaylistMenu } from "./AddToPlaylistMenu";
 import { AddToListIcon, CloseIcon, TrashIcon } from "./icons";
@@ -41,6 +42,8 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
   const [tracks, setTracks] = useState<Track[]>([]);
   const [total, setTotal] = useState(0);
   const [viewPlaylist, setViewPlaylist] = useState<string | null>(null);
+  const viewPlaylistRef = useRef<string | null>(null);
+  viewPlaylistRef.current = viewPlaylist;
   const [newName, setNewName] = useState<string | null>(null);
   const [menuTrackId, setMenuTrackId] = useState<string | null>(null);
   const [localVersion, setLocalVersion] = useState(0);
@@ -259,15 +262,16 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
     }
   }
 
-  async function deleteTrack(trackId: string) {
+  async function deleteTrack(track: Track) {
+    if (!window.confirm(tFmt("history.confirmDeleteTrack", { title: track.title }))) return;
     try {
       await authOk(
-        `/api/tracks/${encodeURIComponent(trackId)}`,
+        `/api/tracks/${encodeURIComponent(track.id)}`,
         "history.deleteFailed",
         { method: "DELETE" },
         onUnauthorized,
       );
-      onTrackDeleted(trackId);
+      onTrackDeleted(track.id);
       setLocalVersion((v) => v + 1);
       showToast(t("history.trackDeleted"));
     } catch (e) {
@@ -275,10 +279,14 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
     }
   }
 
-  async function removeTrackFromView(trackId: string) {
-    if (!viewPlaylist) return;
+  async function removeTrackFromView(track: Track) {
+    if (!viewPlaylist || !viewingPlaylist) return;
+    if (!window.confirm(tFmt("history.confirmRemoveFromPlaylist", {
+      title: track.title,
+      playlist: viewingPlaylist.name,
+    }))) return;
     try {
-      await removeFromPlaylist(viewPlaylist, trackId, onUnauthorized);
+      await removeFromPlaylist(viewPlaylist, track.id, onUnauthorized);
       setLocalVersion((v) => v + 1);
       showToast(t("history.removedFromPlaylist"));
     } catch (e) {
@@ -320,10 +328,12 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
 
   async function deleteViewingPlaylist() {
     if (!viewingPlaylist) return;
+    const playlist = viewingPlaylist;
+    if (!window.confirm(tFmt("history.confirmDeletePlaylist", { name: playlist.name }))) return;
     try {
-      await deletePlaylist(viewingPlaylist.id, onUnauthorized);
-      showToast(`${t("history.playlistDeleted")}: ${viewingPlaylist.name}`);
-      switchView(null);
+      await deletePlaylist(playlist.id, onUnauthorized);
+      showToast(`${t("history.playlistDeleted")}: ${playlist.name}`);
+      if (viewPlaylistRef.current === playlist.id) switchView(null);
     } catch (e) {
       showError(e);
     }
@@ -352,14 +362,40 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
     });
   }
 
-  async function bulkDelete() {
+  // The bulk action: removal from the open playlist, or permanent deletion
+  // from the library when no playlist is open. The two are never
+  // interchangeable, so the view is resolved once up front and every later
+  // step is checked against it — the awaits below give the user time to switch
+  // views, and acting on the new view would touch the wrong tracks.
+  async function bulkRemove() {
     if (selected.size === 0) return;
+    const trackIds = Array.from(selected);
+    const playlist = viewingPlaylist;
+    // A playlist is open but its metadata is gone (concurrently deleted, say).
+    // Do nothing rather than fall through to deleting from the library.
+    if (viewPlaylist !== null && playlist === null) return;
+
+    const confirmed = playlist
+      ? window.confirm(tFmt("history.confirmBulkRemoveFromPlaylist", {
+          count: trackIds.length,
+          playlist: playlist.name,
+        }))
+      : window.confirm(tFmt("history.confirmBulkDelete", { count: trackIds.length }));
+    if (!confirmed) return;
+
     try {
-      const { deleted } = await bulkDeleteTracks(Array.from(selected), onUnauthorized);
-      for (const id of selected) onTrackDeleted(id);
+      if (playlist) {
+        const { removed } = await bulkRemoveFromPlaylist(playlist.id, trackIds, onUnauthorized);
+        showToast(tFmt("history.tracksRemovedFromPlaylist", { count: removed }));
+        if (viewPlaylistRef.current !== playlist.id) return;
+      } else {
+        const { deleted } = await bulkDeleteTracks(trackIds, onUnauthorized);
+        for (const id of trackIds) onTrackDeleted(id);
+        showToast(`${deleted} ${t("history.tracksDeleted")}`);
+        if (viewPlaylistRef.current !== null) return;
+      }
       exitSelectMode();
       setLocalVersion((v) => v + 1);
-      showToast(`${deleted} ${t("history.tracksDeleted")}`);
     } catch (e) {
       showError(e);
     }
@@ -482,9 +518,9 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
           <button
             className="btn btn-sm"
             disabled={selected.size === 0}
-            onClick={bulkDelete}
+            onClick={bulkRemove}
           >
-            {t("history.bulkDelete")}
+            {viewPlaylist ? t("history.bulkRemoveFromPlaylist") : t("history.bulkDelete")}
           </button>
           {!viewPlaylist && playlists.length > 0 && (
             <span className="playlist-menu-anchor">
@@ -586,8 +622,8 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
                 title={viewPlaylist ? t("history.removeFromPlaylist") : t("history.deleteTrack")}
                 onClick={(e) => {
                   e.stopPropagation();
-                  if (viewPlaylist) removeTrackFromView(tr.id);
-                  else deleteTrack(tr.id);
+                  if (viewPlaylist) removeTrackFromView(tr);
+                  else deleteTrack(tr);
                 }}
               >
                 {viewPlaylist ? <CloseIcon /> : <TrashIcon />}

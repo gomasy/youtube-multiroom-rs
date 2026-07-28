@@ -1,7 +1,8 @@
 use crate::alexa::handle_alexa;
 use crate::state::{
-    AUDIO_MIME, AppState, AudioTrack, DeviceState, DeviceUpdate, PlayRequest, ReorderOutcome,
-    ReorderRequest, SeekRequest, UrlKind, classify_url, run_yt_dlp, tracks_update_message,
+    AUDIO_MIME, AppState, AudioTrack, DeviceState, DeviceUpdate, DownloadError, PlayRequest,
+    ReorderOutcome, ReorderRequest, SeekRequest, UrlKind, classify_url, run_yt_dlp,
+    tracks_update_message,
 };
 use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message, WebSocket};
@@ -434,6 +435,27 @@ pub async fn bulk_add_playlist_tracks(
         "added": added,
         "message": t!("api_bulk_added_to_playlist", locale = &locale, count = added),
     })))
+}
+
+/// POST /api/playlists/:id/tracks/bulk-remove
+pub async fn bulk_remove_playlist_tracks(
+    State(state): State<Arc<AppState>>,
+    Path(playlist_id): Path<String>,
+    Json(req): Json<BulkPlaylistTrackRequest>,
+) -> AppResult<Json<Value>> {
+    playlist_or_404(&state, &playlist_id).await?;
+    let removed = state
+        .remove_playlist_tracks(&playlist_id, &req.track_ids)
+        .await
+        .map_err(|e| {
+            tracing::warn!("Redis error removing tracks from playlist {playlist_id}: {e}");
+            AppError::internal("Failed to remove tracks from playlist")
+        })?;
+    if removed > 0 {
+        state.broadcast_playlists().await;
+        state.broadcast_tracks().await;
+    }
+    Ok(Json(json!({ "status": "ok", "removed": removed })))
 }
 
 /// DELETE /api/tracks/:id
@@ -961,26 +983,39 @@ async fn handle_ws_message(
             };
             // Download can take a long time; run in a separate task and return result.
             // Playlist URLs are expanded and trigger a batch import.
+            // Capture the token before spawning, so a stop received immediately
+            // afterward still cancels this request.
+            let cancel = state.download_token().await;
             let state = state.clone();
             let tx = client_tx.clone();
             let url = url.to_string();
             tokio::spawn(async move {
                 let result = match classify_url(&url) {
-                    UrlKind::Video => match state.extract_audio(&url).await {
+                    UrlKind::Video => match state.extract_audio(&url, &cancel).await {
                         Ok(track) => {
                             state.broadcast_tracks().await;
                             json!({ "type": "extract_audio_result", "track": track })
                         }
-                        Err(e) => json!({ "type": "extract_audio_error", "error": e }),
+                        Err(DownloadError::Cancelled) => {
+                            json!({ "type": "extract_audio_cancelled" })
+                        }
+                        Err(e) => json!({ "type": "extract_audio_error", "error": e.to_string() }),
                     },
-                    UrlKind::Playlist(list_id) => match state.import_playlist(&list_id).await {
-                        Ok(info) => json!({
-                            "type": "playlist_import_result",
-                            "name": info.name,
-                            "total": info.total,
-                        }),
-                        Err(e) => json!({ "type": "extract_audio_error", "error": e }),
-                    },
+                    UrlKind::Playlist(list_id) => {
+                        match state.import_playlist(&list_id, &cancel).await {
+                            Ok(info) => json!({
+                                "type": "playlist_import_result",
+                                "name": info.name,
+                                "total": info.total,
+                            }),
+                            Err(DownloadError::Cancelled) => {
+                                json!({ "type": "extract_audio_cancelled" })
+                            }
+                            Err(e) => {
+                                json!({ "type": "extract_audio_error", "error": e.to_string() })
+                            }
+                        }
+                    }
                     UrlKind::Unknown => json!({
                         "type": "extract_audio_error",
                         "error": "Could not recognize YouTube URL",

@@ -206,6 +206,19 @@ export async function bulkAddToPlaylist(
   );
 }
 
+export async function bulkRemoveFromPlaylist(
+  playlistId: string,
+  trackIds: string[],
+  onUnauthorized?: () => void,
+): Promise<{ removed: number }> {
+  return authJson(
+    `/api/playlists/${encodeURIComponent(playlistId)}/tracks/bulk-remove`,
+    "api.bulkRemoveFromPlaylistFailed",
+    { method: "POST", body: JSON.stringify({ track_ids: trackIds }) },
+    onUnauthorized,
+  );
+}
+
 export async function searchYouTube(
   query: string,
   onUnauthorized?: () => void,
