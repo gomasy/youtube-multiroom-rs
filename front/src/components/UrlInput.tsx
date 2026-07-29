@@ -18,7 +18,7 @@ interface Props {
 
 const SCHEME_RE = /^[a-z][a-z\d+.-]*:\/\//i;
 /// Only decides the button label and paste auto-submit. The authoritative check
-/// is parse_youtube_url() in src/state.rs — keep the host list in sync with it.
+/// is parse_youtube_url() in src/state/url.rs — keep the host list in sync with it.
 const YOUTUBE_HOSTS = new Set([
   "youtube.com",
   "www.youtube.com",
@@ -151,9 +151,9 @@ export const UrlInput = forwardRef<UrlInputHandle, Props>(function UrlInput(
           {results.length === 0 && (
             <div className="search-empty">{t("url.noResults")}</div>
           )}
-          {results.map((t) => (
-            <div key={t.id} className="history-item" onClick={() => pickResult(t)}>
-              <TrackRowInfo track={t} />
+          {results.map((result) => (
+            <div key={result.id} className="history-item" onClick={() => pickResult(result)}>
+              <TrackRowInfo track={result} />
             </div>
           ))}
         </div>

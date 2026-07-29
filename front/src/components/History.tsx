@@ -461,7 +461,7 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
 
       <div className="section-label history-header">
         {viewingPlaylist && renameName !== null ? renderNameForm(
-          renameName!,
+          renameName,
           setRenameName,
           submitRename,
           () => setRenameName(null),
