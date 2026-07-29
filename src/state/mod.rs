@@ -167,7 +167,10 @@ impl AppState {
     }
 
     /// Notify clients that the track list changed (content is re-fetched via REST).
-    pub async fn broadcast_tracks(&self) {
+    ///
+    /// The only broadcast that is not `async`: its frame carries no payload, so
+    /// unlike its siblings it has no state to read before sending.
+    pub fn broadcast_tracks(&self) {
         self.broadcast(tracks_update_message());
     }
 

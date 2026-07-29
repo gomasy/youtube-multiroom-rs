@@ -88,7 +88,7 @@ pub async fn add_playlist_track(
     }
     state.broadcast_playlists().await;
     // Notify clients viewing this playlist to refresh their track list
-    state.broadcast_tracks().await;
+    state.broadcast_tracks();
     let locale = client_locale(&headers);
     Ok(Json(json!({
         "status": "ok",
@@ -106,7 +106,7 @@ pub async fn remove_playlist_track(
         return Err(AppError::not_found("Track not in playlist"));
     }
     state.broadcast_playlists().await;
-    state.broadcast_tracks().await;
+    state.broadcast_tracks();
     Ok(Json(json!({ "status": "ok" })))
 }
 
@@ -126,7 +126,7 @@ pub async fn bulk_add_playlist_tracks(
     }
     if added > 0 {
         state.broadcast_playlists().await;
-        state.broadcast_tracks().await;
+        state.broadcast_tracks();
     }
     let locale = client_locale(&headers);
     Ok(Json(json!({
@@ -152,7 +152,7 @@ pub async fn bulk_remove_playlist_tracks(
         })?;
     if removed > 0 {
         state.broadcast_playlists().await;
-        state.broadcast_tracks().await;
+        state.broadcast_tracks();
     }
     Ok(Json(json!({ "status": "ok", "removed": removed })))
 }

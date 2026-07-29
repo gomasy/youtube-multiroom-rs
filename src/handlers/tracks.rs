@@ -67,14 +67,14 @@ pub async fn reorder_track(
         ReorderOutcome::NotInList => return Err(AppError::not_found("Track not in the list")),
         ReorderOutcome::Failed => return Err(AppError::internal("Failed to save track order")),
     }
-    state.broadcast_tracks().await;
+    state.broadcast_tracks();
     Ok(Json(json!({ "status": "ok" })))
 }
 
 /// Announce a track deletion. Deleting a track also strips it from playlists
 /// and from device queues, so all three views have to be refreshed together.
 async fn broadcast_track_removal(state: &AppState) {
-    state.broadcast_tracks().await;
+    state.broadcast_tracks();
     state.broadcast_devices().await;
     state.broadcast_playlists().await;
 }

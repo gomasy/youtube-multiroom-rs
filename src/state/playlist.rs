@@ -398,7 +398,7 @@ impl AppState {
                     Ok(track) => {
                         state.add_playlist_track(&playlist.id, &track.id).await;
                         // Reflect each successfully imported track in the lists
-                        state.broadcast_tracks().await;
+                        state.broadcast_tracks();
                         state.broadcast_playlists().await;
                         imported += 1;
                     }

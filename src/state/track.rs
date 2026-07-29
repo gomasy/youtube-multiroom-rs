@@ -271,7 +271,7 @@ impl AppState {
                     tracing::warn!("Redis error restoring track {video_id}: {e}");
                 }
             }
-            state.broadcast_tracks().await;
+            state.broadcast_tracks();
             tracing::info!("Track restore finished");
         });
     }

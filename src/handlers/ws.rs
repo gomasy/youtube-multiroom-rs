@@ -203,7 +203,7 @@ async fn start_extract(
         let result = match classify_url(&url) {
             UrlKind::Video => match state.extract_audio(&url, &cancel).await {
                 Ok(track) => {
-                    state.broadcast_tracks().await;
+                    state.broadcast_tracks();
                     json!({ "type": "extract_audio_result", "track": track })
                 }
                 Err(DownloadError::Cancelled) => json!({ "type": "extract_audio_cancelled" }),
