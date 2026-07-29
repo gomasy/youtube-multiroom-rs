@@ -53,6 +53,12 @@ export async function authOk(
   return res;
 }
 
+/// Path builders for the resources addressed by ID. Routed through here so no
+/// call site can forget to escape an ID into the URL.
+const playlistPath = (playlistId: string) =>
+  `/api/playlists/${encodeURIComponent(playlistId)}`;
+const devicePath = (deviceId: string) => `/api/devices/${encodeURIComponent(deviceId)}`;
+
 /// authOk that parses the response body as JSON.
 async function authJson<T>(
   url: string,
@@ -136,7 +142,7 @@ export async function renamePlaylist(
   onUnauthorized?: () => void,
 ): Promise<void> {
   await authOk(
-    `/api/playlists/${encodeURIComponent(playlistId)}`,
+    playlistPath(playlistId),
     "api.renamePlaylistFailed",
     { method: "PATCH", body: JSON.stringify({ name }) },
     onUnauthorized,
@@ -148,7 +154,7 @@ export async function deletePlaylist(
   onUnauthorized?: () => void,
 ): Promise<void> {
   await authOk(
-    `/api/playlists/${encodeURIComponent(playlistId)}`,
+    playlistPath(playlistId),
     "api.deletePlaylistFailed",
     { method: "DELETE" },
     onUnauthorized,
@@ -161,7 +167,7 @@ export async function addToPlaylist(
   onUnauthorized?: () => void,
 ): Promise<{ message?: string }> {
   return authJson(
-    `/api/playlists/${encodeURIComponent(playlistId)}/tracks`,
+    `${playlistPath(playlistId)}/tracks`,
     "api.addToPlaylistFailed",
     { method: "POST", body: JSON.stringify({ track_id: trackId }) },
     onUnauthorized,
@@ -174,7 +180,7 @@ export async function removeFromPlaylist(
   onUnauthorized?: () => void,
 ): Promise<void> {
   await authOk(
-    `/api/playlists/${encodeURIComponent(playlistId)}/tracks/${encodeURIComponent(trackId)}`,
+    `${playlistPath(playlistId)}/tracks/${encodeURIComponent(trackId)}`,
     "api.removeFromPlaylistFailed",
     { method: "DELETE" },
     onUnauthorized,
@@ -199,7 +205,7 @@ export async function bulkAddToPlaylist(
   onUnauthorized?: () => void,
 ): Promise<{ message?: string }> {
   return authJson(
-    `/api/playlists/${encodeURIComponent(playlistId)}/tracks/bulk`,
+    `${playlistPath(playlistId)}/tracks/bulk`,
     "api.bulkAddToPlaylistFailed",
     { method: "POST", body: JSON.stringify({ track_ids: trackIds }) },
     onUnauthorized,
@@ -212,7 +218,7 @@ export async function bulkRemoveFromPlaylist(
   onUnauthorized?: () => void,
 ): Promise<{ removed: number }> {
   return authJson(
-    `/api/playlists/${encodeURIComponent(playlistId)}/tracks/bulk-remove`,
+    `${playlistPath(playlistId)}/tracks/bulk-remove`,
     "api.bulkRemoveFromPlaylistFailed",
     { method: "POST", body: JSON.stringify({ track_ids: trackIds }) },
     onUnauthorized,
@@ -271,7 +277,7 @@ export async function removeQueueItem(
   onUnauthorized?: () => void,
 ): Promise<void> {
   await authOk(
-    `/api/devices/${encodeURIComponent(deviceId)}/queue/${encodeURIComponent(entry)}`,
+    `${devicePath(deviceId)}/queue/${encodeURIComponent(entry)}`,
     "api.removeQueueFailed",
     { method: "DELETE" },
     onUnauthorized,
@@ -283,7 +289,7 @@ export async function clearQueue(
   onUnauthorized?: () => void,
 ): Promise<void> {
   await authOk(
-    `/api/devices/${encodeURIComponent(deviceId)}/queue`,
+    `${devicePath(deviceId)}/queue`,
     "api.clearQueueFailed",
     { method: "DELETE" },
     onUnauthorized,
