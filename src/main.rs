@@ -2,46 +2,10 @@ mod alexa;
 mod alexa_verify;
 mod auth;
 mod handlers;
+mod locale;
 mod state;
 
 rust_i18n::i18n!("locales", fallback = "en");
-
-/// Locale used when a request advertises no language, or one we don't ship.
-///
-/// Do not swap this for a hardcoded default: the i18n! macro's constant is the
-/// single source of truth for the fallback locale. Reported through die() like
-/// every other fatal condition rather than as a panic.
-pub fn fallback_locale() -> &'static str {
-    _RUST_I18N_FALLBACK_LOCALE
-        .and_then(|l| l.first())
-        .copied()
-        .unwrap_or_else(|| die("i18n fallback locale is not set"))
-}
-
-/// Resolve a client-advertised language code to a locale we ship, falling back
-/// to the built-in default. Single home for that policy: the HTTP layer feeds it
-/// the X-App-Lang header, the Alexa layer request.locale.
-pub fn locale_or_default(code: Option<&str>) -> String {
-    code.and_then(resolve_locale)
-        .unwrap_or_else(|| fallback_locale().to_string())
-}
-
-/// Resolve a language code to the best available locale, or `None` if unknown.
-fn resolve_locale(code: &str) -> Option<String> {
-    let code = code.trim().to_ascii_lowercase();
-    if code.is_empty() {
-        return None;
-    }
-    let available = rust_i18n::available_locales!();
-    if available.iter().any(|a| a.as_ref() == code) {
-        return Some(code);
-    }
-    let base = code.split('-').next()?;
-    if available.iter().any(|a| a.as_ref() == base) {
-        return Some(base.to_string());
-    }
-    None
-}
 
 pub const VERSION: &str = concat!(
     "v",
@@ -190,7 +154,7 @@ async fn shutdown_signal() {
     tracing::info!("Shutting down...");
 }
 
-fn die(msg: impl std::fmt::Display) -> ! {
+pub(crate) fn die(msg: impl std::fmt::Display) -> ! {
     eprintln!("Error: {msg}");
     process::exit(1);
 }
@@ -211,8 +175,6 @@ fn redact_url(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::redact_url;
-    use super::resolve_locale;
-    use rust_i18n::t;
 
     #[test]
     fn redacts_userinfo_only() {
@@ -221,55 +183,5 @@ mod tests {
             "redis://***@localhost:6379/0"
         );
         assert_eq!(redact_url("redis://localhost/"), "redis://localhost/");
-    }
-
-    #[test]
-    fn resolve_exact_match() {
-        assert_eq!(resolve_locale("en"), Some("en".to_string()));
-        assert_eq!(resolve_locale("ja"), Some("ja".to_string()));
-    }
-
-    #[test]
-    fn resolve_base_code_fallback() {
-        assert_eq!(resolve_locale("en-us"), Some("en".to_string()));
-        assert_eq!(resolve_locale("en-US"), Some("en".to_string()));
-        assert_eq!(resolve_locale("ja-JP"), Some("ja".to_string()));
-    }
-
-    #[test]
-    fn resolve_unknown_returns_none() {
-        assert_eq!(resolve_locale("xx"), None);
-        assert_eq!(resolve_locale("xx-YY"), None);
-    }
-
-    #[test]
-    fn resolve_empty_returns_none() {
-        assert_eq!(resolve_locale(""), None);
-        assert_eq!(resolve_locale("   "), None);
-    }
-
-    #[test]
-    fn fallback_locale_is_en() {
-        assert_eq!(super::fallback_locale(), "en");
-    }
-
-    #[test]
-    fn embedded_translations_load() {
-        assert_eq!(
-            t!("alexa_connected", locale = "en"),
-            "Connected to YouTube MultiRoom. You can control playback from the web interface."
-        );
-        assert_eq!(
-            t!("alexa_connected", locale = "ja"),
-            "YouTube マルチルームに接続しました。Web 画面から操作できます。"
-        );
-    }
-
-    #[test]
-    fn template_substitution_works() {
-        assert_eq!(
-            t!("api_added_to_playlist", locale = "en", title = "Song"),
-            "Added \"Song\" to playlist"
-        );
     }
 }

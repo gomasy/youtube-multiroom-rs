@@ -42,7 +42,7 @@ pub async fn handle_alexa(state: &Arc<AppState>, body: Value, base_url: &str) ->
         return alexa_response(json!({}));
     }
 
-    let locale = crate::locale_or_default(body["request"]["locale"].as_str());
+    let locale = crate::locale::or_default(body["request"]["locale"].as_str());
     let can_speak = matches!(req_type, "LaunchRequest" | "IntentRequest");
 
     // Every remaining request type acts on one specific device. Without a

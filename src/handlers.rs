@@ -633,9 +633,9 @@ async fn device_or_404(state: &AppState, device_id: &str) -> AppResult<DeviceSta
 
 /// Resolve the response locale for this request. The client advertises its
 /// locale via the X-App-Lang header (derived from navigator.language); the
-/// fallback policy itself lives in crate::locale_or_default.
+/// fallback policy itself lives in crate::locale::or_default.
 fn client_locale(headers: &HeaderMap) -> String {
-    crate::locale_or_default(headers.get("x-app-lang").and_then(|v| v.to_str().ok()))
+    crate::locale::or_default(headers.get("x-app-lang").and_then(|v| v.to_str().ok()))
 }
 
 /// Queue a track for playback on each device's pending slot and broadcast state.

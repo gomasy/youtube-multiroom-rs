@@ -34,6 +34,7 @@ youtube-multiroom-rs/
 │   │   └── url.rs         # YouTube URL / video ID validation
 │   ├── handlers.rs    # HTTP / WebSocket handlers
 │   ├── auth.rs        # Bearer token authentication middleware
+│   ├── locale.rs      # Request locale resolution (X-App-Lang / Alexa locale)
 │   ├── alexa.rs       # Alexa skill handler
 │   └── alexa_verify.rs # Alexa request signature verification
 ├── front/
