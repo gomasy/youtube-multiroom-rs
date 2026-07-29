@@ -37,14 +37,27 @@ pub async fn stream_audio(
     let range = headers
         .get(header::RANGE)
         .and_then(|v| v.to_str().ok())
-        .and_then(|r| parse_byte_range(r, total));
+        .map_or(ByteRange::Ignored, |r| parse_byte_range(r, total));
+
+    if matches!(range, ByteRange::Unsatisfiable) {
+        // The current length has to come back with the 416 so the client can
+        // reissue a range that exists rather than guessing again.
+        return Ok((
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            [
+                (header::CONTENT_RANGE, format!("bytes */{total}")),
+                (header::ACCEPT_RANGES, "bytes".to_string()),
+            ],
+        )
+            .into_response());
+    }
 
     let mut resp = Response::builder()
         .header(header::CONTENT_TYPE, AUDIO_MIME)
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CACHE_CONTROL, "private, max-age=3600");
 
-    let body = if let Some((start, end)) = range {
+    let body = if let ByteRange::Satisfiable { start, end } = range {
         file.seek(SeekFrom::Start(start as u64))
             .await
             .map_err(|e| AppError::internal(format!("Failed to seek: {e}")))?;
@@ -187,58 +200,115 @@ pub async fn audio_url(
     Ok(Json(json!({ "url": url })))
 }
 
-fn parse_byte_range(header: &str, total: usize) -> Option<(usize, usize)> {
-    if total == 0 {
-        return None;
-    }
-    let range = header.strip_prefix("bytes=")?;
-    let (start_str, end_str) = range.split_once('-')?;
-    let (start, end) = if start_str.is_empty() {
-        // Suffix range (bytes=-N): last N bytes
-        let suffix_len: usize = end_str.parse().ok()?;
-        if suffix_len == 0 {
-            return None;
-        }
-        (total.saturating_sub(suffix_len), total - 1)
-    } else {
-        let start = start_str.parse().ok()?;
-        let end = if end_str.is_empty() {
-            total - 1
-        } else {
-            end_str.parse::<usize>().ok()?.min(total - 1)
-        };
-        (start, end)
+/// What a request's Range header asks us to do.
+#[derive(Debug, PartialEq, Eq)]
+enum ByteRange {
+    /// Serve exactly these bytes (inclusive) as a 206.
+    Satisfiable { start: usize, end: usize },
+    /// A well-formed range that names no byte the file has. RFC 9110 §15.5.17
+    /// requires a 416 here rather than quietly serving something else.
+    Unsatisfiable,
+    /// Not a range we can act on. RFC 9110 §14.2 requires an unsatisfiable-to-
+    /// parse Range header to be ignored, so the whole file goes out as a 200.
+    /// Multi-range requests land here too: a 200 always satisfies them, whereas
+    /// answering with one of the parts would be wrong.
+    Ignored,
+}
+
+fn parse_byte_range(header: &str, total: usize) -> ByteRange {
+    let Some(spec) = header.strip_prefix("bytes=") else {
+        return ByteRange::Ignored;
     };
-    if start <= end && start < total {
-        Some((start, end))
-    } else {
-        None
+    let Some((first, last)) = spec.split_once('-') else {
+        return ByteRange::Ignored;
+    };
+
+    if first.is_empty() {
+        // Suffix range (bytes=-N): the last N bytes.
+        let Ok(suffix_len) = last.parse::<usize>() else {
+            return ByteRange::Ignored;
+        };
+        // "the last zero bytes", and any suffix of an empty file, name nothing.
+        if suffix_len == 0 || total == 0 {
+            return ByteRange::Unsatisfiable;
+        }
+        return ByteRange::Satisfiable {
+            start: total.saturating_sub(suffix_len),
+            end: total - 1,
+        };
     }
+
+    let Ok(start) = first.parse::<usize>() else {
+        return ByteRange::Ignored;
+    };
+    // An open-ended range runs to the end of the file; an explicit end past it
+    // is clamped rather than rejected.
+    let end = if last.is_empty() {
+        total.saturating_sub(1)
+    } else {
+        let Ok(end) = last.parse::<usize>() else {
+            return ByteRange::Ignored;
+        };
+        // last-byte-pos < first-byte-pos makes the spec invalid rather than
+        // merely unsatisfiable, so it is ignored instead of answered with a 416.
+        if end < start {
+            return ByteRange::Ignored;
+        }
+        end.min(total.saturating_sub(1))
+    };
+    if start >= total {
+        return ByteRange::Unsatisfiable;
+    }
+    ByteRange::Satisfiable { start, end }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_byte_range;
+    use super::{ByteRange, parse_byte_range};
+
+    fn served(start: usize, end: usize) -> ByteRange {
+        ByteRange::Satisfiable { start, end }
+    }
 
     #[test]
     fn parses_byte_ranges() {
         // Normal range, clamped end, start-only
-        assert_eq!(parse_byte_range("bytes=0-99", 1000), Some((0, 99)));
-        assert_eq!(parse_byte_range("bytes=900-1999", 1000), Some((900, 999)));
-        assert_eq!(parse_byte_range("bytes=500-", 1000), Some((500, 999)));
+        assert_eq!(parse_byte_range("bytes=0-99", 1000), served(0, 99));
+        assert_eq!(parse_byte_range("bytes=900-1999", 1000), served(900, 999));
+        assert_eq!(parse_byte_range("bytes=500-", 1000), served(500, 999));
         // Suffix range: last N bytes
-        assert_eq!(parse_byte_range("bytes=-100", 1000), Some((900, 999)));
-        assert_eq!(parse_byte_range("bytes=-2000", 1000), Some((0, 999)));
+        assert_eq!(parse_byte_range("bytes=-100", 1000), served(900, 999));
+        assert_eq!(parse_byte_range("bytes=-2000", 1000), served(0, 999));
     }
 
     #[test]
-    fn rejects_invalid_ranges() {
-        assert_eq!(parse_byte_range("bytes=-0", 1000), None);
-        assert_eq!(parse_byte_range("bytes=1000-", 1000), None);
-        assert_eq!(parse_byte_range("bytes=5-2", 1000), None);
-        assert_eq!(parse_byte_range("bytes=0-99", 0), None);
-        assert_eq!(parse_byte_range("items=0-99", 1000), None);
+    fn ranges_outside_the_file_are_unsatisfiable() {
+        // A start at or past the end names no byte the file has
+        assert_eq!(
+            parse_byte_range("bytes=1000-", 1000),
+            ByteRange::Unsatisfiable
+        );
+        assert_eq!(
+            parse_byte_range("bytes=1000-1005", 1000),
+            ByteRange::Unsatisfiable
+        );
+        // "the last zero bytes" is well-formed and satisfies nothing
+        assert_eq!(parse_byte_range("bytes=-0", 1000), ByteRange::Unsatisfiable);
+        // An empty file can satisfy no range at all
+        assert_eq!(parse_byte_range("bytes=0-99", 0), ByteRange::Unsatisfiable);
+        assert_eq!(parse_byte_range("bytes=0-", 0), ByteRange::Unsatisfiable);
+        assert_eq!(parse_byte_range("bytes=-10", 0), ByteRange::Unsatisfiable);
+    }
+
+    #[test]
+    fn unparsable_ranges_are_ignored() {
+        // An inverted spec is invalid, not unsatisfiable: serve the whole file
+        assert_eq!(parse_byte_range("bytes=5-2", 1000), ByteRange::Ignored);
+        assert_eq!(parse_byte_range("items=0-99", 1000), ByteRange::Ignored);
+        assert_eq!(parse_byte_range("bytes=abc-", 1000), ByteRange::Ignored);
+        assert_eq!(parse_byte_range("bytes=0-abc", 1000), ByteRange::Ignored);
+        assert_eq!(parse_byte_range("bytes=100", 1000), ByteRange::Ignored);
         // Multi-range not supported (caller falls back to 200 full)
-        assert_eq!(parse_byte_range("bytes=0-1,5-6", 1000), None);
+        assert_eq!(parse_byte_range("bytes=0-1,5-6", 1000), ByteRange::Ignored);
     }
 }
