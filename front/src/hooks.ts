@@ -74,37 +74,51 @@ export function useWebSocket(active: boolean, callbacks: WSCallbacks) {
     ws.onmessage = (event) => {
       const data = parseMessage(event.data);
       if (!data) return;
-      if (data.type === "init") {
-        if (data.version) cbRef.current.onVersion(data.version);
-        cbRef.current.onInit(data.devices || {});
-        if (data.playback_mode) cbRef.current.onPlaybackMode(data.playback_mode);
-        // Re-sync in-progress download display on reload/reconnect
-        cbRef.current.onDownloadsUpdate(data.downloads || []);
-        cbRef.current.onPlaylistsUpdate(data.playlists || []);
-        cbRef.current.onActivePlaylist(data.active_playlist ?? null);
-        cbRef.current.onSleepTimer(data.sleep_timer ?? null);
-      } else if (data.type === "device_update") {
-        cbRef.current.onDeviceUpdate(data.devices || {});
-      } else if (data.type === "tracks_update") {
-        cbRef.current.onTracksUpdate();
-      } else if (data.type === "playback_mode_update") {
-        cbRef.current.onPlaybackMode(data.mode);
-      } else if (data.type === "extract_audio_result") {
-        cbRef.current.onExtractResult(data.track);
-      } else if (data.type === "extract_audio_error") {
-        cbRef.current.onExtractError(data.error);
-      } else if (data.type === "extract_audio_cancelled") {
-        cbRef.current.onExtractCancelled();
-      } else if (data.type === "downloads_update") {
-        cbRef.current.onDownloadsUpdate(data.downloads || []);
-      } else if (data.type === "playlists_update") {
-        cbRef.current.onPlaylistsUpdate(data.playlists || []);
-      } else if (data.type === "active_playlist_update") {
-        cbRef.current.onActivePlaylist(data.playlist ?? null);
-      } else if (data.type === "sleep_timer_update") {
-        cbRef.current.onSleepTimer(data.expires_at ?? null);
-      } else if (data.type === "playlist_import_result") {
-        cbRef.current.onPlaylistImportStarted(data.name, data.total);
+      const cb = cbRef.current;
+      switch (data.type) {
+        case "init":
+          if (data.version) cb.onVersion(data.version);
+          cb.onInit(data.devices || {});
+          if (data.playback_mode) cb.onPlaybackMode(data.playback_mode);
+          // Re-sync in-progress download display on reload/reconnect
+          cb.onDownloadsUpdate(data.downloads || []);
+          cb.onPlaylistsUpdate(data.playlists || []);
+          cb.onActivePlaylist(data.active_playlist ?? null);
+          cb.onSleepTimer(data.sleep_timer ?? null);
+          break;
+        case "device_update":
+          cb.onDeviceUpdate(data.devices || {});
+          break;
+        case "tracks_update":
+          cb.onTracksUpdate();
+          break;
+        case "playback_mode_update":
+          cb.onPlaybackMode(data.mode);
+          break;
+        case "extract_audio_result":
+          cb.onExtractResult(data.track);
+          break;
+        case "extract_audio_error":
+          cb.onExtractError(data.error);
+          break;
+        case "extract_audio_cancelled":
+          cb.onExtractCancelled();
+          break;
+        case "downloads_update":
+          cb.onDownloadsUpdate(data.downloads || []);
+          break;
+        case "playlists_update":
+          cb.onPlaylistsUpdate(data.playlists || []);
+          break;
+        case "active_playlist_update":
+          cb.onActivePlaylist(data.playlist ?? null);
+          break;
+        case "sleep_timer_update":
+          cb.onSleepTimer(data.expires_at ?? null);
+          break;
+        case "playlist_import_result":
+          cb.onPlaylistImportStarted(data.name, data.total);
+          break;
       }
     };
 
