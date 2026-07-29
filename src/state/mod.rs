@@ -133,9 +133,17 @@ impl AppState {
         std::fs::create_dir_all(&cache_dir).ok();
 
         let client = redis::Client::open(redis_url)?;
+        // Naming the URL is what makes this error actionable, but it is the one
+        // place a password could reach stderr, so it goes out redacted. The
+        // Client::open error above carries no URL of its own.
         let redis = time::timeout(time::Duration::from_secs(5), ConnectionManager::new(client))
             .await
-            .map_err(|_| format!("Redis connection timed out ({redis_url})"))??;
+            .map_err(|_| {
+                format!(
+                    "Redis connection timed out ({})",
+                    crate::redact_url(redis_url)
+                )
+            })??;
 
         Ok(Arc::new(Self {
             redis,

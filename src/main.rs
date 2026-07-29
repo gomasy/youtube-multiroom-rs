@@ -159,8 +159,11 @@ pub(crate) fn die(msg: impl std::fmt::Display) -> ! {
     process::exit(1);
 }
 
-/// Redact user credentials from a URL for log output.
-fn redact_url(url: &str) -> String {
+/// Redact user credentials from a URL for log output. Every path that puts a
+/// connection URL in front of a human goes through here — the startup banner
+/// and AppState::new's connection error alike — because a Redis URL routinely
+/// carries a password and both destinations are stderr.
+pub(crate) fn redact_url(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
         return url.to_string();
     };
@@ -181,6 +184,16 @@ mod tests {
         assert_eq!(
             redact_url("redis://user:pass@localhost:6379/0"),
             "redis://***@localhost:6379/0"
+        );
+        // Redis URLs usually carry the password with no username at all
+        assert_eq!(
+            redact_url("redis://:pass@localhost:6379/0"),
+            "redis://***@localhost:6379/0"
+        );
+        // Neither a missing path nor a TLS scheme may let credentials through
+        assert_eq!(
+            redact_url("rediss://user:pass@localhost:6379"),
+            "rediss://***@localhost:6379"
         );
         assert_eq!(redact_url("redis://localhost/"), "redis://localhost/");
     }
