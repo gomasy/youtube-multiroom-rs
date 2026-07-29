@@ -32,7 +32,15 @@ youtube-multiroom-rs/
 │   │   ├── download.rs    # Audio downloading and progress reporting
 │   │   ├── ytdlp.rs       # yt-dlp invocation & process group reaping
 │   │   └── url.rs         # YouTube URL / video ID validation
-│   ├── handlers.rs    # HTTP / WebSocket handlers
+│   ├── handlers/      # HTTP / WebSocket handlers, split by subject
+│   │   ├── mod.rs         # Error type, shared 404 lookups, response locale
+│   │   ├── audio.rs       # Audio streaming, live relay, signed stream URLs
+│   │   ├── search.rs      # YouTube search
+│   │   ├── tracks.rs      # Track listing, reordering, deletion
+│   │   ├── playlists.rs   # Playlist CRUD & membership
+│   │   ├── devices.rs     # Device state & playback commands
+│   │   ├── alexa.rs       # Alexa webhook endpoint
+│   │   └── ws.rs          # WebSocket push channel
 │   ├── auth.rs        # Bearer token authentication middleware
 │   ├── locale.rs      # Request locale resolution (X-App-Lang / Alexa locale)
 │   ├── alexa.rs       # Alexa skill handler
