@@ -1,0 +1,15 @@
+// 基盤 → 共通部品 → 画面ごとの部品 の順に読み込む。
+// (@use は 1 度しか展開されないため、各 partial から個別に読んでも重複しない)
+@use "tokens";
+@use "base";
+@use "controls";
+@use "header";
+@use "url-input";
+@use "downloads";
+@use "playback";
+@use "marquee";
+@use "seek-bar";
+@use "now-playing";
+@use "devices";
+@use "history";
+@use "overlays";

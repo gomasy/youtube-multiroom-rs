@@ -1,0 +1,36 @@
+@use "mixins" as *;
+
+// 収まりきらないタイトルを往復スクロールさせる (ScrollingText.tsx)
+.marquee {
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+
+  &.overflowing {
+    // はみ出し側 (右端) をフェードさせる
+    @include mask(linear-gradient(90deg, #000 calc(100% - 16px), transparent));
+
+    .marquee-text {
+      animation: marquee-pingpong var(--marquee-duration, 10s) linear infinite;
+    }
+
+    @include reduced-motion {
+      @include mask(none);
+      text-overflow: ellipsis;
+
+      .marquee-text { animation: none; }
+    }
+  }
+}
+
+.marquee-text {
+  display: inline-block;
+  vertical-align: top;
+}
+
+// 両端で停止 → 逆端までスクロール → 停止 → 戻る
+@keyframes marquee-pingpong {
+  0%, 15%   { transform: translateX(0); }
+  48%, 63%  { transform: translateX(var(--marquee-shift)); }
+  96%, 100% { transform: translateX(0); }
+}

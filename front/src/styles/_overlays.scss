@@ -1,0 +1,114 @@
+@use "mixins" as *;
+
+// ── トースト ──
+.toast-container {
+  @include stack(8px);
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 200;
+  align-items: center;
+}
+
+.toast {
+  @include card(var(--surface-2));
+  padding: 12px 20px;
+  font-size: 13px;
+  color: var(--text);
+  box-shadow: var(--shadow-pop);
+  animation: toast-in 0.3s ease;
+  max-width: 380px;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+// ── 認証モーダル ──
+.auth-modal {
+  @include center;
+  position: fixed;
+  inset: 0;
+  background: rgba(#000, 0.8);
+  z-index: 100;
+}
+
+.auth-box {
+  @include card;
+  padding: 32px 24px;
+  max-width: 360px;
+  width: 90%;
+  text-align: center;
+
+  h2 {
+    font-size: 16px;
+    margin-bottom: 8px;
+  }
+
+  p {
+    font-size: 13px;
+    color: var(--text-dim);
+    margin-bottom: 16px;
+  }
+}
+
+// ── プレイリストへの追加メニュー ──
+.playlist-menu-anchor {
+  position: relative;
+  flex-shrink: 0;
+}
+
+// メニュー外のクリックを拾うための透明な面
+.menu-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+}
+
+.playlist-menu {
+  @include card(var(--surface-2), var(--radius-sm));
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 50;
+  min-width: 180px;
+  max-width: 260px;
+  padding: 6px;
+  box-shadow: var(--shadow-pop);
+}
+
+.playlist-menu-title {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-dim);
+  padding: 4px 8px 6px;
+}
+
+.playlist-menu-item {
+  @include truncate;
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 13px;
+  padding: 7px 8px;
+  cursor: pointer;
+
+  &:hover { background: var(--surface-3); }
+}
+
+.playlist-menu-empty {
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 4px 8px 6px;
+  line-height: 1.5;
+}

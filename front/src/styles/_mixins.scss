@@ -1,0 +1,86 @@
+@use "tokens" as *;
+
+// 1 行に収め、溢れた分は省略記号にする
+@mixin truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+// カード・パネルの下地
+@mixin card($bg: var(--surface), $radius: var(--radius)) {
+  background: $bg;
+  border: 1px solid var(--border);
+  border-radius: $radius;
+}
+
+// 横並び
+@mixin row($gap: null) {
+  display: flex;
+  align-items: center;
+  gap: $gap;
+}
+
+// 両端寄せの横並び
+@mixin row-between($gap: null) {
+  @include row($gap);
+  justify-content: space-between;
+}
+
+// 中央寄せの横並び
+@mixin center($gap: null) {
+  @include row($gap);
+  justify-content: center;
+}
+
+// 縦積み
+@mixin stack($gap) {
+  display: flex;
+  flex-direction: column;
+  gap: $gap;
+}
+
+// 正円 (ドット・丸ボタン)
+@mixin circle($size) {
+  width: $size;
+  height: $size;
+  border-radius: 50%;
+}
+
+// サムネイルの枠 (読み込み前は下地の色で埋まる)
+@mixin thumb($size, $radius) {
+  width: $size;
+  height: $size;
+  border-radius: $radius;
+  background: var(--surface-3);
+  flex-shrink: 0;
+}
+
+// 桁の揃った数字 (時間・カウンタ)
+@mixin tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+// 伸縮する子 (長いテキストを含むため min-width の解除が要る)
+@mixin flexible {
+  flex: 1;
+  min-width: 0;
+}
+
+// ベンダー接頭辞つきのマスク
+@mixin mask($value) {
+  -webkit-mask-image: $value;
+  mask-image: $value;
+}
+
+@mixin md {
+  @media (min-width: $bp-md) { @content; }
+}
+
+@mixin lg {
+  @media (min-width: $bp-lg) { @content; }
+}
+
+@mixin reduced-motion {
+  @media (prefers-reduced-motion: reduce) { @content; }
+}

@@ -1,0 +1,52 @@
+@use "mixins" as *;
+
+// ブラウザごとに別の擬似要素で同じつまみを描く
+@mixin range-thumb {
+  @include circle(12px);
+  background: var(--text);
+  border: none;
+}
+
+.seek-bar {
+  @include row(8px);
+  margin-top: 8px;
+  cursor: default;
+
+  input[type="range"] {
+    @include flexible;
+    -webkit-appearance: none;
+    appearance: none;
+    height: 4px;
+    border-radius: 2px;
+    // --seek-pct (SeekBar が設定する再生済み割合) までを塗る
+    background: linear-gradient(
+      90deg,
+      var(--accent) var(--seek-pct, 0%),
+      var(--surface-3) var(--seek-pct, 0%)
+    );
+    outline: none;
+    cursor: pointer;
+    // ドラッグ中のページスクロールを抑止する
+    touch-action: none;
+
+    &::-webkit-slider-thumb {
+      @include range-thumb;
+      -webkit-appearance: none;
+      appearance: none;
+      transition: transform 0.1s;
+
+      &:hover { transform: scale(1.2); }
+    }
+
+    &::-moz-range-track { background: transparent; }
+
+    &::-moz-range-thumb { @include range-thumb; }
+  }
+}
+
+.seek-time {
+  @include tabular;
+  font-size: 10px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}

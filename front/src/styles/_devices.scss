@@ -1,0 +1,112 @@
+@use "tokens" as *;
+@use "mixins" as *;
+
+.devices-section { margin-bottom: $section-gap; }
+
+.device-list {
+  @include stack(8px);
+}
+
+.device-card {
+  @include card;
+  @include row(12px);
+  padding: 14px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  user-select: none;
+
+  &:hover { border-color: var(--text-dim); }
+
+  &.selected {
+    border-color: var(--accent);
+    background: var(--accent-tint);
+
+    .device-check {
+      border-color: var(--accent);
+      background: var(--accent);
+    }
+
+    .device-check-inner { display: block; }
+  }
+}
+
+.device-check {
+  @include circle(20px);
+  @include center;
+  flex-shrink: 0;
+  border: 2px solid var(--border);
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.device-check-inner {
+  @include circle(8px);
+  background: #fff;
+  display: none;
+}
+
+.device-info {
+  @include flexible;
+}
+
+.device-name {
+  font-size: 14px;
+  font-weight: 500;
+  margin-bottom: 2px;
+}
+
+.device-status {
+  @include row(5px);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.device-track-name {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+
+.status-dot {
+  @include circle(6px);
+  flex-shrink: 0;
+
+  &.idle,
+  &.stopped { background: var(--text-dim); }
+  &.playing { background: var(--green); }
+  &.paused  { background: var(--yellow); }
+  &.queued  { background: var(--accent); }
+  &.error   { background: var(--red); }
+}
+
+// ── 次に再生 ──
+.device-queue {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  cursor: default;
+}
+
+.device-queue-header {
+  @include row-between;
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+
+.device-queue-item {
+  @include row(8px);
+  font-size: 12px;
+  padding: 2px 0;
+  min-width: 0;
+}
+
+.queue-item-index {
+  @include tabular;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+.queue-item-title {
+  @include flexible;
+  @include truncate;
+}

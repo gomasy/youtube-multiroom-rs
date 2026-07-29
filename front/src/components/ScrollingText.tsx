@@ -4,7 +4,7 @@ import { useLayoutEffect, useRef, useState } from "react";
 const SCROLL_SPEED = 30;
 // Fraction of the animation timeline used for scrolling (rest is pause at each end)
 const SCROLL_RATIO = 0.66;
-// Width of the right-edge fade mask (must match .marquee.overflowing in styles.css).
+// Width of the right-edge fade mask (must match .marquee.overflowing in styles/_marquee.scss).
 // Extra scroll distance ensures trailing characters don't hide under the fade.
 const FADE_WIDTH = 16;
 

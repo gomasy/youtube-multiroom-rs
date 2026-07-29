@@ -1,0 +1,203 @@
+@use "mixins" as *;
+
+.history-section {
+  margin-top: 32px;
+
+  // 2 カラムでは右カラムの先頭に来るため上の余白は要らない
+  @include md {
+    .main-right & { margin-top: 0; }
+  }
+}
+
+// プレイリスト表示の操作付きラベル
+.history-header {
+  @include row-between(8px);
+}
+
+.history-toolbar {
+  @include row(8px);
+  margin-bottom: 10px;
+
+  .btn.active {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+}
+
+.history-filter {
+  @include flexible;
+  transition: border-color 0.2s;
+}
+
+.history-list {
+  @include stack(6px);
+}
+
+.history-item {
+  @include row(10px);
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.15s;
+
+  &:hover {
+    background: var(--surface-2);
+    border-color: var(--border);
+  }
+
+  &.selected {
+    border-color: var(--accent);
+    background: var(--accent-tint);
+  }
+
+  &.dragging { opacity: 0.4; }
+  &.drop-before { box-shadow: 0 -2px 0 0 var(--accent); }
+  &.drop-after  { box-shadow: 0 2px 0 0 var(--accent); }
+}
+
+.history-thumb {
+  @include thumb(40px, 4px);
+  object-fit: cover;
+}
+
+.history-info {
+  @include flexible;
+}
+
+.history-title {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.history-meta {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.history-empty {
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 16px 4px;
+}
+
+.drag-handle {
+  @include row;
+  flex-shrink: 0;
+  padding: 8px 2px;
+  margin: -8px 0;
+  color: var(--text-dim);
+  cursor: grab;
+  // タッチドラッグ中のページスクロールを抑止する
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+
+  &:active { cursor: grabbing; }
+}
+
+// ── ページ送り ──
+.pagination {
+  @include center(12px);
+  margin-top: 14px;
+
+  // ドラッグ中にページ送りボタンへかざしているときの強調表示
+  .btn.drag-over {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+}
+
+.pagination-info {
+  font-size: 12px;
+  color: var(--text-dim);
+  min-width: 48px;
+  text-align: center;
+}
+
+// ── プレイリストのタブ ──
+.playlist-bar {
+  @include row(6px);
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.playlist-tab {
+  @include card($radius: 999px);
+  @include truncate;
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 6px 12px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  max-width: 100%;
+
+  &:hover {
+    color: var(--text);
+    border-color: var(--text-dim);
+  }
+
+  &.active {
+    background: var(--surface-3);
+    border-color: var(--accent);
+    color: var(--text);
+    font-weight: 600;
+  }
+}
+
+.playlist-tab-count {
+  opacity: 0.7;
+  font-size: 11px;
+}
+
+.playlist-tab-add { padding: 6px 10px; }
+
+.playlist-new {
+  @include row(6px);
+}
+
+.playlist-new-input {
+  padding: 6px 10px;
+  width: 160px;
+}
+
+// ── 一括操作 ──
+.bulk-actions {
+  @include row(8px);
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.bulk-count {
+  @include tabular;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.select-check {
+  @include row;
+  flex-shrink: 0;
+  padding: 4px 2px;
+}
+
+.select-check-box {
+  @include center;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  border: 2px solid var(--border);
+  transition: border-color 0.15s, background 0.15s;
+
+  &.checked {
+    border-color: var(--accent);
+    background: var(--accent);
+  }
+}
+
+.select-check-mark {
+  width: 8px;
+  height: 8px;
+  background: #fff;
+  border-radius: 2px;
+}

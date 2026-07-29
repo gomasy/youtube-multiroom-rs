@@ -1,0 +1,43 @@
+@use "tokens" as *;
+@use "mixins" as *;
+
+.url-section { margin-bottom: $section-gap; }
+
+.url-row {
+  display: flex;
+  gap: 8px;
+}
+
+.url-input {
+  @include card(var(--surface-2));
+  flex: 1;
+  padding: 12px 14px;
+  color: var(--text);
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.2s;
+
+  &:focus { border-color: var(--accent); }
+  &::placeholder { color: var(--text-dim); }
+}
+
+// ── 検索結果 ──
+.search-results {
+  @include card;
+  @include stack(6px);
+  margin-top: 10px;
+  padding: 10px;
+}
+
+// 見出しの文字装飾は .section-label を併用する
+.search-results-header {
+  @include row-between;
+  margin-bottom: 0;
+}
+
+.search-empty {
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 13px;
+  padding: 12px 0;
+}

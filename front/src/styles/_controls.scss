@@ -1,0 +1,118 @@
+@use "mixins" as *;
+
+// ── ボタン ──
+.btn {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius);
+  padding: 12px 20px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.1s;
+  white-space: nowrap;
+
+  &:hover  { background: var(--accent-2); }
+  &:active { transform: scale(0.97); }
+
+  &:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    transform: none;
+  }
+}
+
+.btn-outline {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+
+  &:hover {
+    border-color: var(--text-dim);
+    background: var(--surface-2);
+  }
+}
+
+.btn-sm {
+  padding: 8px 14px;
+  font-size: 13px;
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 20px;
+
+  .btn { flex: 1; }
+}
+
+// ── 枠なしの小さな操作ボタン ──
+.text-btn {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 4px;
+
+  &:hover { color: var(--text); }
+
+  // 取り消し・中断はアクセント色で示す
+  &.text-btn-danger:hover { color: var(--accent); }
+}
+
+// ── アイコンだけの操作ボタン ──
+.delete-btn {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  line-height: 1;
+  flex-shrink: 0;
+  transition: color 0.15s, background 0.15s;
+
+  &:hover {
+    color: var(--red);
+    background: var(--red-tint);
+  }
+
+  // 追加は破壊的操作ではないためアクセント色で示す
+  &.add-btn:hover {
+    color: var(--accent-2);
+    background: var(--accent-tint-hover);
+  }
+}
+
+// ── 入力欄・選択欄 ──
+.select,
+.input {
+  @include card($radius: var(--radius-sm));
+  color: var(--text);
+  font-size: 13px;
+  padding: 8px 10px;
+  outline: none;
+
+  &:focus { border-color: var(--accent); }
+}
+
+.input::placeholder { color: var(--text-dim); }
+.select { cursor: pointer; }
+
+// ── 読み込み中のスピナー ──
+.spinner {
+  @include circle(16px);
+  display: inline-block;
+  border: 2px solid rgba(#fff, 0.2);
+  border-top-color: #fff;
+  animation: spin 0.6s linear infinite;
+  vertical-align: middle;
+  margin-right: 6px;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}

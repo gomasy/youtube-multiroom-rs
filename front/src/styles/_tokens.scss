@@ -1,0 +1,48 @@
+// 配色・寸法の単一の出所。
+// Sass 変数を原本とし、実行時に参照するものだけ custom property として公開する。
+
+$bg:        #0a0a0a;
+$surface:   #161616;
+$surface-2: #222222;
+$surface-3: #2e2e2e;
+$border:    #333333;
+$text:      #e8e8e8;
+$text-dim:  #888888;
+$accent:    #ff4040;
+$accent-2:  #ff6b6b;
+$green:     #1ed760;
+$yellow:    #f5c542;
+$red:       #e53935;
+
+$radius:    10px;
+$radius-sm: 6px;
+
+// 画面を縦に区切るセクション同士の間隔
+$section-gap: 24px;
+
+$bp-md: 768px;
+$bp-lg: 1200px;
+
+:root {
+  --bg:        #{$bg};
+  --surface:   #{$surface};
+  --surface-2: #{$surface-2};
+  --surface-3: #{$surface-3};
+  --border:    #{$border};
+  --text:      #{$text};
+  --text-dim:  #{$text-dim};
+  --accent:    #{$accent};
+  --accent-2:  #{$accent-2};
+  --green:     #{$green};
+  --yellow:    #{$yellow};
+  --red:       #{$red};
+  --radius:    #{$radius};
+  --radius-sm: #{$radius-sm};
+
+  // 選択中の行やアクセント系ボタンの下地
+  --accent-tint:       #{rgba($accent, 0.06)};
+  --accent-tint-hover: #{rgba($accent, 0.1)};
+  --red-tint:          #{rgba($red, 0.1)};
+  // 浮いている面 (トースト・メニュー) の影
+  --shadow-pop: 0 8px 24px #{rgba(#000, 0.5)};
+}
