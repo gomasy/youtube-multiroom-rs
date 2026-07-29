@@ -113,7 +113,9 @@ pub async fn live_audio(
         .collect();
     // At least one URL line plus the acodec line; extra URL lines are ignored
     let [cdn_url, .., acodec] = lines.as_slice() else {
-        return Err(AppError::internal("yt-dlp returned empty stream URL"));
+        return Err(AppError::internal(
+            "yt-dlp returned no usable stream URL and codec",
+        ));
     };
 
     // AAC can be remuxed as-is; other codecs (Opus, etc.) need transcoding
