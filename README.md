@@ -94,7 +94,7 @@ youtube-multiroom-rs/
 
 - Rust 1.88+
 - OpenSSL headers & pkg-config (build only; `libssl-dev` on Debian/Ubuntu, used for Alexa request signature verification)
-- Node.js 22+
+- Node.js 22.12+
 - Redis
 - yt-dlp
 - ffmpeg
@@ -366,6 +366,8 @@ The client can also send `{ "type": "cancel_downloads" }`, `{ "type": "set_playb
 On connect, the server sends an `init` message containing the current device map, playback mode, in-progress downloads, playlists, active playlist, and sleep timer expiry
 (the track list is fetched separately via `GET /api/tracks`).
 
+The client keeps the connection alive with a `ping` every 30 s and reconnects on its own when the socket drops, backing off from 1 s and doubling per consecutive failure up to 30 s, so a server that stays down is not hammered by every open tab. A frame that fails to parse is logged and skipped rather than tearing down the connection.
+
 State changes are broadcast to all WebSocket clients via `tokio::sync::broadcast`:
 - `device_update` — device status, track assignment, connection changes (full device map)
 - `tracks_update` — notification that the track list (or a playlist's contents) changed; clients refetch their current page via `GET /api/tracks`
@@ -405,7 +407,7 @@ sudo systemctl enable --now yt-multiroom
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| GET | `/api/audio/{id}/stream` | Signed URL | Stream m4a audio (supports Range requests) |
+| GET | `/api/audio/{id}/stream` | Signed URL | Stream m4a audio (supports Range requests; see below) |
 | GET | `/api/audio/{id}/live` | Signed URL | Relay live stream audio as ADTS AAC via ffmpeg |
 | GET | `/api/audio/{id}/url` | Yes | Get a signed stream URL for browser preview |
 | GET | `/api/search` | Yes | Search YouTube (`q`, optional `limit`) |
@@ -432,6 +434,8 @@ sudo systemctl enable --now yt-multiroom
 | POST | `/api/devices/{id}/stop` | Yes | Stop a device |
 | POST | `/alexa` | Amazon signature | Alexa skill webhook |
 | WS | `/ws` | Yes | Real-time sync & audio extraction |
+
+`GET /api/audio/{id}/stream` follows RFC 9110 for its `Range` header: a satisfiable range comes back as a `206` (an end past the last byte is clamped), a well-formed range that names no byte of the file — a start at or past the end, `bytes=-0`, any range against an empty file — is answered with `416` plus `Content-Range: bytes */<len>`, and a header that cannot be acted on (unparsable, `last < first`, or a multi-range request) is ignored so the whole file goes out as a `200`.
 
 `GET /api/tracks` accepts `page` (default 1), `per_page` (default 10, max 100), and `q` (case-insensitive substring filter on title and channel) query parameters and returns:
 
