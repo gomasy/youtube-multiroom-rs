@@ -32,8 +32,12 @@ async function authFetch(
   options: RequestInit = {},
   onUnauthorized?: () => void,
 ): Promise<Response> {
-  options.headers = { ...authHeaders(), ...(options.headers as Record<string, string>) };
-  const res = await fetch(url, options);
+  // Copy rather than assign into `options`: it belongs to the caller, and a
+  // request that is retried or reused must not inherit an earlier token.
+  const res = await fetch(url, {
+    ...options,
+    headers: { ...authHeaders(), ...(options.headers as Record<string, string>) },
+  });
   if (res.status === 401) {
     onUnauthorized?.();
     throw new UnauthorizedError(t("api.unauthorized"));
