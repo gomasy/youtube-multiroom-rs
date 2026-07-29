@@ -118,6 +118,15 @@ export function App() {
     onPlaylistImportStarted: handlePlaylistImportStarted,
   });
 
+  /// Push a command to the server, reporting the one way it can fail here: the
+  /// socket is down, so the command was never sent. Returns whether it went out,
+  /// for callers that also have local state to flip.
+  function send(msg: Record<string, unknown>): boolean {
+    if (sendMessage(msg)) return true;
+    showToast(t("common.notConnected"));
+    return false;
+  }
+
   function handleTrackDeleted(trackId: string) {
     if (currentTrack?.id === trackId) setCurrentTrack(null);
   }
@@ -131,15 +140,11 @@ export function App() {
   }
 
   function handlePlaybackModeChange(mode: PlaybackMode) {
-    if (!sendMessage({ type: "set_playback_mode", mode })) {
-      showToast(t("common.notConnected"));
-    }
+    send({ type: "set_playback_mode", mode });
   }
 
   function handleActivePlaylistChange(playlistId: string | null) {
-    if (!sendMessage({ type: "set_active_playlist", playlist: playlistId })) {
-      showToast(t("common.notConnected"));
-    }
+    send({ type: "set_active_playlist", playlist: playlistId });
   }
 
   function handleAuthenticated(data: TracksPage | null) {
@@ -157,19 +162,14 @@ export function App() {
           extracting={extracting}
           onUnauthorized={onUnauthorized}
           onExtract={(url) => {
-            if (sendMessage({ type: "extract_audio", url })) {
-              setExtracting(true);
-            } else {
-              showToast(t("common.notConnected"));
-            }
+            if (send({ type: "extract_audio", url })) setExtracting(true);
           }}
           showToast={showToast}
         />
-        <DownloadList downloads={downloads} onCancel={() => {
-          if (!sendMessage({ type: "cancel_downloads" })) {
-            showToast(t("common.notConnected"));
-          }
-        }} />
+        <DownloadList
+          downloads={downloads}
+          onCancel={() => send({ type: "cancel_downloads" })}
+        />
         <div className="main-grid">
           <div className="main-left">
             <NowPlaying
@@ -193,16 +193,8 @@ export function App() {
             />
             <SleepTimer
               expiresAt={sleepTimer}
-              onSet={(minutes) => {
-                if (!sendMessage({ type: "set_sleep_timer", minutes })) {
-                  showToast(t("common.notConnected"));
-                }
-              }}
-              onCancel={() => {
-                if (!sendMessage({ type: "set_sleep_timer", minutes: null })) {
-                  showToast(t("common.notConnected"));
-                }
-              }}
+              onSet={(minutes) => send({ type: "set_sleep_timer", minutes })}
+              onCancel={() => send({ type: "set_sleep_timer", minutes: null })}
             />
           </div>
           <div className="main-right">
