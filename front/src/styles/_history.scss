@@ -3,13 +3,12 @@
 .history-section {
   margin-top: 32px;
 
-  // 2 カラムでは右カラムの先頭に来るため上の余白は要らない
+  // In two columns it starts the right one, where the top margin is unwanted.
   @include md {
     .main-right & { margin-top: 0; }
   }
 }
 
-// プレイリスト表示の操作付きラベル
 .history-header {
   @include row-between(8px);
 }
@@ -89,7 +88,7 @@
   margin: -8px 0;
   color: var(--text-dim);
   cursor: grab;
-  // タッチドラッグ中のページスクロールを抑止する
+  // Keeps a touch drag from scrolling the page.
   touch-action: none;
   user-select: none;
   -webkit-user-select: none;
@@ -97,12 +96,12 @@
   &:active { cursor: grabbing; }
 }
 
-// ── ページ送り ──
+// ── Pagination ──
 .pagination {
   @include center(12px);
   margin-top: 14px;
 
-  // ドラッグ中にページ送りボタンへかざしているときの強調表示
+  // Highlighted while a drag hovers the button.
   .btn.drag-over {
     border-color: var(--accent);
     color: var(--accent);
@@ -116,7 +115,7 @@
   text-align: center;
 }
 
-// ── プレイリストのタブ ──
+// ── Playlist tabs ──
 .playlist-bar {
   @include row(6px);
   flex-wrap: wrap;
@@ -162,7 +161,7 @@
   width: 160px;
 }
 
-// ── 一括操作 ──
+// ── Bulk actions ──
 .bulk-actions {
   @include row(8px);
   flex-wrap: wrap;

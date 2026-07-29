@@ -34,7 +34,7 @@ body {
 .main-grid {
   @include md {
     display: grid;
-    // minmax(0, …) がないと nowrap な長いタイトルがカラム幅を押し広げる
+    // Without minmax(0, …) a long nowrap title widens its column.
     grid-template-columns: minmax(0, 4fr) minmax(0, 6fr);
     gap: 24px;
     align-items: start;
@@ -54,7 +54,7 @@ body {
   margin-bottom: 12px;
 }
 
-// 生放送の印 (再生中・履歴・検索結果で共用)
+// Shared by now playing, history and search results.
 .live-badge {
   display: inline-block;
   background: var(--accent);

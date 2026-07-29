@@ -1,6 +1,6 @@
 @use "mixins" as *;
 
-// ── トースト ──
+// ── Toasts ──
 .toast-container {
   @include stack(8px);
   position: fixed;
@@ -28,7 +28,7 @@
   to   { opacity: 1; transform: translateY(0); }
 }
 
-// ── 認証モーダル ──
+// ── Auth modal ──
 .auth-modal {
   @include center;
   position: fixed;
@@ -56,13 +56,13 @@
   }
 }
 
-// ── プレイリストへの追加メニュー ──
+// ── Add-to-playlist menu ──
 .playlist-menu-anchor {
   position: relative;
   flex-shrink: 0;
 }
 
-// メニュー外のクリックを拾うための透明な面
+// Transparent catcher for clicks outside the menu.
 .menu-overlay {
   position: fixed;
   inset: 0;

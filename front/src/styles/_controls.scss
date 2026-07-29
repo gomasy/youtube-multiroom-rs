@@ -1,6 +1,6 @@
 @use "mixins" as *;
 
-// ── ボタン ──
+// ── Buttons ──
 .btn {
   background: var(--accent);
   color: #fff;
@@ -48,7 +48,7 @@
   .btn { flex: 1; }
 }
 
-// ── 枠なしの小さな操作ボタン ──
+// ── Small borderless action buttons ──
 .text-btn {
   background: none;
   border: none;
@@ -59,11 +59,11 @@
 
   &:hover { color: var(--text); }
 
-  // 取り消し・中断はアクセント色で示す
+  // Cancelling and aborting are not deletions, so accent rather than red.
   &.text-btn-danger:hover { color: var(--accent); }
 }
 
-// ── アイコンだけの操作ボタン ──
+// ── Icon-only action buttons ──
 .delete-btn {
   background: none;
   border: none;
@@ -80,14 +80,14 @@
     background: var(--red-tint);
   }
 
-  // 追加は破壊的操作ではないためアクセント色で示す
+  // Adding is not destructive either, so it takes the accent color too.
   &.add-btn:hover {
     color: var(--accent-2);
     background: var(--accent-tint-hover);
   }
 }
 
-// ── 入力欄・選択欄 ──
+// ── Text inputs and selects ──
 .select,
 .input {
   @include card($radius: var(--radius-sm));
@@ -102,7 +102,7 @@
 .input::placeholder { color: var(--text-dim); }
 .select { cursor: pointer; }
 
-// ── 読み込み中のスピナー ──
+// ── Loading spinner ──
 .spinner {
   @include circle(16px);
   display: inline-block;

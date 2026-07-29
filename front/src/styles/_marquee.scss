@@ -1,13 +1,13 @@
 @use "mixins" as *;
 
-// 収まりきらないタイトルを往復スクロールさせる (ScrollingText.tsx)
+// Scrolls an overflowing title back and forth, driven by ScrollingText.tsx.
 .marquee {
   max-width: 100%;
   overflow: hidden;
   white-space: nowrap;
 
   &.overflowing {
-    // はみ出し側 (右端) をフェードさせる
+    // Fade the edge the text runs past.
     @include mask(linear-gradient(90deg, #000 calc(100% - 16px), transparent));
 
     .marquee-text {
@@ -28,7 +28,7 @@
   vertical-align: top;
 }
 
-// 両端で停止 → 逆端までスクロール → 停止 → 戻る
+// Hold, scroll to the far end, hold, come back.
 @keyframes marquee-pingpong {
   0%, 15%   { transform: translateX(0); }
   48%, 63%  { transform: translateX(var(--marquee-shift)); }

@@ -1,7 +1,7 @@
 @use "tokens" as *;
 @use "mixins" as *;
 
-// ── 再生モード (排他選択のセグメント) ──
+// ── Playback mode (mutually exclusive segments) ──
 .playback-mode-section { margin-bottom: $section-gap; }
 
 .segmented {
@@ -32,7 +32,7 @@
   }
 }
 
-// 再生範囲 (どのプレイリストから流すか) の選択行
+// Which playlist playback draws from.
 .scope-row {
   @include row(10px);
   margin-top: 10px;
@@ -48,7 +48,7 @@
   @include flexible;
 }
 
-// ── スリープタイマー ──
+// ── Sleep timer ──
 .sleep-timer-section { margin-bottom: $section-gap; }
 .sleep-select { width: 100%; }
 

@@ -1,5 +1,6 @@
-// 配色・寸法の単一の出所。
-// Sass 変数を原本とし、実行時に参照するものだけ custom property として公開する。
+// Single source of truth for the palette and the dimensions. The Sass
+// variables are authoritative; the custom properties below exist for the
+// values that have to be read at runtime.
 
 $bg:        #0a0a0a;
 $surface:   #161616;
@@ -17,7 +18,6 @@ $red:       #e53935;
 $radius:    10px;
 $radius-sm: 6px;
 
-// 画面を縦に区切るセクション同士の間隔
 $section-gap: 24px;
 
 $bp-md: 768px;
@@ -39,10 +39,10 @@ $bp-lg: 1200px;
   --radius:    #{$radius};
   --radius-sm: #{$radius-sm};
 
-  // 選択中の行やアクセント系ボタンの下地
+  // Backdrops for selected rows and accent buttons.
   --accent-tint:       #{rgba($accent, 0.06)};
   --accent-tint-hover: #{rgba($accent, 0.1)};
   --red-tint:          #{rgba($red, 0.1)};
-  // 浮いている面 (トースト・メニュー) の影
+  // Floating surfaces: toasts and menus.
   --shadow-pop: 0 8px 24px #{rgba(#000, 0.5)};
 }

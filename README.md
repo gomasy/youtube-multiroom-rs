@@ -63,7 +63,7 @@ youtube-multiroom-rs/
 │       ├── i18n.ts        # Frontend i18n runtime (locale detection & lookup)
 │       ├── types.ts       # Shared type definitions
 │       ├── parcel-env.d.ts # Ambient types for Parcel-specific imports
-│       ├── styles/        # SCSS (main.scss + tokens/mixins/component partials)
+│       ├── styles/        # SCSS (index.scss + tokens/mixins/component partials)
 │       ├── manifest.webmanifest # PWA manifest
 │       ├── icons/         # PWA icons (SVG sources + generated PNGs)
 │       └── components/

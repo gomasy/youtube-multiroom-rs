@@ -1,6 +1,6 @@
 @use "mixins" as *;
 
-// ブラウザごとに別の擬似要素で同じつまみを描く
+// Each browser draws the thumb through its own pseudo-element.
 @mixin range-thumb {
   @include circle(12px);
   background: var(--text);
@@ -18,7 +18,7 @@
     appearance: none;
     height: 4px;
     border-radius: 2px;
-    // --seek-pct (SeekBar が設定する再生済み割合) までを塗る
+    // Filled up to --seek-pct, the played fraction SeekBar sets.
     background: linear-gradient(
       90deg,
       var(--accent) var(--seek-pct, 0%),
@@ -26,7 +26,7 @@
     );
     outline: none;
     cursor: pointer;
-    // ドラッグ中のページスクロールを抑止する
+    // Keeps a drag from scrolling the page.
     touch-action: none;
 
     &::-webkit-slider-thumb {

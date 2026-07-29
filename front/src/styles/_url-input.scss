@@ -21,7 +21,7 @@
   &::placeholder { color: var(--text-dim); }
 }
 
-// ── 検索結果 ──
+// ── Search results ──
 .search-results {
   @include card;
   @include stack(6px);
@@ -29,7 +29,7 @@
   padding: 10px;
 }
 
-// 見出しの文字装飾は .section-label を併用する
+// Text styling comes from .section-label, applied alongside this.
 .search-results-header {
   @include row-between;
   margin-bottom: 0;

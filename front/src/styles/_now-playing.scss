@@ -1,7 +1,7 @@
 @use "tokens" as *;
 @use "mixins" as *;
 
-// 画像と代替枠で同じ寸法を保つ
+// Shared so the image and its placeholder reserve the same box.
 $thumb-size: 64px;
 
 .now-playing {
@@ -23,7 +23,6 @@ $thumb-size: 64px;
   object-fit: cover;
 }
 
-// サムネイルがない曲の代替枠 (中にアイコンを置く)
 .track-thumb-placeholder {
   @include thumb($thumb-size, var(--radius-sm));
   @include center;
@@ -44,7 +43,7 @@ $thumb-size: 64px;
   color: var(--text-dim);
 }
 
-// ── ブラウザでの試聴 ──
+// ── Preview playback in the browser ──
 .preview-player {
   @include row(10px);
   padding: 10px 14px;

@@ -13,7 +13,7 @@
     letter-spacing: -0.3px;
   }
 
-  // 接続状態のインジケータ
+  // Connection state indicator.
   .dot {
     @include circle(7px);
     flex-shrink: 0;
