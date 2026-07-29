@@ -8,6 +8,7 @@ use axum::response::Response;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::sync::broadcast;
+use tokio::sync::mpsc::UnboundedSender;
 
 /// WS /ws
 pub async fn ws_upgrade(State(state): State<Arc<AppState>>, ws: WebSocketUpgrade) -> Response {
@@ -131,65 +132,14 @@ async fn ws_handler(mut socket: WebSocket, state: Arc<AppState>) {
 /// Responses are sent via client_tx, delivered by ws_handler's select loop.
 async fn handle_ws_message(
     state: &Arc<AppState>,
-    client_tx: &tokio::sync::mpsc::UnboundedSender<String>,
+    client_tx: &UnboundedSender<String>,
     data: &Value,
 ) {
     match data["type"].as_str().unwrap_or("") {
         "ping" => {
             let _ = client_tx.send(json!({ "type": "pong" }).to_string());
         }
-        "extract_audio" => {
-            let Some(url) = data["url"].as_str() else {
-                let msg = json!({
-                    "type": "extract_audio_error",
-                    "error": "Missing 'url' field",
-                });
-                let _ = client_tx.send(msg.to_string());
-                return;
-            };
-            // Download can take a long time; run in a separate task and return result.
-            // Playlist URLs are expanded and trigger a batch import.
-            // Capture the token before spawning, so a stop received immediately
-            // afterward still cancels this request.
-            let cancel = state.download_token().await;
-            let state = state.clone();
-            let tx = client_tx.clone();
-            let url = url.to_string();
-            tokio::spawn(async move {
-                let result = match classify_url(&url) {
-                    UrlKind::Video => match state.extract_audio(&url, &cancel).await {
-                        Ok(track) => {
-                            state.broadcast_tracks().await;
-                            json!({ "type": "extract_audio_result", "track": track })
-                        }
-                        Err(DownloadError::Cancelled) => {
-                            json!({ "type": "extract_audio_cancelled" })
-                        }
-                        Err(e) => json!({ "type": "extract_audio_error", "error": e.to_string() }),
-                    },
-                    UrlKind::Playlist(list_id) => {
-                        match state.import_playlist(&list_id, &cancel).await {
-                            Ok(info) => json!({
-                                "type": "playlist_import_result",
-                                "name": info.name,
-                                "total": info.total,
-                            }),
-                            Err(DownloadError::Cancelled) => {
-                                json!({ "type": "extract_audio_cancelled" })
-                            }
-                            Err(e) => {
-                                json!({ "type": "extract_audio_error", "error": e.to_string() })
-                            }
-                        }
-                    }
-                    UrlKind::Unknown => json!({
-                        "type": "extract_audio_error",
-                        "error": "Could not recognize YouTube URL",
-                    }),
-                };
-                let _ = tx.send(result.to_string());
-            });
-        }
+        "extract_audio" => start_extract(state, client_tx, data["url"].as_str()).await,
         "set_playback_mode" => {
             if let Some(mode) = data["mode"].as_str()
                 && state.set_playback_mode(mode).await
@@ -224,4 +174,55 @@ async fn handle_ws_message(
         }
         _ => {}
     }
+}
+
+/// Kick off a download for the requested URL. Downloads can take minutes, so
+/// the work runs on its own task and reports back over client_tx; the select
+/// loop must stay free to service broadcasts and further commands meanwhile.
+async fn start_extract(
+    state: &Arc<AppState>,
+    client_tx: &UnboundedSender<String>,
+    url: Option<&str>,
+) {
+    let Some(url) = url else {
+        let msg = json!({
+            "type": "extract_audio_error",
+            "error": "Missing 'url' field",
+        });
+        let _ = client_tx.send(msg.to_string());
+        return;
+    };
+    // Capture the token before spawning, so a stop received immediately
+    // afterward still cancels this request.
+    let cancel = state.download_token().await;
+    let state = state.clone();
+    let tx = client_tx.clone();
+    let url = url.to_string();
+    tokio::spawn(async move {
+        // Playlist URLs are expanded and trigger a batch import.
+        let result = match classify_url(&url) {
+            UrlKind::Video => match state.extract_audio(&url, &cancel).await {
+                Ok(track) => {
+                    state.broadcast_tracks().await;
+                    json!({ "type": "extract_audio_result", "track": track })
+                }
+                Err(DownloadError::Cancelled) => json!({ "type": "extract_audio_cancelled" }),
+                Err(e) => json!({ "type": "extract_audio_error", "error": e.to_string() }),
+            },
+            UrlKind::Playlist(list_id) => match state.import_playlist(&list_id, &cancel).await {
+                Ok(info) => json!({
+                    "type": "playlist_import_result",
+                    "name": info.name,
+                    "total": info.total,
+                }),
+                Err(DownloadError::Cancelled) => json!({ "type": "extract_audio_cancelled" }),
+                Err(e) => json!({ "type": "extract_audio_error", "error": e.to_string() }),
+            },
+            UrlKind::Unknown => json!({
+                "type": "extract_audio_error",
+                "error": "Could not recognize YouTube URL",
+            }),
+        };
+        let _ = tx.send(result.to_string());
+    });
 }
