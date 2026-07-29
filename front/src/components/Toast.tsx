@@ -9,13 +9,26 @@ let nextId = 0;
 
 export function useToast() {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
+  /// Dismissal timers still pending. Tracked so unmounting cancels them instead
+  /// of leaving each outstanding toast holding a timer for its full duration.
+  const timers = useRef(new Set<ReturnType<typeof setTimeout>>());
+
+  useEffect(
+    () => () => {
+      for (const timer of timers.current) clearTimeout(timer);
+      timers.current.clear();
+    },
+    [],
+  );
 
   const showToast = useCallback((message: string, duration = 4000) => {
     const id = nextId++;
     setToasts((prev) => [...prev, { id, message }]);
-    setTimeout(() => {
+    const timer = setTimeout(() => {
+      timers.current.delete(timer);
       setToasts((prev) => prev.filter((t) => t.id !== id));
     }, duration);
+    timers.current.add(timer);
   }, []);
 
   return { toasts, showToast };
