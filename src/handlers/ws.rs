@@ -158,9 +158,19 @@ async fn handle_ws_message(
             state.cancel_downloads().await;
         }
         "set_sleep_timer" => {
-            match data["minutes"].as_u64() {
-                // Absent, null or zero all mean "no timer"
-                None | Some(0) => state.cancel_sleep_timer().await,
+            let requested = &data["minutes"];
+            // Absent and null both mean "no timer"; anything else has to be a
+            // whole number of minutes. A field that is present but unusable
+            // (negative, fractional, non-numeric) is a malformed request, not a
+            // cancellation — reading it as one would silently drop a running
+            // timer the user never asked to stop.
+            let minutes = if requested.is_null() {
+                Some(0)
+            } else {
+                requested.as_u64()
+            };
+            match minutes {
+                Some(0) => state.cancel_sleep_timer().await,
                 Some(minutes) => {
                     // The valid range belongs to set_sleep_timer; a rejected
                     // value leaves any running timer alone, so there is nothing
@@ -168,6 +178,10 @@ async fn handle_ws_message(
                     if state.set_sleep_timer(minutes).await.is_none() {
                         return;
                     }
+                }
+                None => {
+                    tracing::warn!("Ignoring set_sleep_timer with unusable minutes: {requested}");
+                    return;
                 }
             }
             state.broadcast_sleep_timer().await;
