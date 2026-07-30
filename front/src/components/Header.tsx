@@ -1,5 +1,5 @@
 import { t } from "../i18n";
-import faviconUrl from "url:../favicon.svg";
+import logoUrl from "url:../icons/logo.svg";
 
 interface Props {
   connected: boolean;
@@ -9,7 +9,7 @@ interface Props {
 export function Header({ connected, version }: Props) {
   return (
     <div className="header">
-      <img src={faviconUrl} width="34" height="24" alt="" />
+      <img src={logoUrl} width="34" height="24" alt="" />
       <h1>YouTube MultiRoom</h1>
       {version && <span className="header-version">{version}</span>}
       <div

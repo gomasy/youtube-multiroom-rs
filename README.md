@@ -52,7 +52,6 @@ youtube-multiroom-rs/
 │   │   ├── en.json            # English message catalog (frontend)
 │   │   └── ja.json            # Japanese message catalog (frontend)
 │   └── src/
-│       ├── favicon.svg
 │       ├── index.html
 │       ├── index.tsx
 │       ├── App.tsx
@@ -65,7 +64,7 @@ youtube-multiroom-rs/
 │       ├── parcel-env.d.ts # Ambient types for Parcel-specific imports
 │       ├── styles/        # SCSS (index.scss + tokens/mixins/component partials)
 │       ├── manifest.webmanifest # PWA manifest
-│       ├── icons/         # PWA icons (SVG sources + generated PNGs)
+│       ├── icons/         # Favicon, header logo and PWA icons (SVG sources + generated PNGs)
 │       └── components/
 │           ├── AddToPlaylistMenu.tsx
 │           ├── AuthModal.tsx
