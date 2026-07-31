@@ -83,8 +83,10 @@ pub async fn add_playlist_track(
 ) -> AppResult<Json<Value>> {
     playlist_or_404(&state, &playlist_id).await?;
     let track = track_or_404(&state, &req.track_id).await?;
-    if !state.add_playlist_track(&playlist_id, &track.id).await {
-        return Err(AppError::internal("Failed to add track to playlist"));
+    match state.add_playlist_track(&playlist_id, &track.id).await {
+        Ok(true) => {}
+        Ok(false) => return Err(AppError::not_found("Playlist not found")),
+        Err(_) => return Err(AppError::internal("Failed to add track to playlist")),
     }
     state.broadcast_playlists().await;
     // Notify clients viewing this playlist to refresh their track list
@@ -119,14 +121,33 @@ pub async fn bulk_add_playlist_tracks(
 ) -> AppResult<Json<Value>> {
     playlist_or_404(&state, &playlist_id).await?;
     let mut added = 0u32;
+    let mut failure = None;
     for id in &req.track_ids {
-        if state.get_track(id).await.is_some() && state.add_playlist_track(&playlist_id, id).await {
-            added += 1;
+        if state.get_track(id).await.is_none() {
+            continue;
+        }
+        match state.add_playlist_track(&playlist_id, id).await {
+            Ok(true) => added += 1,
+            // Deleted mid-request: stop instead of appending to a playlist
+            // nobody can see any more.
+            Ok(false) => {
+                failure = Some(AppError::not_found("Playlist not found"));
+                break;
+            }
+            Err(_) => {
+                failure = Some(AppError::internal("Failed to add tracks to playlist"));
+                break;
+            }
         }
     }
+    // Whatever landed before the failure is real, so clients are told about it
+    // even when the request as a whole is reported as failed.
     if added > 0 {
         state.broadcast_playlists().await;
         state.broadcast_tracks();
+    }
+    if let Some(failure) = failure {
+        return Err(failure);
     }
     let locale = client_locale(&headers);
     Ok(Json(json!({

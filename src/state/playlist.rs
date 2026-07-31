@@ -9,7 +9,7 @@ use super::{AppState, REDIS_KEY_ACTIVE_PLAYLIST, REDIS_KEY_PLAYLISTS, now_f64, p
 use redis::AsyncCommands;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time;
 use tokio_util::sync::CancellationToken;
@@ -18,6 +18,24 @@ const PLAYLIST_NAME_MAX_CHARS: usize = 100;
 /// Cap for playlist import to avoid expanding effectively-infinite mix lists.
 const PLAYLIST_IMPORT_MAX: usize = 100;
 const PLAYLIST_FLAT_TIMEOUT_SECS: u64 = 60;
+
+/// Append a track only while the playlist is still registered. The list key is
+/// created implicitly by RPUSH, so an unguarded append would resurrect a
+/// playlist's track list after the playlist itself was deleted.
+/// KEYS: playlists hash, playlist track list. ARGV: playlist id, track id.
+/// Returns 1 when appended, 0 when the playlist is gone.
+static ADD_PLAYLIST_TRACK_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
+    redis::Script::new(
+        r"
+        if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 0 then
+            return 0
+        end
+        redis.call('LREM', KEYS[2], 0, ARGV[2])
+        redis.call('RPUSH', KEYS[2], ARGV[2])
+        return 1
+        ",
+    )
+});
 
 impl AppState {
     /// Create a playlist. Name is trimmed and must be 1–PLAYLIST_NAME_MAX_CHARS
@@ -144,26 +162,29 @@ impl AppState {
         true
     }
 
-    /// Append a track to the end of a playlist (moves to end if already present).
-    /// Returns false on Redis error.
-    pub async fn add_playlist_track(&self, playlist_id: &str, track_id: &str) -> bool {
-        // Remove first to avoid duplicates, then append. Serialized with
-        // reorder's read-then-replace to prevent interleaving.
+    /// Append a track to the end of an existing playlist (moves to end if
+    /// already present). Returns false if the playlist no longer exists: the
+    /// existence check and the list mutation are atomic, so a slow background
+    /// import cannot recreate a playlist that was deleted meanwhile.
+    pub async fn add_playlist_track(
+        &self,
+        playlist_id: &str,
+        track_id: &str,
+    ) -> redis::RedisResult<bool> {
+        // Serialized with reorder's read-then-replace to prevent interleaving.
         let _guard = self.order_lock.lock().await;
-        let key = playlist_key(playlist_id);
-        let mut pipe = redis::pipe();
-        pipe.atomic()
-            .lrem(&key, 0, track_id)
-            .ignore()
-            .rpush(&key, track_id);
         let mut conn = self.redis.clone();
-        match pipe.query_async::<()>(&mut conn).await {
-            Ok(()) => true,
-            Err(e) => {
+        ADD_PLAYLIST_TRACK_SCRIPT
+            .key(REDIS_KEY_PLAYLISTS)
+            .key(playlist_key(playlist_id))
+            .arg(playlist_id)
+            .arg(track_id)
+            .invoke_async::<i64>(&mut conn)
+            .await
+            .map(|added| added == 1)
+            .inspect_err(|e| {
                 tracing::warn!("Redis error adding track to playlist {playlist_id}: {e}");
-                false
-            }
-        }
+            })
     }
 
     /// Remove a track from a playlist. Returns false if not found.
@@ -396,19 +417,40 @@ impl AppState {
                 let url = format!("https://www.youtube.com/watch?v={video_id}");
                 match state.extract_audio(&url, &cancel).await {
                     Ok(track) => {
-                        state.add_playlist_track(&playlist.id, &track.id).await;
-                        // Reflect each successfully imported track in the lists
-                        state.broadcast_tracks();
-                        state.broadcast_playlists().await;
-                        imported += 1;
+                        match state.add_playlist_track(&playlist.id, &track.id).await {
+                            Ok(true) => {
+                                // Reflect each successfully imported track in the lists
+                                state.broadcast_tracks();
+                                state.broadcast_playlists().await;
+                                imported += 1;
+                            }
+                            Ok(false) => {
+                                tracing::info!(
+                                    "Playlist import stopped because '{}' was deleted",
+                                    playlist.name
+                                );
+                                break;
+                            }
+                            Err(e) => tracing::warn!(
+                                "Playlist import: failed to add {video_id} to '{}': {e}",
+                                playlist.name
+                            ),
+                        }
                     }
-                    Err(DownloadError::Cancelled) => {
+                    // Only a real Stop all ends the import. A cancellation
+                    // without one means this single video dropped out — its
+                    // track was deleted while it downloaded — and the rest of
+                    // the import still stands.
+                    Err(DownloadError::Cancelled) if cancel.is_cancelled() => {
                         tracing::info!(
                             "Playlist import cancelled: '{}' ({imported}/{total} imported)",
                             playlist.name
                         );
                         break;
                     }
+                    Err(DownloadError::Cancelled) => tracing::info!(
+                        "Playlist import: skipping {video_id}, deleted while downloading"
+                    ),
                     // Failures are shown via download progress error display; log only
                     Err(e) => tracing::warn!("Playlist import: skipping {video_id}: {e}"),
                 }

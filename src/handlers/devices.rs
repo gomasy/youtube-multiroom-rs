@@ -42,6 +42,20 @@ pub async fn play_on_all(
     queue_on_devices(&state, track, device_ids, &locale).await
 }
 
+/// The error for a fan-out that reached no device at all. A device that exists
+/// but could not be written to is our fault, not a malformed request, so the two
+/// are reported with different statuses.
+///
+/// `failed` carries no Redis detail: the write that failed already logged its
+/// own error, and repeating it to the client only exposes internals.
+fn no_devices_reached(write_failed: bool, failed: &'static str) -> AppError {
+    if write_failed {
+        AppError::internal(failed)
+    } else {
+        AppError::bad_request("No valid devices")
+    }
+}
+
 /// Queue a track for playback on each device's pending slot and broadcast state.
 async fn queue_on_devices(
     state: &AppState,
@@ -49,15 +63,25 @@ async fn queue_on_devices(
     device_ids: Vec<String>,
     locale: &str,
 ) -> AppResult<Json<Value>> {
-    for did in &device_ids {
-        state.queue_play(did, track.clone(), 0).await;
+    let mut queued = Vec::new();
+    let mut write_failed = false;
+    for did in device_ids {
+        match state.queue_play(&did, track.clone(), 0).await {
+            Ok(true) => queued.push(did),
+            // Unregistered device (deleted since the client last refreshed)
+            Ok(false) => {}
+            Err(()) => write_failed = true,
+        }
+    }
+    if queued.is_empty() {
+        return Err(no_devices_reached(write_failed, "Failed to queue playback"));
     }
 
     state.broadcast_devices().await;
 
     Ok(Json(json!({
         "status": "queued",
-        "devices": device_ids,
+        "devices": queued,
         "message": t!("api_play_queued", locale = locale),
     })))
 }
@@ -74,24 +98,17 @@ pub async fn queue_next(
     let locale = client_locale(&headers);
     let track = track_or_404(&state, &req.track_id).await?;
     let mut queued = Vec::new();
-    let mut write_error = None;
+    let mut write_failed = false;
     for did in &req.device_ids {
-        // Only queue on registered devices to avoid orphaned Redis keys
-        if !state.device_exists(did).await {
-            continue;
-        }
         match state.push_queue(did, &track.id).await {
-            Ok(()) => queued.push(did.clone()),
-            Err(e) => write_error = Some(e),
+            Ok(true) => queued.push(did.clone()),
+            // Unregistered device (deleted since the client last refreshed)
+            Ok(false) => {}
+            Err(_) => write_failed = true,
         }
     }
     if queued.is_empty() {
-        // A device that exists but could not be written to is our fault, not a
-        // malformed request, so don't report it as one
-        return Err(match write_error {
-            Some(e) => AppError::internal(format!("Failed to queue track: {e}")),
-            None => AppError::bad_request("No valid devices"),
-        });
+        return Err(no_devices_reached(write_failed, "Failed to queue track"));
     }
     state.broadcast_devices().await;
 
@@ -161,7 +178,11 @@ pub async fn seek_device(
     // Clamp to 1 second before the end to avoid immediate playback termination
     let max_ms = track.duration.saturating_mul(1000).saturating_sub(1000);
     let position_ms = req.position_ms.min(max_ms);
-    state.queue_play(&device_id, track, position_ms).await;
+    match state.queue_play(&device_id, track, position_ms).await {
+        Ok(true) => {}
+        Ok(false) => return Err(AppError::not_found("Device not found")),
+        Err(()) => return Err(AppError::internal("Failed to queue seek")),
+    }
     state.broadcast_devices().await;
 
     Ok(Json(json!({

@@ -9,9 +9,43 @@ use super::{
 use redis::AsyncCommands;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 /// Pending command TTL in seconds (expired by Redis key TTL).
 const PENDING_TTL_SECS: u64 = 600;
+
+/// Store a pending command only while the device is still registered.
+/// KEYS: devices hash, pending key. ARGV: device id, command JSON, TTL.
+/// Returns 1 when stored, 0 when the device is unknown.
+static QUEUE_PLAY_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
+    redis::Script::new(
+        r"
+        if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 0 then
+            return 0
+        end
+        redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[3])
+        return 1
+        ",
+    )
+});
+
+/// Append to an Up Next queue only while the device is still registered. RPUSH
+/// creates the list key implicitly, so an unguarded append would leave an
+/// orphaned queue behind for a device that no longer exists — the same reason
+/// QUEUE_PLAY_SCRIPT guards the pending key.
+/// KEYS: devices hash, queue key. ARGV: device id, queue entry.
+/// Returns 1 when appended, 0 when the device is unknown.
+static PUSH_QUEUE_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
+    redis::Script::new(
+        r"
+        if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 0 then
+            return 0
+        end
+        redis.call('RPUSH', KEYS[2], ARGV[2])
+        return 1
+        ",
+    )
+});
 
 impl AppState {
     pub(crate) async fn write_device(&self, dev: &DeviceState) {
@@ -211,27 +245,47 @@ impl AppState {
 
     // ── Pending command ──
 
-    pub async fn queue_play(&self, device_id: &str, track: AudioTrack, offset_ms: u64) {
-        // Explicit play command from the web UI — reset consecutive failure
-        // records to allow retries.
-        self.clear_playback_failures(device_id).await;
+    /// Queue playback for a device. `Ok(false)` means the device is not
+    /// registered: the existence check and the pending write happen in one
+    /// Redis script, so a stale client targeting a deleted device cannot leave
+    /// an orphan pending key behind.
+    ///
+    /// The failure carries no detail because there is nothing a caller could do
+    /// with it — what went wrong is logged here, at the point that knows it, the
+    /// way every other write in this module reports its own errors.
+    pub async fn queue_play(
+        &self,
+        device_id: &str,
+        track: AudioTrack,
+        offset_ms: u64,
+    ) -> Result<bool, ()> {
         let cmd = PendingCommand {
             action: "play".to_string(),
             track: track.clone(),
             offset_ms,
         };
-        let Ok(json_str) = serde_json::to_string(&cmd) else {
-            return;
-        };
+        let json_str = serde_json::to_string(&cmd).map_err(|e| {
+            tracing::warn!("Failed to serialize pending command for {device_id}: {e}");
+        })?;
         let mut conn = self.redis.clone();
-        if let Err(e) = conn
-            .set_ex::<_, _, ()>(pending_key(device_id), json_str, PENDING_TTL_SECS)
+        let queued: i64 = QUEUE_PLAY_SCRIPT
+            .key(REDIS_KEY_DEVICES)
+            .key(pending_key(device_id))
+            .arg(device_id)
+            .arg(json_str)
+            .arg(PENDING_TTL_SECS)
+            .invoke_async(&mut conn)
             .await
-        {
-            // Don't show "queued" status if the command couldn't be saved
-            tracing::warn!("Redis error queueing play for {device_id}: {e}");
-            return;
+            .map_err(|e| {
+                tracing::warn!("Redis error queueing play for {device_id}: {e}");
+            })?;
+        if queued == 0 {
+            return Ok(false);
         }
+
+        // Explicit play command from the web UI — reset consecutive failure
+        // records to allow retries.
+        self.clear_playback_failures(device_id).await;
         // Align position to the queued start offset (used by Resume and the web UI)
         self.update_device(
             device_id,
@@ -241,6 +295,7 @@ impl AppState {
                 .position(offset_ms),
         )
         .await;
+        Ok(true)
     }
 
     /// Consume a queued command (atomic get+delete via GETDEL; expiry is handled by Redis TTL).
@@ -270,12 +325,21 @@ impl AppState {
 
     // ── Up Next queue ──
 
-    /// Append a track to the device's Up Next queue. The Redis error is passed
-    /// through so callers can tell a write failure from a rejected request.
-    pub async fn push_queue(&self, device_id: &str, track_id: &str) -> redis::RedisResult<()> {
+    /// Append a track to the device's Up Next queue. `Ok(false)` means the
+    /// device is not registered; the check and the append share one script, so
+    /// a stale client cannot leave an orphaned queue behind. The Redis error is
+    /// passed through so callers can tell a write failure from a rejected
+    /// request.
+    pub async fn push_queue(&self, device_id: &str, track_id: &str) -> redis::RedisResult<bool> {
         let mut conn = self.redis.clone();
-        conn.rpush(queue_key(device_id), new_token(track_id))
+        PUSH_QUEUE_SCRIPT
+            .key(REDIS_KEY_DEVICES)
+            .key(queue_key(device_id))
+            .arg(device_id)
+            .arg(new_token(track_id))
+            .invoke_async::<i64>(&mut conn)
             .await
+            .map(|pushed| pushed == 1)
             .inspect_err(|e| tracing::warn!("Redis error pushing queue for {device_id}: {e}"))
     }
 
