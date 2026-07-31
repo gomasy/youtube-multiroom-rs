@@ -2,7 +2,7 @@
 //! the browser needs to play either of them.
 
 use super::{AppError, AppResult, track_or_404};
-use crate::state::{AUDIO_MIME, AppState, run_yt_dlp};
+use crate::state::{AUDIO_MIME, AppState, run_yt_dlp, watch_url};
 use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
@@ -96,7 +96,7 @@ pub async fn live_audio(
         return Err(AppError::bad_request("Track is not a live stream"));
     }
 
-    let url = format!("https://www.youtube.com/watch?v={audio_id}");
+    let url = watch_url(&audio_id);
     // Prefer HLS which ffmpeg handles well. Live streams often lack audio-only
     // formats, so fall back to the lowest-bitrate muxed HLS (video+audio).
     // Also fetch acodec to decide whether re-encoding is needed.

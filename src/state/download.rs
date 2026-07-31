@@ -11,7 +11,7 @@ use super::ytdlp::{
     DownloadError, PROGRESS_PREFIX, abort_reader, drain_output, fetch_metadata,
     parse_progress_percent, snippet, spawn_reader, spawn_yt_dlp, stop_yt_dlp,
 };
-use super::{AUDIO_EXT, AppState, REDIS_KEY_TRACKS, REDIS_KEY_TRACKS_ORDER, now_f64};
+use super::{AUDIO_EXT, AppState, REDIS_KEY_TRACKS, REDIS_KEY_TRACKS_ORDER, now_f64, watch_url};
 use redis::AsyncCommands;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -172,9 +172,7 @@ impl AppState {
         slot: &ExtractSlot,
         cancel: &CancellationToken,
     ) -> Result<AudioTrack, DownloadError> {
-        // Never pass the user-supplied URL to yt-dlp. Reconstructing it from the
-        // validated ID prevents deceptive URLs from reaching arbitrary hosts.
-        let url = format!("https://www.youtube.com/watch?v={video_id}");
+        let url = watch_url(video_id);
         // Fetch metadata
         tracing::info!("Fetching metadata: {}", video_id);
         let meta = fetch_metadata(&url, Some(cancel)).await?;

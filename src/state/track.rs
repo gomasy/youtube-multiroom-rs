@@ -2,7 +2,7 @@
 //! what plays next.
 
 use super::model::{AudioTrack, ReorderOutcome};
-use super::url::is_video_id;
+use super::url::{is_video_id, watch_url};
 use super::warn_redis;
 use super::ytdlp::fetch_metadata;
 use super::{
@@ -297,8 +297,7 @@ impl AppState {
     /// Re-fetch metadata only via yt-dlp. If the video is deleted or unavailable,
     /// the file can still be played, so return minimal info with the ID as title.
     async fn refetch_track_metadata(&self, video_id: &str, path: &Path) -> AudioTrack {
-        let url = format!("https://www.youtube.com/watch?v={video_id}");
-        let meta = match fetch_metadata(&url, None).await {
+        let meta = match fetch_metadata(&watch_url(video_id), None).await {
             Ok(meta) => meta,
             Err(e) => {
                 tracing::warn!("Metadata refetch failed for {video_id}: {e}");
