@@ -1,9 +1,12 @@
-//! The audio library: paging through it, reordering it, and deleting from it.
+//! The audio library: paging through it, reordering it, refreshing what it
+//! knows about a track, and deleting from it.
 
-use super::{AppError, AppResult, TrackIdsRequest, playlist_or_404, track_or_404};
+use super::{AppError, AppResult, TrackIdsRequest, client_locale, playlist_or_404, track_or_404};
 use crate::state::{AppState, ReorderOutcome, ReorderRequest};
 use axum::extract::{Path, Query, State};
+use axum::http::HeaderMap;
 use axum::response::Json;
+use rust_i18n::t;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -94,6 +97,44 @@ pub async fn bulk_delete_tracks(
         broadcast_track_removal(&state).await;
     }
     Ok(Json(json!({ "status": "ok", "deleted": deleted })))
+}
+
+/// POST /api/tracks/refresh-metadata
+///
+/// Re-fetches title, thumbnail, channel and duration from YouTube for the given
+/// tracks. Every track costs a yt-dlp run, so the work is handed to a background
+/// job and reported over the download progress channel; the response says only
+/// how many tracks that job will visit.
+pub async fn refresh_tracks_metadata(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<TrackIdsRequest>,
+) -> AppResult<Json<Value>> {
+    // Resolve every requested track in one HMGET, as bulk_add_playlist_tracks
+    // does. An ID that names nothing is dropped here rather than costing the
+    // job a 30-second yt-dlp run that could only end in "track not found".
+    // Claiming each track as it is accepted also drops a repeated ID: the
+    // second occurrence no longer finds one, so no video is fetched twice.
+    let mut unclaimed = state.fetch_tracks_for(req.track_ids.iter()).await;
+    let track_ids: Vec<String> = req
+        .track_ids
+        .into_iter()
+        .filter(|id| unclaimed.remove(id.as_str()).is_some())
+        .collect();
+    let total = track_ids.len();
+
+    if total > 0 {
+        // Capture the token before spawning, so a Stop all received immediately
+        // afterwards still cancels this job.
+        let cancel = state.download_token().await;
+        state.start_metadata_refresh(track_ids, cancel);
+    }
+    let locale = client_locale(&headers);
+    Ok(Json(json!({
+        "status": "ok",
+        "total": total,
+        "message": t!("api_metadata_refresh_started", locale = &locale, count = total),
+    })))
 }
 
 /// DELETE /api/tracks/:id

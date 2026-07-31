@@ -62,6 +62,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/tracks/bulk-delete",
             post(handlers::bulk_delete_tracks),
         )
+        .route(
+            "/api/tracks/refresh-metadata",
+            post(handlers::refresh_tracks_metadata),
+        )
         .route("/api/tracks/{track_id}", delete(handlers::delete_track))
         .route(
             "/api/playlists",

@@ -384,7 +384,13 @@ impl AppState {
         (items, total)
     }
 
-    /// Fetch tracks referenced by queue entries in a single HMGET.
+    /// Resolve a batch of track references in a single HMGET, keyed by track ID.
+    ///
+    /// A reference is either a queue entry ("{id}#{millis}") or a bare track ID,
+    /// which [`token_track_id`] reduces to the same thing — so an endpoint
+    /// handed a list of IDs pays one round-trip to learn which of them exist,
+    /// rather than one per ID. Entries naming no track are absent from the
+    /// result, which is what lets callers use it as a membership test.
     pub(crate) async fn fetch_tracks_for(
         &self,
         entries: impl Iterator<Item = &String>,

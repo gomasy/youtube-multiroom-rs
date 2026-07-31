@@ -240,7 +240,7 @@ The Web UI ships a web app manifest and icons, so it can be installed to the hom
 10. Use the ▶ button under 選択中のトラック (Now Playing) to preview the selected track in the browser before sending it to the Echos
 11. Use the filter input at the top of the track list to search by title or channel name (debounced 300 ms, case-insensitive)
 12. Click a playlist name to rename it inline; press Enter to save or Escape to cancel
-13. Press 「選択」 to enter select mode: check individual tracks or 「全選択」 an entire page, then bulk-delete or bulk-add to a playlist in one operation. In a playlist view, the remove action only removes entries from that playlist and keeps the tracks in the library
+13. Press 「選択」 to enter select mode: check individual tracks or 「全選択」 an entire page, then bulk-delete, bulk-add to a playlist, or 「メタデータ更新」 in one operation. In a playlist view, the remove action only removes entries from that playlist and keeps the tracks in the library
 14. Set a sleep timer (15 / 30 min, 1 / 3 / 6 h) below the playback mode selector; when it expires, all devices are stopped and the playback mode is set to off
 
 ## Architecture
@@ -271,6 +271,7 @@ The Web UI ships a web app manifest and icons, so it can be installed to the hom
     │  GET    /api/tracks             track list (paged)    │
     │  POST   /api/tracks/reorder     move a track          │
     │  POST   /api/tracks/bulk-delete bulk delete tracks    │
+    │  POST   /api/tracks/refresh-metadata  refresh info    │
     │  DELETE /api/tracks/{id}        delete track          │
     │  GET    /api/playlists          playlist list         │
     │  POST   /api/playlists          create playlist       │
@@ -308,6 +309,14 @@ If the track metadata hash is ever lost (e.g. Redis was wiped), the next `GET /a
 Download progress is tracked server-side in memory and broadcast to all WebSocket clients via `downloads_update` messages. This means every connected browser (including tabs opened after a download started) sees the same real-time progress. The progress goes through four stages: `metadata` (resolving title and format), `downloading` (with a percentage), `processing` (yt-dlp post-processing / m4a conversion), and on failure `error` (displayed for 60 seconds then cleared). Progress is not persisted to Redis — it resets on server restart. 「すべて停止」 terminates the active yt-dlp process groups (including ffmpeg descendants) and removes their staging directories; completed cache files and downloads started after the cancellation are left intact.
 
 Each download attempt writes into its own directory under `audio_cache/.downloads/`, so partial and post-processing files are never visible to the cache scanner or the stream endpoint. A finished file is published into `audio_cache/` with a hard link, which is atomic and refuses to overwrite an existing entry — a download that completes alongside a cached copy can never truncate what is being served. The whole staging root is discarded at startup, cleaning up after a crash or a hard kill.
+
+### Metadata Refresh
+
+Tracks registered while YouTube was unreachable keep whatever little was known at the time (the video ID as the title, no thumbnail, no duration), and a video that is later retitled or whose channel is renamed leaves the stored copy stale. Selecting tracks and pressing 「メタデータ更新」 sends them to `POST /api/tracks/refresh-metadata`, which re-fetches each one with yt-dlp and rewrites the stored title, thumbnail, channel and duration.
+
+Each track costs its own yt-dlp run, so the request only starts the job and reports how many tracks it will visit; the refresh itself arrives as `tracks_update` frames, one per refreshed track. Progress is reported through the same `downloads_update` channel as a download (each track appears at the `metadata` stage under its current title), which also means 「すべて停止」 cancels a refresh in flight.
+
+What describes the local copy rather than the video is deliberately preserved: the cached file path, the registration time (so the custom order is not disturbed), and the `is_live` flag — a stream that has ended reports itself as a normal video, and adopting that would leave an entry claiming an audio file it never had. A refresh also never resurrects a track deleted while its fetch was running.
 
 ### Track Ordering
 
@@ -414,6 +423,7 @@ sudo systemctl enable --now yt-multiroom
 | GET | `/api/tracks` | Yes | List tracks in order (paginated, optional `playlist` and `q` filter) |
 | POST | `/api/tracks/reorder` | Yes | Move a track within the library or a playlist order |
 | POST | `/api/tracks/bulk-delete` | Yes | Bulk-delete tracks by ID list |
+| POST | `/api/tracks/refresh-metadata` | Yes | Start a background metadata refresh for an ID list (`track_ids`) |
 | DELETE | `/api/tracks/{id}` | Yes | Delete a track and its cached file |
 | GET | `/api/playlists` | Yes | List playlists with track counts |
 | POST | `/api/playlists` | Yes | Create a playlist (`name`) |

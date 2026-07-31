@@ -203,6 +203,21 @@ export async function bulkDeleteTracks(
   );
 }
 
+/// Start a background re-fetch of the given tracks' metadata. `total` is how
+/// many tracks the job will visit — the refresh itself lands later, as
+/// tracks_update frames.
+export async function refreshTracksMetadata(
+  trackIds: string[],
+  onUnauthorized?: () => void,
+): Promise<{ total: number; message?: string }> {
+  return authJson(
+    "/api/tracks/refresh-metadata",
+    "api.refreshMetadataFailed",
+    { method: "POST", body: JSON.stringify({ track_ids: trackIds }) },
+    onUnauthorized,
+  );
+}
+
 export async function bulkAddToPlaylist(
   playlistId: string,
   trackIds: string[],

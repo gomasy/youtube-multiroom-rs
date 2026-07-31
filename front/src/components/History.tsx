@@ -8,6 +8,7 @@ import {
   createPlaylist,
   deletePlaylist,
   fetchTracks,
+  refreshTracksMetadata,
   removeFromPlaylist,
   renamePlaylist,
   reorderTrack,
@@ -401,6 +402,20 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
     }
   }
 
+  // Unlike the other bulk actions this one is not scoped to the open view:
+  // metadata belongs to the track itself, so refreshing from inside a playlist
+  // updates the same library entries the library view would.
+  async function bulkRefreshMetadata() {
+    if (selected.size === 0) return;
+    try {
+      const data = await refreshTracksMetadata(Array.from(selected), onUnauthorized);
+      showToast(data.message || tFmt("history.metadataRefreshStarted", { count: data.total }));
+      exitSelectMode();
+    } catch (e) {
+      showError(e);
+    }
+  }
+
   async function bulkAddToPlaylistAction(playlistId: string) {
     if (selected.size === 0) return;
     setBulkMenuOpen(false);
@@ -521,6 +536,14 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
             onClick={bulkRemove}
           >
             {viewPlaylist ? t("history.bulkRemoveFromPlaylist") : t("history.bulkDelete")}
+          </button>
+          <button
+            className="btn btn-outline btn-sm"
+            title={t("history.bulkRefreshMetadataHint")}
+            disabled={selected.size === 0}
+            onClick={bulkRefreshMetadata}
+          >
+            {t("history.bulkRefreshMetadata")}
           </button>
           {!viewPlaylist && playlists.length > 0 && (
             <span className="playlist-menu-anchor">

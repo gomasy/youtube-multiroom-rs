@@ -5,7 +5,7 @@
 //!
 //! - [`audio`] — serving audio bytes to Echo devices and the browser
 //! - [`search`] — YouTube search
-//! - [`tracks`] — the audio library: listing, ordering, deletion
+//! - [`tracks`] — the audio library: listing, ordering, deletion, metadata
 //! - [`playlists`] — named playlists and their membership
 //! - [`devices`] — device state, playback commands, Up Next queues
 //! - [`alexa`] — the Alexa skill webhook
@@ -35,7 +35,9 @@ pub use playlists::{
     delete_playlist, list_playlists, remove_playlist_track, rename_playlist,
 };
 pub use search::search_youtube;
-pub use tracks::{bulk_delete_tracks, delete_track, list_tracks, reorder_track};
+pub use tracks::{
+    bulk_delete_tracks, delete_track, list_tracks, refresh_tracks_metadata, reorder_track,
+};
 pub use ws::ws_upgrade;
 
 use crate::state::{AppState, AudioTrack, DeviceState};

@@ -11,7 +11,7 @@
 //! - [`device`] — per-device state, pending commands, Up Next queues
 //! - [`playback`] — playback mode and the sleep timer
 //! - [`playlist`] — named playlists and YouTube playlist import
-//! - [`download`] — downloading audio and reporting progress
+//! - [`download`] — downloading audio, refreshing metadata, reporting progress
 //! - [`job`] — the stopping rules shared by the background per-video jobs
 //! - [`ytdlp`] — running yt-dlp and reaping its process group
 //! - [`url`] — recognizing YouTube URLs
@@ -107,9 +107,10 @@ pub struct AppState {
     /// Serializes modifications to youtube:tracks_order so reorder's
     /// read-then-replace and extract/remove's LPUSH/LREM don't interleave.
     order_lock: Mutex<()>,
-    /// Per-video coordination between downloads of the same video and a
-    /// deletion of the track they produce (see [`ExtractSlot`]). Entries live
-    /// only while such an operation is in flight.
+    /// Per-video coordination between the yt-dlp-backed work on that video —
+    /// downloads, metadata refreshes — and a deletion of the track they
+    /// register (see [`ExtractSlot`]). Entries live only while such an
+    /// operation is in flight.
     extract_slots: Mutex<HashMap<String, Arc<ExtractSlot>>>,
     /// In-progress download progress (video ID → progress). In-process only;
     /// lost on restart (clients re-sync via the init snapshot).
