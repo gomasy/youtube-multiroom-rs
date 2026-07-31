@@ -49,8 +49,6 @@ async fn init_message(state: &AppState) -> String {
 }
 
 async fn ws_handler(mut socket: WebSocket, state: Arc<AppState>) {
-    tracing::info!("WebSocket client connected");
-
     // Subscribe before building the snapshot to avoid missing updates that
     // arrive during snapshot assembly (e.g., download completion removing an
     // entry), which would leave init stale with no subsequent correction.
@@ -127,8 +125,6 @@ async fn ws_handler(mut socket: WebSocket, state: Arc<AppState>) {
             else => break,
         }
     }
-
-    tracing::info!("WebSocket client disconnected");
 }
 
 /// Process a single client WebSocket message.
