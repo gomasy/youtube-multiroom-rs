@@ -31,6 +31,8 @@ export interface TracksPage {
   total: number;
   page: number;
   per_page: number;
+  /** Track-list revision this page was served at (see WSInitMessage.tracks_rev) */
+  rev: number;
 }
 
 /** Named playlist (wire format with track count) */
@@ -68,6 +70,11 @@ export interface WSInitMessage {
   active_playlist?: string | null;
   /** Sleep timer expiry (UNIX seconds), null if not set */
   sleep_timer?: number | null;
+  /**
+   * Track-list revision at connect time. Equal to the rev of an already
+   * fetched page means that page is still current, so no refetch is needed.
+   */
+  tracks_rev?: number;
 }
 
 export interface WSDeviceUpdateMessage {

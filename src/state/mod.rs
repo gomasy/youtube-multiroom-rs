@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, broadcast};
 use tokio::time;
@@ -121,6 +121,12 @@ pub struct AppState {
     /// Bumped when the sleep timer is set/cancelled; the spawned timer task
     /// checks this to know if it's been superseded.
     sleep_timer_gen: AtomicU64,
+    /// Bumped on every track-list change. A client that fetched a page over
+    /// REST before its WebSocket existed compares the revision it was served
+    /// with the one in init: equal means nothing happened in that gap and the
+    /// page it already has is current. In-process only, so it restarts at 0 —
+    /// clients treat every reconnect as a change regardless.
+    tracks_rev: AtomicU64,
 }
 
 impl AppState {
@@ -159,6 +165,7 @@ impl AppState {
             download_cancel: Mutex::new(CancellationToken::new()),
             playback_failures: Mutex::new(HashMap::new()),
             sleep_timer_gen: AtomicU64::new(0),
+            tracks_rev: AtomicU64::new(0),
         }))
     }
 
@@ -181,7 +188,18 @@ impl AppState {
     /// The only broadcast that is not `async`: its frame carries no payload, so
     /// unlike its siblings it has no state to read before sending.
     pub fn broadcast_tracks(&self) {
+        // Bump before sending: a client that reads the revision after receiving
+        // this frame must never be told the list is older than what it just
+        // heard about.
+        self.tracks_rev.fetch_add(1, Ordering::SeqCst);
         self.broadcast(tracks_update_message());
+    }
+
+    /// The current track-list revision (see `tracks_rev`). Sample it *before*
+    /// reading the list itself, so a change landing mid-read shows up as a
+    /// newer revision rather than being hidden by the page that was served.
+    pub fn tracks_rev(&self) -> u64 {
+        self.tracks_rev.load(Ordering::SeqCst)
     }
 
     /// Broadcast playlist list/content changes to all clients.

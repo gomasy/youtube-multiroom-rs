@@ -24,6 +24,9 @@ export function App() {
   const [devices, setDevices] = useState<Record<string, Device>>({});
   const [tracksVersion, setTracksVersion] = useState(0);
   const [initialTracks, setInitialTracks] = useState<TracksPage | null>(null);
+  /// Whether an init frame has already been handled on this page load. Only the
+  /// first one can be answered by the REST snapshot; later ones are reconnects.
+  const seenInit = useRef(false);
   const [currentTrack, setCurrentTrack] = useState<Track | null>(null);
   const [playbackMode, setPlaybackMode] = useState<PlaybackMode>("off");
   const [downloads, setDownloads] = useState<DownloadProgress[]>([]);
@@ -92,6 +95,14 @@ export function App() {
     urlInputRef.current?.clear();
   }, [showToast]);
 
+  /// Drop the REST snapshot and re-fetch the visible page. The snapshot only
+  /// ever describes the state before the first render, so once it is known to
+  /// be behind it must not be applied again.
+  const refreshTracks = useCallback(() => {
+    setInitialTracks(null);
+    setTracksVersion((v) => v + 1);
+  }, []);
+
   const handlePlaylistCreated = useCallback((playlist: Playlist) => {
     setPlaylists((prev) =>
       prev.some((p) => p.id === playlist.id) ? prev : [...prev, playlist],
@@ -105,8 +116,21 @@ export function App() {
       if (!c) setExtracting(false);
     },
     onInit: setDevices,
+    onInitTracks: (rev) => {
+      // The REST snapshot was served before this subscription existed. Its
+      // revision matching the one at connect time means nothing changed in
+      // that gap, so the page already on screen is current and refetching it
+      // would only re-download what we have. Anything else — a changed
+      // revision, a server too old to report one, or a reconnect, whose gap is
+      // the whole disconnected period and whose revision counter may have been
+      // reset by a restart — has to be resolved by a fetch.
+      const snapshotIsCurrent =
+        !seenInit.current && initialTracks !== null && initialTracks.rev === rev;
+      seenInit.current = true;
+      if (!snapshotIsCurrent) refreshTracks();
+    },
     onDeviceUpdate: setDevices,
-    onTracksUpdate: () => setTracksVersion((v) => v + 1),
+    onTracksUpdate: refreshTracks,
     onPlaybackMode: setPlaybackMode,
     onExtractResult: handleExtractResult,
     onExtractError: handleExtractError,
@@ -149,7 +173,12 @@ export function App() {
 
   function handleAuthenticated(data: TracksPage | null) {
     setShowAuth(false);
-    if (data) setInitialTracks(data);
+    if (data) {
+      // A snapshot fetched just before the socket opens can answer the init
+      // frame exactly as the one from the initial page load does.
+      setInitialTracks(data);
+      seenInit.current = false;
+    }
     setWsActive(true);
   }
 

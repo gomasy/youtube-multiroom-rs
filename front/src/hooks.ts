@@ -5,6 +5,8 @@ import type { Device, DownloadProgress, PlaybackMode, Playlist, Track, WSMessage
 interface WSCallbacks {
   onVersion: (version: string) => void;
   onInit: (devices: Record<string, Device>) => void;
+  /** Track-list revision at connect time (undefined if the server omits it) */
+  onInitTracks: (rev: number | undefined) => void;
   onDeviceUpdate: (devices: Record<string, Device>) => void;
   onTracksUpdate: () => void;
   onPlaybackMode: (mode: PlaybackMode) => void;
@@ -79,6 +81,9 @@ export function useWebSocket(active: boolean, callbacks: WSCallbacks) {
         case "init":
           if (data.version) cb.onVersion(data.version);
           cb.onInit(data.devices || {});
+          // The REST snapshot is fetched before this subscription exists, so
+          // the gap has to be reconciled here rather than waited out.
+          cb.onInitTracks(data.tracks_rev);
           if (data.playback_mode) cb.onPlaybackMode(data.playback_mode);
           // Re-sync in-progress download display on reload/reconnect
           cb.onDownloadsUpdate(data.downloads || []);

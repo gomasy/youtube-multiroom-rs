@@ -41,6 +41,9 @@ async fn init_message(state: &AppState) -> String {
         "playlists": playlists,
         "active_playlist": active_playlist,
         "sleep_timer": sleep_timer,
+        // Lets a client that already fetched a page over REST tell whether the
+        // list changed before this connection existed (see AppState::tracks_rev).
+        "tracks_rev": state.tracks_rev(),
     })
     .to_string()
 }

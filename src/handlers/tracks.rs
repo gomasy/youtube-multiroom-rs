@@ -29,6 +29,9 @@ pub async fn list_tracks(
     if let Some(pid) = &query.playlist {
         playlist_or_404(&state, pid).await?;
     }
+    // Sampled before the read so a change landing while this page is assembled
+    // is reported as a newer revision than the one served with it.
+    let rev = state.tracks_rev();
     let per_page = query.per_page.unwrap_or(10).clamp(1, 100);
     let page = query.page.unwrap_or(1).max(1);
     let filter = query
@@ -44,6 +47,7 @@ pub async fn list_tracks(
         "total": total,
         "page": page,
         "per_page": per_page,
+        "rev": rev,
     })))
 }
 
