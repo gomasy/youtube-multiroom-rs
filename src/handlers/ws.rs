@@ -143,7 +143,7 @@ async fn handle_ws_message(
             if let Some(mode) = data["mode"].as_str()
                 && state.set_playback_mode(mode).await
             {
-                state.broadcast_playback_mode(mode).await;
+                state.broadcast_playback_mode(mode);
             }
         }
         "set_active_playlist" => {

@@ -203,8 +203,8 @@ impl AppState {
 
     /// Notify clients that the track list changed (content is re-fetched via REST).
     ///
-    /// The only broadcast that is not `async`: its frame carries no payload, so
-    /// unlike its siblings it has no state to read before sending.
+    /// Not `async`: its frame carries no payload, so unlike most of its siblings
+    /// it has no state to read before sending.
     pub fn broadcast_tracks(&self) {
         // Bump before sending: a client that reads the revision after receiving
         // this frame must never be told the list is older than what it just

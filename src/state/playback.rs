@@ -139,7 +139,7 @@ impl AppState {
                 conn.del(REDIS_KEY_SLEEP_TIMER).await
             );
             state.set_playback_mode("off").await;
-            state.broadcast_playback_mode("off").await;
+            state.broadcast_playback_mode("off");
             let device_ids = state.device_ids().await.unwrap_or_else(|e| {
                 tracing::warn!("Redis error listing devices for sleep timer: {e}");
                 Vec::new()
@@ -171,7 +171,10 @@ impl AppState {
         }));
     }
 
-    pub async fn broadcast_playback_mode(&self, mode: &str) {
+    /// Not `async`, for the same reason `broadcast_tracks` is not: the mode is
+    /// handed in by the caller that just set it, so there is no state to read
+    /// before sending.
+    pub fn broadcast_playback_mode(&self, mode: &str) {
         self.broadcast(json!({
             "type": "playback_mode_update",
             "mode": mode,
