@@ -271,11 +271,14 @@ fn verify_cert_chain(pem: &[u8]) -> Result<(PKey<Public>, SystemTime), String> {
     let remaining = now
         .diff(leaf.not_after())
         .map_err(|e| format!("failed to read cert expiry: {e}"))?;
-    let secs = remaining.days as i64 * 86400 + remaining.secs as i64;
-    if secs <= 0 {
-        return Err("certificate expired".to_string());
-    }
-    let not_after = SystemTime::now() + Duration::from_secs(secs as u64);
+    let secs = i64::from(remaining.days) * 86400 + i64::from(remaining.secs);
+    // A certificate with no lifetime left can verify nothing. Rejecting it here
+    // is also what makes the conversion exact rather than a cast that would turn
+    // an expired certificate into one valid for hundreds of billions of years.
+    let not_after = match u64::try_from(secs) {
+        Ok(secs) if secs > 0 => SystemTime::now() + Duration::from_secs(secs),
+        _ => return Err("certificate expired".to_string()),
+    };
 
     let key = leaf
         .public_key()
