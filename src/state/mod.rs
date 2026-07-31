@@ -135,10 +135,22 @@ impl AppState {
         redis_url: &str,
     ) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
         let (tx, _) = broadcast::channel::<String>(256);
+        // An unreadable working directory leaves the cache path relative, which
+        // resolves to the same place for a server started the usual way. Both
+        // that and a failed create are reported rather than swallowed: every
+        // download lands here, so a cache directory that never appeared is the
+        // explanation for failures that would otherwise surface much later, one
+        // staging-directory error at a time.
         let cache_dir = std::env::current_dir()
+            .inspect_err(|e| tracing::warn!("Cannot read the working directory: {e}"))
             .unwrap_or_default()
             .join("audio_cache");
-        std::fs::create_dir_all(&cache_dir).ok();
+        if let Err(e) = std::fs::create_dir_all(&cache_dir) {
+            tracing::warn!(
+                "Failed to create the audio cache directory {}: {e}",
+                cache_dir.display()
+            );
+        }
 
         let client = redis::Client::open(redis_url)?;
         // Naming the URL is what makes this error actionable, but it is the one
