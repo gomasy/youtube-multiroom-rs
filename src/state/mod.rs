@@ -11,7 +11,8 @@
 //! - [`device`] — per-device state, pending commands, Up Next queues
 //! - [`playback`] — playback mode and the sleep timer
 //! - [`playlist`] — named playlists and YouTube playlist import
-//! - [`download`] — downloading audio, refreshing metadata, reporting progress
+//! - [`download`] — downloading audio and refreshing track metadata
+//! - [`progress`] — what clients are told about that work while it runs
 //! - [`job`] — the stopping rules shared by the background per-video jobs
 //! - [`ytdlp`] — running yt-dlp and reaping its process group
 //! - [`url`] — recognizing YouTube URLs
@@ -38,6 +39,7 @@ mod job;
 mod model;
 mod playback;
 mod playlist;
+mod progress;
 mod track;
 mod url;
 mod ytdlp;

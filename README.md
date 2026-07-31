@@ -29,7 +29,8 @@ youtube-multiroom-rs/
 │   │   ├── device.rs      # Per-device state, pending commands, play-next queues
 │   │   ├── playback.rs    # Playback mode & sleep timer
 │   │   ├── playlist.rs    # Named playlists & YouTube playlist import
-│   │   ├── download.rs    # Audio downloading and progress reporting
+│   │   ├── download.rs    # Audio downloading & track metadata refresh
+│   │   ├── progress.rs    # Progress reporting & the cancellation generation
 │   │   ├── job.rs         # Stopping rules shared by the per-video background jobs
 │   │   ├── ytdlp.rs       # yt-dlp invocation & process group reaping
 │   │   └── url.rs         # YouTube URL / video ID validation
