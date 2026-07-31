@@ -54,7 +54,7 @@ fn search_entry(v: &Value) -> Option<AudioTrack> {
         title: v["title"].as_str().unwrap_or(id).to_string(),
         // Flat entries have inconsistent thumbnail formats; use a known URL pattern
         thumbnail: format!("https://i.ytimg.com/vi/{id}/mqdefault.jpg"),
-        duration: v["duration"].as_f64().unwrap_or(0.0) as u64,
+        duration: AudioTrack::extract_duration(v),
         channel: AudioTrack::extract_channel(v),
         is_live: v["live_status"].as_str() == Some("is_live"),
         created_at: 0.0,

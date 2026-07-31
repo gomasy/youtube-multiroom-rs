@@ -80,12 +80,32 @@ impl AudioTrack {
             .to_string()
     }
 
+    /// Read the video length in seconds from yt-dlp metadata.
+    ///
+    /// The field comes back as a whole number for most videos but as a float
+    /// for the rest — flat playlist entries carry one, and yt-dlp falls back to
+    /// a parsed duration string when YouTube omits `lengthSeconds` — so both
+    /// forms are accepted. Reading only the integer form silently stored zero
+    /// for the others, which is what makes a track unseekable and hides its
+    /// length in the UI. Anything unusable (absent, negative, non-finite) is
+    /// reported as zero, the same "length unknown" every caller already handles.
+    pub(crate) fn extract_duration(meta: &Value) -> u64 {
+        let duration = &meta["duration"];
+        duration
+            .as_u64()
+            .or_else(|| {
+                let secs = duration.as_f64()?;
+                (secs.is_finite() && secs >= 0.0).then_some(secs as u64)
+            })
+            .unwrap_or(0)
+    }
+
     pub(crate) fn from_meta(id: &str, meta: &Value, created_at: f64, file_path: String) -> Self {
         Self {
             id: id.to_string(),
             title: meta["title"].as_str().unwrap_or(id).to_string(),
             thumbnail: meta["thumbnail"].as_str().unwrap_or("").to_string(),
-            duration: meta["duration"].as_u64().unwrap_or(0),
+            duration: Self::extract_duration(meta),
             channel: Self::extract_channel(meta),
             is_live: meta["is_live"].as_bool().unwrap_or(false),
             created_at,
@@ -340,6 +360,37 @@ mod tests {
         let restored = AudioTrack::from_redis_json(&track.to_redis_json().unwrap()).unwrap();
         assert!(restored.is_live);
         assert!(restored.file_path.is_empty());
+    }
+
+    #[test]
+    fn duration_is_read_from_both_forms_yt_dlp_reports() {
+        // Whole seconds, the usual shape
+        assert_eq!(
+            AudioTrack::extract_duration(&json!({ "duration": 213 })),
+            213
+        );
+        // Fractional seconds: flat playlist entries and the parsed-duration
+        // fallback both report one, and reading only the integer form used to
+        // register these tracks with no length at all
+        assert_eq!(
+            AudioTrack::extract_duration(&json!({ "duration": 213.4 })),
+            213
+        );
+        // Live streams and unavailable videos have no length to report
+        assert_eq!(AudioTrack::extract_duration(&json!({})), 0);
+        assert_eq!(
+            AudioTrack::extract_duration(&json!({ "duration": Value::Null })),
+            0
+        );
+        // Nothing unusable may reach the wire format as a length
+        assert_eq!(
+            AudioTrack::extract_duration(&json!({ "duration": -5.0 })),
+            0
+        );
+        assert_eq!(
+            AudioTrack::extract_duration(&json!({ "duration": "3:33" })),
+            0
+        );
     }
 
     #[test]
