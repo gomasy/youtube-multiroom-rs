@@ -120,10 +120,16 @@ pub async fn bulk_add_playlist_tracks(
     Json(req): Json<TrackIdsRequest>,
 ) -> AppResult<Json<Value>> {
     playlist_or_404(&state, &playlist_id).await?;
+    // Resolve every requested track in one HMGET. This is the endpoint that
+    // routinely carries a hundred IDs, and checking them one at a time spent a
+    // round-trip per ID purely to be told the track exists. A track deleted
+    // between this read and its append is dropped from the playlist by the
+    // deletion itself, which strips it from every playlist that listed it.
+    let known = state.fetch_tracks_for(req.track_ids.iter()).await;
     let mut added = 0u32;
     let mut failure = None;
     for id in &req.track_ids {
-        if state.get_track(id).await.is_none() {
+        if !known.contains_key(id.as_str()) {
             continue;
         }
         match state.add_playlist_track(&playlist_id, id).await {
