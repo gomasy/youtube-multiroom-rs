@@ -30,6 +30,7 @@ youtube-multiroom-rs/
 │   │   ├── playback.rs    # Playback mode & sleep timer
 │   │   ├── playlist.rs    # Named playlists & YouTube playlist import
 │   │   ├── download.rs    # Audio downloading and progress reporting
+│   │   ├── job.rs         # Stopping rules shared by the per-video background jobs
 │   │   ├── ytdlp.rs       # yt-dlp invocation & process group reaping
 │   │   └── url.rs         # YouTube URL / video ID validation
 │   ├── handlers/      # HTTP / WebSocket handlers, split by subject

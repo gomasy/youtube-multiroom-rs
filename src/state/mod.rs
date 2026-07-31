@@ -12,6 +12,7 @@
 //! - [`playback`] — playback mode and the sleep timer
 //! - [`playlist`] — named playlists and YouTube playlist import
 //! - [`download`] — downloading audio and reporting progress
+//! - [`job`] — the stopping rules shared by the background per-video jobs
 //! - [`ytdlp`] — running yt-dlp and reaping its process group
 //! - [`url`] — recognizing YouTube URLs
 //!
@@ -33,6 +34,7 @@ use tokio_util::sync::CancellationToken;
 
 mod device;
 mod download;
+mod job;
 mod model;
 mod playback;
 mod playlist;

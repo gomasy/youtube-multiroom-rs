@@ -1,8 +1,9 @@
 //! Named playlists, the active playback scope, and importing a YouTube
 //! playlist into a local one.
 
+use super::job::{VideoJob, Visited};
 use super::model::{AudioTrack, Playlist, PlaylistImportInfo, PlaylistJson};
-use super::url::is_video_id;
+use super::url::{is_video_id, watch_url};
 use super::warn_redis;
 use super::ytdlp::{DownloadError, run_yt_dlp_cancellable};
 use super::{
@@ -406,60 +407,34 @@ impl AppState {
         let state = self.clone();
         let cancel = cancel.clone();
         tokio::spawn(async move {
-            let mut imported = 0;
-            for video_id in &video_ids {
-                if cancel.is_cancelled() {
-                    tracing::info!(
-                        "Playlist import cancelled: '{}' ({imported}/{total} imported)",
-                        playlist.name
-                    );
-                    break;
-                }
-                let url = format!("https://www.youtube.com/watch?v={video_id}");
-                match state.extract_audio(&url, &cancel).await {
-                    Ok(track) => {
-                        match state.add_playlist_track(&playlist.id, &track.id).await {
-                            Ok(true) => {
-                                // Reflect each successfully imported track in the lists
-                                state.broadcast_tracks();
-                                state.broadcast_playlists().await;
-                                imported += 1;
-                            }
-                            Ok(false) => {
-                                tracing::info!(
-                                    "Playlist import stopped because '{}' was deleted",
-                                    playlist.name
-                                );
-                                break;
-                            }
-                            Err(e) => tracing::warn!(
-                                "Playlist import: failed to add {video_id} to '{}': {e}",
-                                playlist.name
-                            ),
-                        }
+            let job = VideoJob::new(
+                format!("Playlist import '{}'", playlist.name),
+                "imported",
+                "deleted while downloading",
+            );
+            let (state, cancel, playlist) = (&state, &cancel, &playlist);
+            job.run(&video_ids, cancel, |video_id| async move {
+                let track = state.extract_audio(&watch_url(&video_id), cancel).await?;
+                match state.add_playlist_track(&playlist.id, &track.id).await {
+                    Ok(true) => {
+                        // Reflect each successfully imported track in the lists
+                        state.broadcast_tracks();
+                        state.broadcast_playlists().await;
+                        Ok(Visited::Done)
                     }
-                    // Only a real Stop all ends the import. A cancellation
-                    // without one means this single video dropped out — its
-                    // track was deleted while it downloaded — and the rest of
-                    // the import still stands.
-                    Err(DownloadError::Cancelled) if cancel.is_cancelled() => {
-                        tracing::info!(
-                            "Playlist import cancelled: '{}' ({imported}/{total} imported)",
+                    // The playlist this import exists to fill is gone, so
+                    // there is nowhere left to put the remaining videos.
+                    Ok(false) => Ok(Visited::Stop("the playlist was deleted".to_string())),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Playlist import '{}': failed to add {video_id}: {e}",
                             playlist.name
                         );
-                        break;
+                        Ok(Visited::Skipped)
                     }
-                    Err(DownloadError::Cancelled) => tracing::info!(
-                        "Playlist import: skipping {video_id}, deleted while downloading"
-                    ),
-                    // Failures are shown via download progress error display; log only
-                    Err(e) => tracing::warn!("Playlist import: skipping {video_id}: {e}"),
                 }
-            }
-            tracing::info!(
-                "Playlist import finished: '{}' ({imported}/{total} imported)",
-                playlist.name
-            );
+            })
+            .await;
         });
 
         Ok(PlaylistImportInfo { name, total })
