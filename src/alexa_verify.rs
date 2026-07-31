@@ -209,7 +209,7 @@ async fn fetch_verified_key(cert_url: &str) -> Result<PKey<Public>, String> {
         .get(cert_url)
         .send()
         .await
-        .and_then(|r| r.error_for_status())
+        .and_then(reqwest::Response::error_for_status)
         .map_err(|e| format!("failed to fetch cert chain: {e}"))?
         .bytes()
         .await

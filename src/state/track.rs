@@ -459,7 +459,7 @@ fn cached_video_ids(cache_dir: &Path) -> Vec<(String, PathBuf)> {
         return Vec::new();
     };
     entries
-        .filter_map(|e| e.ok())
+        .filter_map(Result::ok)
         .filter_map(|e| {
             let path = e.path();
             if path.extension().is_none_or(|ext| ext != AUDIO_EXT) {

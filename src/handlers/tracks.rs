@@ -34,11 +34,7 @@ pub async fn list_tracks(
     let rev = state.tracks_rev();
     let per_page = query.per_page.unwrap_or(10).clamp(1, 100);
     let page = query.page.unwrap_or(1).max(1);
-    let filter = query
-        .q
-        .as_deref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty());
+    let filter = query.q.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let (tracks, total) = state
         .list_tracks_page(query.playlist.as_deref(), page, per_page, filter)
         .await;

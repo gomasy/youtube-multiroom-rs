@@ -167,9 +167,7 @@ pub async fn live_audio(
         }
         let err = err_buf.trim();
         match child.wait().await {
-            Ok(status) if err.is_empty() => {
-                tracing::info!("ffmpeg exited: {status}")
-            }
+            Ok(status) if err.is_empty() => tracing::info!("ffmpeg exited: {status}"),
             Ok(status) => tracing::warn!("ffmpeg exited: {status}: {err}"),
             Err(e) => tracing::warn!("ffmpeg wait error: {e}"),
         }

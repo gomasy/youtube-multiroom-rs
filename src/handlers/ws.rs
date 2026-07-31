@@ -119,7 +119,7 @@ async fn ws_handler(mut socket: WebSocket, state: Arc<AppState>) {
                             handle_ws_message(&state, &client_tx, &data).await;
                         }
                     }
-                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                    Some(Ok(Message::Close(_)) | Err(_)) | None => break,
                     Some(Ok(_)) => {}
                 }
             }
