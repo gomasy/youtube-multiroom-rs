@@ -7,7 +7,7 @@ use super::warn_redis;
 use super::ytdlp::fetch_metadata;
 use super::{
     AUDIO_EXT, AppState, PendingCommand, REDIS_KEY_TRACKS, REDIS_KEY_TRACKS_ORDER,
-    REDIS_PENDING_PREFIX, now_f64, playlist_key, queue_key, token_track_id,
+    REDIS_PENDING_PREFIX, now_f64, playlist_key, queue_key, since_epoch, token_track_id,
 };
 use redis::AsyncCommands;
 use serde_json::Value;
@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 impl AppState {
     pub async fn get_track(&self, id: &str) -> Option<AudioTrack> {
@@ -449,10 +449,7 @@ fn random_track_from(mut tracks: Vec<AudioTrack>, current_id: &str) -> Option<Au
         return None;
     }
     // Nanoseconds of the current time are random enough for track selection variety
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos() as usize;
+    let nanos = since_epoch().subsec_nanos() as usize;
     Some(tracks.swap_remove(nanos % tracks.len()))
 }
 

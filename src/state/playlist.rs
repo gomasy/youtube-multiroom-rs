@@ -5,12 +5,13 @@ use super::model::{AudioTrack, Playlist, PlaylistImportInfo, PlaylistJson};
 use super::url::is_video_id;
 use super::warn_redis;
 use super::ytdlp::{DownloadError, run_yt_dlp_cancellable};
-use super::{AppState, REDIS_KEY_ACTIVE_PLAYLIST, REDIS_KEY_PLAYLISTS, now_f64, playlist_key};
+use super::{
+    AppState, REDIS_KEY_ACTIVE_PLAYLIST, REDIS_KEY_PLAYLISTS, now_f64, playlist_key, since_epoch,
+};
 use redis::AsyncCommands;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 
@@ -481,9 +482,7 @@ fn serialize_playlist(playlist: &Playlist) -> Option<String> {
 
 /// Generate a playlist ID ("pl" + time-derived value; unique enough for creation frequency).
 fn new_playlist_id() -> String {
-    let d = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
+    let d = since_epoch();
     format!("pl{:x}{:05x}", d.as_millis(), d.subsec_nanos() & 0xfffff)
 }
 

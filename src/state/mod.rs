@@ -226,9 +226,15 @@ pub fn tracks_update_message() -> Value {
     json!({ "type": "tracks_update" })
 }
 
-pub(crate) fn now_f64() -> f64 {
+/// Time elapsed since the UNIX epoch. A clock that predates 1970 reads as zero
+/// rather than an error: every caller wants a number to derive a timestamp or an
+/// ID from, and none of them has a better answer to offer than the epoch itself.
+pub(crate) fn since_epoch() -> std::time::Duration {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs_f64()
+}
+
+pub(crate) fn now_f64() -> f64 {
+    since_epoch().as_secs_f64()
 }
