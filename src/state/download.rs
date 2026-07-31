@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::Mutex;
 use tokio::time;
@@ -35,6 +35,33 @@ const STAGING_DIR_ATTEMPTS: u32 = 16;
 /// Distinguishes concurrent staging directories for the same video.
 static DOWNLOAD_ATTEMPT_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// What a download of one video and a deletion of the track it produces use to
+/// stay out of each other's way. Held in `AppState::extract_slots` for as long
+/// as either operation is running.
+#[derive(Default)]
+pub(crate) struct ExtractSlot {
+    /// Serializes downloads of the same video, so the second caller finds the
+    /// finished track in the cache instead of fetching it again.
+    lock: Mutex<()>,
+    /// Set by a deletion of this video's track. A download that sees it at its
+    /// commit point undoes its own registration instead of resurrecting what
+    /// the user deleted — which is what lets a deletion return immediately
+    /// rather than waiting out a download that can run for minutes.
+    deleted: AtomicBool,
+}
+
+impl ExtractSlot {
+    /// Mark the track deleted. Never unset: for the lifetime of this slot every
+    /// registration of the video is one the deletion has already superseded.
+    pub(crate) fn mark_deleted(&self) {
+        self.deleted.store(true, Ordering::SeqCst);
+    }
+
+    fn is_deleted(&self) -> bool {
+        self.deleted.load(Ordering::SeqCst)
+    }
+}
+
 impl AppState {
     pub async fn extract_audio(
         self: &Arc<Self>,
@@ -45,50 +72,65 @@ impl AppState {
 
         // Serialize concurrent requests for the same video. Subsequent callers
         // hit the cache check after acquiring the lock and return immediately.
-        let lock = {
-            let mut locks = self.extract_locks.lock().await;
-            locks.entry(video_id.clone()).or_default().clone()
-        };
+        let slot = self.extract_slot(&video_id).await;
         // Waiting behind another download of the same video must stay
         // interruptible, and a cancellation that lands while queued still
         // applies once the lock is finally handed over.
         let guard = tokio::select! {
             biased;
             _ = cancel.cancelled() => None,
-            guard = lock.lock() => Some(guard),
+            guard = slot.lock.lock() => Some(guard),
         };
         let result = match guard {
             Some(guard) if !cancel.is_cancelled() => {
-                let result = self.extract_audio_locked(&video_id, cancel).await;
+                let result = self.extract_audio_locked(&video_id, &slot, cancel).await;
                 drop(guard);
                 result
             }
             _ => Err(DownloadError::Cancelled),
         };
-        self.release_extract_lock(&video_id, &lock).await;
+        self.release_extract_slot(&video_id, &slot).await;
 
         result
     }
 
-    /// Drop the per-video lock entry once this caller is the last user, so the
-    /// map does not grow one entry per video for the lifetime of the process.
-    async fn release_extract_lock(&self, video_id: &str, lock: &Arc<Mutex<()>>) {
+    /// The slot coordinating this video's download and deletion, created on
+    /// first use. Always paired with `release_extract_slot`.
+    pub(crate) async fn extract_slot(&self, video_id: &str) -> Arc<ExtractSlot> {
+        let mut slots = self.extract_slots.lock().await;
+        slots.entry(video_id.to_string()).or_default().clone()
+    }
+
+    /// Drop the per-video slot once this caller is the last user, so the map
+    /// does not grow one entry per video for the lifetime of the process.
+    pub(crate) async fn release_extract_slot(&self, video_id: &str, slot: &Arc<ExtractSlot>) {
         // The map and this caller account for two references. Any additional
         // reference belongs to another active or waiting caller.
-        let mut locks = self.extract_locks.lock().await;
-        if locks
+        let mut slots = self.extract_slots.lock().await;
+        if slots
             .get(video_id)
-            .is_some_and(|current| Arc::ptr_eq(current, lock) && Arc::strong_count(lock) <= 2)
+            .is_some_and(|current| Arc::ptr_eq(current, slot) && Arc::strong_count(slot) <= 2)
         {
-            locks.remove(video_id);
+            slots.remove(video_id);
         }
     }
 
     async fn extract_audio_locked(
         self: &Arc<Self>,
         video_id: &str,
+        slot: &ExtractSlot,
         cancel: &CancellationToken,
     ) -> Result<AudioTrack, DownloadError> {
+        // This video is inside a deletion window: a deletion is running, or an
+        // earlier download still owes the discard below. Either way anything
+        // registered for it is on its way out, so a cache hit here would report
+        // success for a track that is about to disappear, and a fresh download
+        // would only be discarded. Report it the way a stop is reported; the
+        // caller can ask again once the deletion has drained.
+        if slot.is_deleted() {
+            return Err(DownloadError::Cancelled);
+        }
+
         // Redis cache check. Entries pointing to old formats (mp3 etc.) are
         // stale w.r.t. AUDIO_MIME, so skip them and re-fetch.
         if let Some(track) = self.get_track(video_id).await {
@@ -112,7 +154,7 @@ impl AppState {
         // Fetch while broadcasting progress to all clients. Remove on success;
         // keep as error display for a while on failure.
         self.begin_download(video_id).await;
-        let result = self.fetch_and_register(video_id, cancel).await;
+        let result = self.fetch_and_register(video_id, slot, cancel).await;
         match &result {
             // A cancelled download is not a failure to report; clear it like a
             // completed one so no stale error lingers in the progress display.
@@ -127,6 +169,7 @@ impl AppState {
     async fn fetch_and_register(
         &self,
         video_id: &str,
+        slot: &ExtractSlot,
         cancel: &CancellationToken,
     ) -> Result<AudioTrack, DownloadError> {
         // Never pass the user-supplied URL to yt-dlp. Reconstructing it from the
@@ -223,8 +266,42 @@ impl AppState {
             );
         }
 
+        // A deletion that started while this download was running has already
+        // removed the entry this attempt was replacing, so the writes above put
+        // back a track the user deleted. Undoing them here — rather than making
+        // the deletion wait for this download — is what keeps deletion prompt.
+        // The mark is only ever set, so this cannot miss one that lands later:
+        // such a deletion runs entirely after these writes and removes them.
+        if slot.is_deleted() {
+            self.discard_registration(video_id, published_path.as_deref())
+                .await;
+            return Err(DownloadError::Cancelled);
+        }
+
         tracing::info!("Ready: {} ({}s)", track.title, track.duration);
         Ok(track)
+    }
+
+    /// Undo this attempt's registration after a concurrent deletion, leaving
+    /// nothing the deletion itself would no longer know to clean up.
+    async fn discard_registration(&self, video_id: &str, published_path: Option<&Path>) {
+        // File first, for the same reason remove_track deletes it first: were
+        // the HDEL below to empty the tracks key, a surviving file could have
+        // the track restored from it by restore_tracks_if_missing.
+        if let Some(path) = published_path {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+        let mut conn = self.redis.clone();
+        warn_redis!(
+            "discarding track {video_id}",
+            conn.hdel(REDIS_KEY_TRACKS, video_id).await
+        );
+        let _guard = self.order_lock.lock().await;
+        warn_redis!(
+            "removing {video_id} from track order",
+            conn.lrem(REDIS_KEY_TRACKS_ORDER, 0, video_id).await
+        );
+        tracing::info!("Discarded {video_id}: deleted while downloading");
     }
 
     /// Create an empty directory owned by a single download attempt. The name

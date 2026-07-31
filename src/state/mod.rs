@@ -2,7 +2,7 @@
 //!
 //! `AppState` owns the Redis connection, the WebSocket broadcast channel and
 //! the in-process bookkeeping that outlives a single request (download
-//! progress, per-video download locks, playback failure counters). Its methods
+//! progress, per-video extract slots, playback failure counters). Its methods
 //! are grouped by subject into sibling modules, each contributing its own
 //! `impl AppState` block:
 //!
@@ -18,6 +18,7 @@
 //! The modules are private: everything the rest of the crate uses is
 //! re-exported here, so `crate::state::X` stays the single import path.
 
+use download::ExtractSlot;
 use model::{DownloadProgress, FailureRecord};
 use redis::aio::ConnectionManager;
 use serde_json::{Value, json};
@@ -103,9 +104,10 @@ pub struct AppState {
     /// Serializes modifications to youtube:tracks_order so reorder's
     /// read-then-replace and extract/remove's LPUSH/LREM don't interleave.
     order_lock: Mutex<()>,
-    /// Per-video lock to prevent concurrent downloads from writing the same
-    /// output file simultaneously.
-    extract_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Per-video coordination between downloads of the same video and a
+    /// deletion of the track they produce (see [`ExtractSlot`]). Entries live
+    /// only while such an operation is in flight.
+    extract_slots: Mutex<HashMap<String, Arc<ExtractSlot>>>,
     /// In-progress download progress (video ID → progress). In-process only;
     /// lost on restart (clients re-sync via the init snapshot).
     downloads: Mutex<HashMap<String, DownloadProgress>>,
@@ -152,7 +154,7 @@ impl AppState {
             api_token,
             restoring: AtomicBool::new(false),
             order_lock: Mutex::new(()),
-            extract_locks: Mutex::new(HashMap::new()),
+            extract_slots: Mutex::new(HashMap::new()),
             downloads: Mutex::new(HashMap::new()),
             download_cancel: Mutex::new(CancellationToken::new()),
             playback_failures: Mutex::new(HashMap::new()),

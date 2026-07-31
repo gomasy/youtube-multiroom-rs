@@ -32,6 +32,24 @@ impl AppState {
     }
 
     pub async fn remove_track(&self, id: &str) -> Option<AudioTrack> {
+        // Nothing registered means nothing to delete. A download in flight for
+        // this video has not registered anything yet, so what it goes on to
+        // register is a fresh track rather than a resurrection of this one.
+        self.get_track(id).await?;
+
+        // Claim the video's extract slot for the duration of the deletion. A
+        // download re-fetching this track (its cache file went missing, say)
+        // rewrites the entry when it commits, so it is told to discard that
+        // registration instead — deletion never waits for a download, however
+        // long it runs.
+        let slot = self.extract_slot(id).await;
+        slot.mark_deleted();
+        let removed = self.remove_track_inner(id).await;
+        self.release_extract_slot(id, &slot).await;
+        removed
+    }
+
+    async fn remove_track_inner(&self, id: &str) -> Option<AudioTrack> {
         let track = self.get_track(id).await?;
 
         // Delete the file first. If removing the last track causes the tracks key
