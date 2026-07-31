@@ -31,6 +31,9 @@ const CERT_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// so a small cap is generous for real Alexa requests while keeping a flood of
 /// forged URLs from tying up connections and sockets.
 const CERT_FETCH_MAX_INFLIGHT: usize = 4;
+/// Bound query-variant and certificate-rotation entries. Alexa normally uses a
+/// single URL, so this leaves ample overlap while preventing unbounded growth.
+const CERT_CACHE_MAX_ENTRIES: usize = 16;
 /// Hostname required in the certificate's SAN.
 const ECHO_API_SAN: &str = "echo-api.amazon.com";
 
@@ -46,13 +49,36 @@ fn cert_cache() -> &'static Mutex<HashMap<String, CachedKey>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Drop entries whose certificate has expired. Run on every cache access, so an
+/// entry that can no longer verify anything never occupies a slot.
+fn prune_expired(cache: &mut HashMap<String, CachedKey>) {
+    let now = SystemTime::now();
+    cache.retain(|_, cached| now < cached.not_after);
+}
+
 /// Look up a still-valid cached key for this certificate URL.
 async fn cached_key(cert_url: &str) -> Option<PKey<Public>> {
-    let cache = cert_cache().lock().await;
-    cache
-        .get(cert_url)
-        .filter(|c| SystemTime::now() < c.not_after)
-        .map(|c| c.key.clone())
+    let mut cache = cert_cache().lock().await;
+    prune_expired(&mut cache);
+    cache.get(cert_url).map(|c| c.key.clone())
+}
+
+/// Cache a verified key, keeping the map bounded. Only an entry for a URL not
+/// already cached can grow the map, and the soonest-to-expire entry is the one
+/// evicted, since it is the closest to being useless anyway.
+async fn cache_verified_key(cert_url: &str, key: PKey<Public>, not_after: SystemTime) {
+    let mut cache = cert_cache().lock().await;
+    prune_expired(&mut cache);
+    if !cache.contains_key(cert_url)
+        && cache.len() >= CERT_CACHE_MAX_ENTRIES
+        && let Some(soonest) = cache
+            .iter()
+            .min_by_key(|(_, cached)| cached.not_after)
+            .map(|(url, _)| url.clone())
+    {
+        cache.remove(&soonest);
+    }
+    cache.insert(cert_url.to_string(), CachedKey { key, not_after });
 }
 
 fn cert_fetch_slots() -> &'static Semaphore {
@@ -190,13 +216,7 @@ async fn fetch_verified_key(cert_url: &str) -> Result<PKey<Public>, String> {
         .map_err(|e| format!("failed to read cert chain: {e}"))?;
 
     let (key, not_after) = verify_cert_chain(&pem)?;
-    cert_cache().lock().await.insert(
-        cert_url.to_string(),
-        CachedKey {
-            key: key.clone(),
-            not_after,
-        },
-    );
+    cache_verified_key(cert_url, key.clone(), not_after).await;
     tracing::info!("Verified and cached Alexa signing cert: {cert_url}");
     Ok(key)
 }
@@ -266,6 +286,7 @@ fn verify_cert_chain(pem: &[u8]) -> Result<(PKey<Public>, SystemTime), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openssl::rsa::Rsa;
     use serde_json::json;
     use time::format_description::well_known::Rfc3339;
 
@@ -287,6 +308,43 @@ mod tests {
     fn cert_url_fragment_is_dropped() {
         let u = validate_cert_url("https://s3.amazonaws.com/echo.api/cert.pem#frag").unwrap();
         assert_eq!(u.as_str(), "https://s3.amazonaws.com/echo.api/cert.pem");
+    }
+
+    #[tokio::test]
+    async fn cert_cache_is_bounded_and_prunes_expired_entries() {
+        let private = PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap();
+        let public = PKey::public_key_from_pem(&private.public_key_to_pem().unwrap()).unwrap();
+        let now = SystemTime::now();
+
+        {
+            let mut cache = cert_cache().lock().await;
+            cache.clear();
+            cache.insert(
+                "expired".to_string(),
+                CachedKey {
+                    key: public.clone(),
+                    not_after: now - Duration::from_secs(1),
+                },
+            );
+        }
+
+        for i in 0..(CERT_CACHE_MAX_ENTRIES + 4) {
+            cache_verified_key(
+                &format!("https://s3.amazonaws.com/echo.api/cert.pem?v={i}"),
+                public.clone(),
+                now + Duration::from_secs(3600 + i as u64),
+            )
+            .await;
+        }
+
+        let mut cache = cert_cache().lock().await;
+        assert_eq!(cache.len(), CERT_CACHE_MAX_ENTRIES);
+        assert!(!cache.contains_key("expired"));
+        assert!(cache.contains_key(&format!(
+            "https://s3.amazonaws.com/echo.api/cert.pem?v={}",
+            CERT_CACHE_MAX_ENTRIES + 3
+        )));
+        cache.clear();
     }
 
     #[test]
