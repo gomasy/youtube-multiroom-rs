@@ -373,8 +373,10 @@ Audio extraction is handled via WebSocket to avoid reverse proxy read timeouts.
 The client sends `{ "type": "extract_audio", "url": "..." }` and receives `extract_audio_result`, `extract_audio_error`, or `extract_audio_cancelled`; a playlist URL instead answers with `playlist_import_result` (`name`, `total`) once the background import has started.
 The client can also send `{ "type": "cancel_downloads" }`, `{ "type": "set_playback_mode", "mode": "off" | "loop" | "shuffle" }`, `{ "type": "set_active_playlist", "playlist": "<id>" | null }`, `{ "type": "set_sleep_timer", "minutes": <number> | null }` (null or 0 cancels), and `{ "type": "ping" }` (answered with `pong`).
 
-On connect, the server sends an `init` message containing the current device map, playback mode, in-progress downloads, playlists, active playlist, and sleep timer expiry
-(the track list is fetched separately via `GET /api/tracks`).
+On connect, the server sends an `init` message containing the server version, the current device map, playback mode, in-progress downloads, playlists, active playlist, sleep timer expiry, and `tracks_rev`
+(the track list itself is fetched separately via `GET /api/tracks`; `tracks_rev` is what tells a client whether the page it already fetched is still current — see the API Reference).
+
+A client that falls behind the broadcast channel is re-sent the whole `init` frame followed by a `tracks_update`, so a dropped message resyncs it rather than leaving it silently stale.
 
 The client keeps the connection alive with a `ping` every 30 s and reconnects on its own when the socket drops, backing off from 1 s and doubling per consecutive failure up to 30 s, so a server that stays down is not hammered by every open tab. A frame that fails to parse is logged and skipped rather than tearing down the connection.
 
@@ -451,8 +453,10 @@ sudo systemctl enable --now yt-multiroom
 `GET /api/tracks` accepts `page` (default 1), `per_page` (default 10, max 100), and `q` (case-insensitive substring filter on title and channel) query parameters and returns:
 
 ```json
-{ "tracks": [ ... ], "total": 42, "page": 1, "per_page": 10 }
+{ "tracks": [ ... ], "total": 42, "page": 1, "per_page": 10, "rev": 7 }
 ```
+
+`rev` is the track-list revision the page was served at, sampled before the read so a change landing mid-assembly reports as a newer revision rather than being hidden by the page that went out. A client that fetched a page before its WebSocket existed compares it with `tracks_rev` in the `init` frame: equal means nothing happened in that gap and the page it already holds is current. The counter is in-process, so it restarts at 0 — clients treat every reconnect as a change regardless.
 
 `POST /api/tracks/reorder` moves a track to a zero-based position in the overall library order (out-of-range indexes are clamped to the end):
 
