@@ -192,6 +192,8 @@ async fn handle_ws_message(
 /// Kick off a download for the requested URL. Downloads can take minutes, so
 /// the work runs on its own task and reports back over client_tx; the select
 /// loop must stay free to service broadcasts and further commands meanwhile.
+/// The client is not left holding anything either: the work puts itself on
+/// display as soon as it is accepted, so the reply below is only the outcome.
 async fn start_extract(
     state: &Arc<AppState>,
     client_tx: &UnboundedSender<String>,
@@ -213,28 +215,26 @@ async fn start_extract(
     let url = url.to_string();
     tokio::spawn(async move {
         // Playlist URLs are expanded and trigger a batch import.
-        let result = match classify_url(&url) {
-            UrlKind::Video => match state.extract_audio(&url, &cancel).await {
-                Ok(track) => {
-                    state.broadcast_tracks();
-                    json!({ "type": "extract_audio_result", "track": track })
-                }
-                Err(DownloadError::Cancelled) => json!({ "type": "extract_audio_cancelled" }),
-                Err(e) => json!({ "type": "extract_audio_error", "error": e.to_string() }),
-            },
-            UrlKind::Playlist(list_id) => match state.import_playlist(&list_id, &cancel).await {
-                Ok(info) => json!({
-                    "type": "playlist_import_result",
-                    "name": info.name,
-                    "total": info.total,
-                }),
-                Err(DownloadError::Cancelled) => json!({ "type": "extract_audio_cancelled" }),
-                Err(e) => json!({ "type": "extract_audio_error", "error": e.to_string() }),
-            },
-            UrlKind::Unknown => json!({
-                "type": "extract_audio_error",
-                "error": "Could not recognize YouTube URL",
+        let outcome: Result<Value, DownloadError> = match classify_url(&url) {
+            UrlKind::Video => state.extract_audio(&url, &cancel).await.map(|track| {
+                state.broadcast_tracks();
+                json!({ "type": "extract_audio_result", "track": track })
             }),
+            UrlKind::Playlist(list_id) => {
+                state.import_playlist(&list_id, &cancel).await.map(|info| {
+                    json!({
+                        "type": "playlist_import_result",
+                        "name": info.name,
+                        "total": info.total,
+                    })
+                })
+            }
+            UrlKind::Unknown => Err("Could not recognize YouTube URL".into()),
+        };
+        let result = match outcome {
+            Ok(result) => result,
+            Err(DownloadError::Cancelled) => json!({ "type": "extract_audio_cancelled" }),
+            Err(e) => json!({ "type": "extract_audio_error", "error": e.to_string() }),
         };
         let _ = tx.send(result.to_string());
     });
