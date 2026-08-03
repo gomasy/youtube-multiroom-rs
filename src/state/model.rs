@@ -152,6 +152,27 @@ pub enum ReorderOutcome {
     Failed,
 }
 
+/// The outcome of a write that appends to something the client named: a
+/// device's pending slot, its Up Next queue, a playlist's track list. All three
+/// are guarded by a Redis script that checks the target still exists, and all
+/// three callers need the same distinction — a target that is gone is a 404 and
+/// a skipped entry in a fan-out, whereas a write that failed is our fault.
+///
+/// A named outcome rather than `Result<bool, _>` because the interesting case is
+/// which of three things happened, not success versus failure: `Ok(false)`
+/// carried the "target is gone" meaning only by convention, and every call site
+/// had to restate it in a comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteOutcome {
+    /// The write landed.
+    Written,
+    /// The target is no longer registered, so there was nothing to write to.
+    Gone,
+    /// The write itself failed. What went wrong is logged where it happened —
+    /// no caller has anything better to do with the detail than report a 500.
+    Failed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceState {
     pub device_id: String,

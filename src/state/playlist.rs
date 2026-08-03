@@ -2,7 +2,7 @@
 //! playlist into a local one.
 
 use super::job::{VideoJob, Visited};
-use super::model::{AudioTrack, Playlist, PlaylistImportInfo, PlaylistJson};
+use super::model::{AudioTrack, Playlist, PlaylistImportInfo, PlaylistJson, WriteOutcome};
 use super::progress::playlist_progress_key;
 use super::url::{is_video_id, watch_url};
 use super::warn_redis;
@@ -166,28 +166,28 @@ impl AppState {
     }
 
     /// Append a track to the end of an existing playlist (moves to end if
-    /// already present). Returns false if the playlist no longer exists: the
-    /// existence check and the list mutation are atomic, so a slow background
-    /// import cannot recreate a playlist that was deleted meanwhile.
-    pub async fn add_playlist_track(
-        &self,
-        playlist_id: &str,
-        track_id: &str,
-    ) -> redis::RedisResult<bool> {
+    /// already present). [`WriteOutcome::Gone`] means the playlist no longer
+    /// exists: the existence check and the list mutation are atomic, so a slow
+    /// background import cannot recreate a playlist that was deleted meanwhile.
+    pub async fn add_playlist_track(&self, playlist_id: &str, track_id: &str) -> WriteOutcome {
         // Serialized with reorder's read-then-replace to prevent interleaving.
         let _guard = self.order_lock.lock().await;
         let mut conn = self.redis.clone();
-        ADD_PLAYLIST_TRACK_SCRIPT
+        match ADD_PLAYLIST_TRACK_SCRIPT
             .key(REDIS_KEY_PLAYLISTS)
             .key(playlist_key(playlist_id))
             .arg(playlist_id)
             .arg(track_id)
             .invoke_async::<i64>(&mut conn)
             .await
-            .map(|added| added == 1)
-            .inspect_err(|e| {
+        {
+            Ok(1) => WriteOutcome::Written,
+            Ok(_) => WriteOutcome::Gone,
+            Err(e) => {
                 tracing::warn!("Redis error adding track to playlist {playlist_id}: {e}");
-            })
+                WriteOutcome::Failed
+            }
+        }
     }
 
     /// Remove a track from a playlist. Returns false if not found.
@@ -433,7 +433,7 @@ impl AppState {
             job.run(&video_ids, cancel, |video_id| async move {
                 let track = state.extract_audio(&watch_url(&video_id), cancel).await?;
                 match state.add_playlist_track(&playlist.id, &track.id).await {
-                    Ok(true) => {
+                    WriteOutcome::Written => {
                         // Reflect each successfully imported track in the lists
                         state.broadcast_tracks();
                         state.broadcast_playlists().await;
@@ -441,10 +441,12 @@ impl AppState {
                     }
                     // The playlist this import exists to fill is gone, so
                     // there is nowhere left to put the remaining videos.
-                    Ok(false) => Ok(Visited::Stop("the playlist was deleted".to_string())),
-                    Err(e) => {
+                    WriteOutcome::Gone => Ok(Visited::Stop("the playlist was deleted".to_string())),
+                    // The Redis error itself is already logged; name the video
+                    // it cost, which is all this layer knows and the log does not.
+                    WriteOutcome::Failed => {
                         tracing::warn!(
-                            "Playlist import '{}': failed to add {video_id}: {e}",
+                            "Playlist import '{}': failed to add {video_id}",
                             playlist.name
                         );
                         Ok(Visited::Skipped)

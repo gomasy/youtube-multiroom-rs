@@ -3,7 +3,7 @@
 //! applied the next time the device connects (see crate::alexa).
 
 use super::{AppError, AppResult, client_locale, device_or_404, track_or_404};
-use crate::state::{AppState, AudioTrack, DeviceUpdate, PlayRequest, SeekRequest};
+use crate::state::{AppState, AudioTrack, DeviceUpdate, PlayRequest, SeekRequest, WriteOutcome};
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::response::Json;
@@ -67,10 +67,10 @@ async fn queue_on_devices(
     let mut write_failed = false;
     for did in device_ids {
         match state.queue_play(&did, track.clone(), 0).await {
-            Ok(true) => queued.push(did),
+            WriteOutcome::Written => queued.push(did),
             // Unregistered device (deleted since the client last refreshed)
-            Ok(false) => {}
-            Err(()) => write_failed = true,
+            WriteOutcome::Gone => {}
+            WriteOutcome::Failed => write_failed = true,
         }
     }
     if queued.is_empty() {
@@ -101,10 +101,10 @@ pub async fn queue_next(
     let mut write_failed = false;
     for did in &req.device_ids {
         match state.push_queue(did, &track.id).await {
-            Ok(true) => queued.push(did.clone()),
+            WriteOutcome::Written => queued.push(did.clone()),
             // Unregistered device (deleted since the client last refreshed)
-            Ok(false) => {}
-            Err(_) => write_failed = true,
+            WriteOutcome::Gone => {}
+            WriteOutcome::Failed => write_failed = true,
         }
     }
     if queued.is_empty() {
@@ -179,9 +179,9 @@ pub async fn seek_device(
     let max_ms = track.duration.saturating_mul(1000).saturating_sub(1000);
     let position_ms = req.position_ms.min(max_ms);
     match state.queue_play(&device_id, track, position_ms).await {
-        Ok(true) => {}
-        Ok(false) => return Err(AppError::not_found("Device not found")),
-        Err(()) => return Err(AppError::internal("Failed to queue seek")),
+        WriteOutcome::Written => {}
+        WriteOutcome::Gone => return Err(AppError::not_found("Device not found")),
+        WriteOutcome::Failed => return Err(AppError::internal("Failed to queue seek")),
     }
     state.broadcast_devices().await;
 

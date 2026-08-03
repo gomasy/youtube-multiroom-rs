@@ -1,7 +1,9 @@
 //! Per-device state: what each Echo is playing, the command waiting for it to
 //! connect, and its Up Next queue.
 
-use super::model::{AudioTrack, DeviceJson, DeviceState, DeviceUpdate, PendingCommand, QueueItem};
+use super::model::{
+    AudioTrack, DeviceJson, DeviceState, DeviceUpdate, PendingCommand, QueueItem, WriteOutcome,
+};
 use super::warn_redis;
 use super::{
     AppState, REDIS_KEY_DEVICES, new_token, now_f64, pending_key, queue_key, token_track_id,
@@ -245,12 +247,12 @@ impl AppState {
 
     // ── Pending command ──
 
-    /// Queue playback for a device. `Ok(false)` means the device is not
-    /// registered: the existence check and the pending write happen in one
+    /// Queue playback for a device. [`WriteOutcome::Gone`] means the device is
+    /// not registered: the existence check and the pending write happen in one
     /// Redis script, so a stale client targeting a deleted device cannot leave
     /// an orphan pending key behind.
     ///
-    /// The failure carries no detail because there is nothing a caller could do
+    /// A failure carries no detail because there is nothing a caller could do
     /// with it — what went wrong is logged here, at the point that knows it, the
     /// way every other write in this module reports its own errors.
     pub async fn queue_play(
@@ -258,17 +260,21 @@ impl AppState {
         device_id: &str,
         track: AudioTrack,
         offset_ms: u64,
-    ) -> Result<bool, ()> {
+    ) -> WriteOutcome {
         let cmd = PendingCommand {
             action: "play".to_string(),
             track: track.clone(),
             offset_ms,
         };
-        let json_str = serde_json::to_string(&cmd).map_err(|e| {
-            tracing::warn!("Failed to serialize pending command for {device_id}: {e}");
-        })?;
+        let json_str = match serde_json::to_string(&cmd) {
+            Ok(json) => json,
+            Err(e) => {
+                tracing::warn!("Failed to serialize pending command for {device_id}: {e}");
+                return WriteOutcome::Failed;
+            }
+        };
         let mut conn = self.redis.clone();
-        let queued: i64 = QUEUE_PLAY_SCRIPT
+        let queued: i64 = match QUEUE_PLAY_SCRIPT
             .key(REDIS_KEY_DEVICES)
             .key(pending_key(device_id))
             .arg(device_id)
@@ -276,11 +282,15 @@ impl AppState {
             .arg(PENDING_TTL_SECS)
             .invoke_async(&mut conn)
             .await
-            .map_err(|e| {
+        {
+            Ok(queued) => queued,
+            Err(e) => {
                 tracing::warn!("Redis error queueing play for {device_id}: {e}");
-            })?;
+                return WriteOutcome::Failed;
+            }
+        };
         if queued == 0 {
-            return Ok(false);
+            return WriteOutcome::Gone;
         }
 
         // Explicit play command from the web UI — reset consecutive failure
@@ -295,7 +305,7 @@ impl AppState {
                 .position(offset_ms),
         )
         .await;
-        Ok(true)
+        WriteOutcome::Written
     }
 
     /// Consume a queued command (atomic get+delete via GETDEL; expiry is handled by Redis TTL).
@@ -325,22 +335,26 @@ impl AppState {
 
     // ── Up Next queue ──
 
-    /// Append a track to the device's Up Next queue. `Ok(false)` means the
-    /// device is not registered; the check and the append share one script, so
-    /// a stale client cannot leave an orphaned queue behind. The Redis error is
-    /// passed through so callers can tell a write failure from a rejected
-    /// request.
-    pub async fn push_queue(&self, device_id: &str, track_id: &str) -> redis::RedisResult<bool> {
+    /// Append a track to the device's Up Next queue. [`WriteOutcome::Gone`]
+    /// means the device is not registered; the check and the append share one
+    /// script, so a stale client cannot leave an orphaned queue behind.
+    pub async fn push_queue(&self, device_id: &str, track_id: &str) -> WriteOutcome {
         let mut conn = self.redis.clone();
-        PUSH_QUEUE_SCRIPT
+        match PUSH_QUEUE_SCRIPT
             .key(REDIS_KEY_DEVICES)
             .key(queue_key(device_id))
             .arg(device_id)
             .arg(new_token(track_id))
             .invoke_async::<i64>(&mut conn)
             .await
-            .map(|pushed| pushed == 1)
-            .inspect_err(|e| tracing::warn!("Redis error pushing queue for {device_id}: {e}"))
+        {
+            Ok(1) => WriteOutcome::Written,
+            Ok(_) => WriteOutcome::Gone,
+            Err(e) => {
+                tracing::warn!("Redis error pushing queue for {device_id}: {e}");
+                WriteOutcome::Failed
+            }
+        }
     }
 
     /// Peek at the front of the queue as (entry, track) without consuming.

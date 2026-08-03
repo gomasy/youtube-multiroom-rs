@@ -1,7 +1,7 @@
 //! Named playlists: their lifecycle, and which tracks belong to them.
 
 use super::{AppError, AppResult, TrackIdsRequest, client_locale, playlist_or_404, track_or_404};
-use crate::state::AppState;
+use crate::state::{AppState, WriteOutcome};
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::response::Json;
@@ -84,9 +84,11 @@ pub async fn add_playlist_track(
     playlist_or_404(&state, &playlist_id).await?;
     let track = track_or_404(&state, &req.track_id).await?;
     match state.add_playlist_track(&playlist_id, &track.id).await {
-        Ok(true) => {}
-        Ok(false) => return Err(AppError::not_found("Playlist not found")),
-        Err(_) => return Err(AppError::internal("Failed to add track to playlist")),
+        WriteOutcome::Written => {}
+        WriteOutcome::Gone => return Err(AppError::not_found("Playlist not found")),
+        WriteOutcome::Failed => {
+            return Err(AppError::internal("Failed to add track to playlist"));
+        }
     }
     state.broadcast_playlists().await;
     // Notify clients viewing this playlist to refresh their track list
@@ -133,14 +135,14 @@ pub async fn bulk_add_playlist_tracks(
             continue;
         }
         match state.add_playlist_track(&playlist_id, id).await {
-            Ok(true) => added += 1,
+            WriteOutcome::Written => added += 1,
             // Deleted mid-request: stop instead of appending to a playlist
             // nobody can see any more.
-            Ok(false) => {
+            WriteOutcome::Gone => {
                 failure = Some(AppError::not_found("Playlist not found"));
                 break;
             }
-            Err(_) => {
+            WriteOutcome::Failed => {
                 failure = Some(AppError::internal("Failed to add tracks to playlist"));
                 break;
             }
