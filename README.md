@@ -230,7 +230,7 @@ The Web UI ships a web app manifest and icons, so it can be installed to the hom
 ## Usage
 
 1. Open `http://localhost:8888`
-2. Paste a YouTube URL (auto-extracts on paste), or type keywords and press 検索 to search YouTube and pick a result. Pasting a playlist URL (`playlist?list=...`) bulk-imports its videos (see Playlists below)
+2. Paste a YouTube URL (auto-extracts on paste), or type keywords and press 検索 to search YouTube and pick a result. Pasting a playlist URL (`playlist?list=...`) bulk-imports its videos (see Playlists below). The box clears as soon as the request is sent, so URLs can be queued back to back and results picked one after another without waiting — every accepted request shows up in the progress list below the box, which lives on the server and therefore survives a reload (see Download Progress)
 3. Say to your Echo: **「アレクサ、YouTube プレーヤーを開いて」**
 4. Select devices in the Web UI and click play
 5. Say to each Echo again: **「アレクサ、YouTube プレーヤーを開いて」** to start playback
@@ -307,7 +307,9 @@ If the track metadata hash is ever lost (e.g. Redis was wiped), the next `GET /a
 
 ### Download Progress
 
-Download progress is tracked server-side in memory and broadcast to all WebSocket clients via `downloads_update` messages. This means every connected browser (including tabs opened after a download started) sees the same real-time progress. The progress goes through four stages: `metadata` (resolving title and format), `downloading` (with a percentage), `processing` (yt-dlp post-processing / m4a conversion), and on failure `error` (displayed for 60 seconds then cleared). Progress is not persisted to Redis — it resets on server restart. 「すべて停止」 terminates the active yt-dlp process groups (including ffmpeg descendants) and removes their staging directories; completed cache files and downloads started after the cancellation are left intact.
+Download progress is tracked server-side in memory and broadcast to all WebSocket clients via `downloads_update` messages. This means every connected browser (including tabs opened after a download started) sees the same real-time progress. The progress goes through four stages: `metadata` (resolving title and format), `downloading` (with a percentage), `processing` (yt-dlp post-processing / m4a conversion), and on failure `error` (displayed for 60 seconds then cleared).
+
+An entry is opened as soon as the job is known — before it queues behind another request for the same video, before the cache lookup, and for a playlist import before it has expanded — not when yt-dlp starts. That is what makes a request the user has sent outlive the reload of the client that sent it. Until a title is known the entry shows the bare ID; a playlist import that is still expanding is reported with `kind: "playlist"` (labelled 「プレイリスト」 in the Web UI) and namespaced apart from the video IDs. An entry belongs to the job that opened it: a second request for a video already on display gets no entry of its own and never resets the first one's progress, and a job only ever settles the entry it opened. Progress is not persisted to Redis — it resets on server restart. 「すべて停止」 terminates the active yt-dlp process groups (including ffmpeg descendants) and removes their staging directories; completed cache files and downloads started after the cancellation are left intact.
 
 Each download attempt writes into its own directory under `audio_cache/.downloads/`, so partial and post-processing files are never visible to the cache scanner or the stream endpoint. A finished file is published into `audio_cache/` with a hard link, which is atomic and refuses to overwrite an existing entry — a download that completes alongside a cached copy can never truncate what is being served. The whole staging root is discarded at startup, cleaning up after a crash or a hard kill.
 
@@ -371,6 +373,7 @@ The Now Playing card has a small preview player to check a track in the browser 
 
 Audio extraction is handled via WebSocket to avoid reverse proxy read timeouts.
 The client sends `{ "type": "extract_audio", "url": "..." }` and receives `extract_audio_result`, `extract_audio_error`, or `extract_audio_cancelled`; a playlist URL instead answers with `playlist_import_result` (`name`, `total`) once the background import has started.
+Each request runs on its own task and is answered exactly once, so several can be in flight on one socket (two requests for the same video are serialized server-side, and the second one gets the first one's result from the cache).
 The client can also send `{ "type": "cancel_downloads" }`, `{ "type": "set_playback_mode", "mode": "off" | "loop" | "shuffle" }`, `{ "type": "set_active_playlist", "playlist": "<id>" | null }`, `{ "type": "set_sleep_timer", "minutes": <number> | null }` (null or 0 cancels), and `{ "type": "ping" }` (answered with `pong`).
 
 On connect, the server sends an `init` message containing the server version, the current device map, playback mode, in-progress downloads, playlists, active playlist, sleep timer expiry, and `tracks_rev`
