@@ -42,18 +42,47 @@ pub async fn play_on_all(
     queue_on_devices(&state, track, device_ids, &locale).await
 }
 
-/// The error for a fan-out that reached no device at all. A device that exists
-/// but could not be written to is our fault, not a malformed request, so the two
-/// are reported with different statuses.
+/// Apply a per-device write to every target, returning the devices it reached.
+///
+/// A device the client named but that is no longer registered is skipped rather
+/// than failing the request: the client's list is a snapshot, and one stale
+/// entry must not cost the user the devices that are still there. Reaching none
+/// at all is the error, and which error depends on why — a device that exists
+/// but could not be written to is our fault, not a malformed request.
 ///
 /// `failed` carries no Redis detail: the write that failed already logged its
 /// own error, and repeating it to the client only exposes internals.
-fn no_devices_reached(write_failed: bool, failed: &'static str) -> AppError {
-    if write_failed {
-        AppError::internal(failed)
-    } else {
-        AppError::bad_request("No valid devices")
+///
+/// The ID is handed over owned for the reason [`crate::state`]'s `VideoJob::run`
+/// documents: a `write` that borrowed it would make the returned future
+/// higher-ranked, which is enough to stop axum from proving the handler `Send`.
+/// One `String` clone per device is not a cost worth contorting the signature for.
+async fn reach_devices<F, Fut>(
+    device_ids: Vec<String>,
+    failed: &'static str,
+    write: F,
+) -> AppResult<Vec<String>>
+where
+    F: Fn(String) -> Fut,
+    Fut: Future<Output = WriteOutcome>,
+{
+    let mut reached = Vec::new();
+    let mut write_failed = false;
+    for did in device_ids {
+        match write(did.clone()).await {
+            WriteOutcome::Written => reached.push(did),
+            WriteOutcome::Gone => {}
+            WriteOutcome::Failed => write_failed = true,
+        }
     }
+    if reached.is_empty() {
+        return Err(if write_failed {
+            AppError::internal(failed)
+        } else {
+            AppError::bad_request("No valid devices")
+        });
+    }
+    Ok(reached)
 }
 
 /// Queue a track for playback on each device's pending slot and broadcast state.
@@ -63,19 +92,11 @@ async fn queue_on_devices(
     device_ids: Vec<String>,
     locale: &str,
 ) -> AppResult<Json<Value>> {
-    let mut queued = Vec::new();
-    let mut write_failed = false;
-    for did in device_ids {
-        match state.queue_play(&did, track.clone(), 0).await {
-            WriteOutcome::Written => queued.push(did),
-            // Unregistered device (deleted since the client last refreshed)
-            WriteOutcome::Gone => {}
-            WriteOutcome::Failed => write_failed = true,
-        }
-    }
-    if queued.is_empty() {
-        return Err(no_devices_reached(write_failed, "Failed to queue playback"));
-    }
+    let queued = reach_devices(device_ids, "Failed to queue playback", |did| {
+        let track = track.clone();
+        async move { state.queue_play(&did, track, 0).await }
+    })
+    .await?;
 
     state.broadcast_devices().await;
 
@@ -97,19 +118,13 @@ pub async fn queue_next(
 ) -> AppResult<Json<Value>> {
     let locale = client_locale(&headers);
     let track = track_or_404(&state, &req.track_id).await?;
-    let mut queued = Vec::new();
-    let mut write_failed = false;
-    for did in &req.device_ids {
-        match state.push_queue(did, &track.id).await {
-            WriteOutcome::Written => queued.push(did.clone()),
-            // Unregistered device (deleted since the client last refreshed)
-            WriteOutcome::Gone => {}
-            WriteOutcome::Failed => write_failed = true,
-        }
-    }
-    if queued.is_empty() {
-        return Err(no_devices_reached(write_failed, "Failed to queue track"));
-    }
+    // Lent to the closure rather than moved: `reach_devices` calls it once per
+    // device, so it has to stay callable, and both are needed again below.
+    let (state, track) = (&state, &track);
+    let queued = reach_devices(req.device_ids, "Failed to queue track", |did| async move {
+        state.push_queue(&did, &track.id).await
+    })
+    .await?;
     state.broadcast_devices().await;
 
     Ok(Json(json!({
