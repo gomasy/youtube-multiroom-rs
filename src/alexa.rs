@@ -31,6 +31,32 @@ impl ReqCtx<'_> {
     }
 }
 
+/// A track chosen to play next, with everything the directive for it needs.
+///
+/// The three travel together through every selection path — pending command,
+/// Up Next queue, playback-mode auto-selection — and the token is not derivable
+/// from the track: a queue-sourced play uses the queue entry itself so
+/// PlaybackStarted can consume it by value, and auto-continuation carries a
+/// marker that PlaybackStarted checks the playback mode against.
+struct NextUp {
+    track: AudioTrack,
+    offset_ms: u64,
+    token: String,
+}
+
+impl NextUp {
+    /// A play of `track` from the start under a freshly minted token — what
+    /// every path that is not resuming a position or consuming a queue entry
+    /// wants.
+    fn fresh(track: AudioTrack) -> Self {
+        Self {
+            token: new_token(&track.id),
+            track,
+            offset_ms: 0,
+        }
+    }
+}
+
 /// Process an Alexa skill request and return a response JSON.
 pub async fn handle_alexa(state: &Arc<AppState>, body: Value, base_url: &str) -> Value {
     let req_type = body["request"]["type"].as_str().unwrap_or("");
@@ -120,8 +146,12 @@ async fn start_pending_or_queue(ctx: &ReqCtx<'_>) -> Option<Value> {
         && cmd.action == "play"
     {
         tracing::info!("Auto-playing queued track on {}", ctx.log_id());
-        let token = new_token(&cmd.track.id);
-        return Some(play_directive(ctx, &cmd.track, cmd.offset_ms, token).await);
+        let next = NextUp {
+            token: new_token(&cmd.track.id),
+            track: cmd.track,
+            offset_ms: cmd.offset_ms,
+        };
+        return Some(play_directive(ctx, &next).await);
     }
 
     let in_progress = ctx
@@ -131,7 +161,12 @@ async fn start_pending_or_queue(ctx: &ReqCtx<'_>) -> Option<Value> {
         .is_some_and(|d| d.playback_in_progress());
     if !in_progress && let Some((entry, track)) = ctx.state.peek_queue(&ctx.device_id).await {
         tracing::info!("Starting next-up track on {}", ctx.log_id());
-        return Some(play_directive(ctx, &track, 0, entry).await);
+        let next = NextUp {
+            track,
+            offset_ms: 0,
+            token: entry,
+        };
+        return Some(play_directive(ctx, &next).await);
     }
     None
 }
@@ -179,8 +214,12 @@ async fn resume_playback(ctx: &ReqCtx<'_>) -> Value {
         // Reset failure counter on explicit resume so a track that was in
         // error state doesn't immediately error again
         ctx.state.clear_playback_failures(&ctx.device_id).await;
-        let token = new_token(&track.id);
-        return play_directive(ctx, &track, dev.position_ms, token).await;
+        let next = NextUp {
+            token: new_token(&track.id),
+            track,
+            offset_ms: dev.position_ms,
+        };
+        return play_directive(ctx, &next).await;
     }
     no_track_response(ctx.can_speak, &t!("alexa_no_track", locale = &ctx.locale))
 }
@@ -199,15 +238,12 @@ async fn skip_next(ctx: &ReqCtx<'_>, body: &Value) -> Value {
             .state
             .skip_next_track(token_track_id(&current_token))
             .await
-            .map(|track| {
-                let token = new_token(&track.id);
-                (track, 0, token)
-            }),
+            .map(NextUp::fresh),
         // Cannot confirm queue state; stay on current track to be safe
         Err(()) => None,
     };
     match next {
-        Some((track, offset_ms, token)) => play_directive(ctx, &track, offset_ms, token).await,
+        Some(next) => play_directive(ctx, &next).await,
         None => no_track_response(ctx.can_speak, &t!("alexa_no_next", locale = &ctx.locale)),
     }
 }
@@ -222,10 +258,7 @@ async fn skip_prev(ctx: &ReqCtx<'_>, body: &Value) -> Value {
         .skip_prev_track(token_track_id(&current_token))
         .await
     {
-        Some(track) => {
-            let token = new_token(&track.id);
-            play_directive(ctx, &track, 0, token).await
-        }
+        Some(track) => play_directive(ctx, &NextUp::fresh(track)).await,
         None => no_track_response(ctx.can_speak, &t!("alexa_no_prev", locale = &ctx.locale)),
     }
 }
@@ -311,14 +344,13 @@ async fn on_audio_event(ctx: &ReqCtx<'_>, event_type: &str, body: &Value) -> Val
             // Don't consume pending here (PlaybackStarted handles that).
             // ENQUEUE being discarded won't lose the track, and replayed events
             // produce the same result.
-            let next = queued_or_auto_next(ctx, token, true).await;
-            if let Some((track, offset_ms, next_token)) = next {
+            if let Some(next) = queued_or_auto_next(ctx, token, true).await {
                 tracing::info!(
                     "Enqueueing next track '{}' on {}",
-                    track.title,
+                    next.track.title,
                     ctx.log_id()
                 );
-                return play_response(ctx, &track, offset_ms, Some(token), next_token);
+                return play_response(ctx, &next, Some(token));
             }
         }
         "AudioPlayer.PlaybackFailed" => {
@@ -345,10 +377,11 @@ async fn on_audio_event(ctx: &ReqCtx<'_>, event_type: &str, body: &Value) -> Val
                 // causing a failure chain). Pending (explicit web commands) are tried
                 // once (if it fails, pending remains and the same-track exclusion
                 // stops infinite retry).
-                let next = queued_or_auto_next(ctx, token, false).await;
-                if let Some((next, offset_ms, next_token)) = next.filter(|(t, ..)| t.id != track_id)
+                if let Some(next) = queued_or_auto_next(ctx, token, false)
+                    .await
+                    .filter(|next| next.track.id != track_id)
                 {
-                    return play_directive(ctx, &next, offset_ms, next_token).await;
+                    return play_directive(ctx, &next).await;
                 }
             } else {
                 // Retry a few times for transient failures (network drops, etc.).
@@ -371,16 +404,14 @@ async fn on_audio_event(ctx: &ReqCtx<'_>, event_type: &str, body: &Value) -> Val
 // ── Helpers ──
 
 /// Determine the next track to play from: pending command → "next up" queue →
-/// playback mode auto-selection. Returns (track, offset_ms, AudioPlayer token).
-/// Queue-sourced playback uses the entry itself as the token so PlaybackStarted/
-/// PlaybackFailed can consume it by value match.
+/// playback mode auto-selection.
 /// When allow_live_auto is false, auto-selected live streams are excluded
 /// (pending and queue items are explicit user choices and are not filtered).
 async fn queued_or_auto_next(
     ctx: &ReqCtx<'_>,
     current_token: &str,
     allow_live_auto: bool,
-) -> Option<(AudioTrack, u64, String)> {
+) -> Option<NextUp> {
     match pending_or_queue_next(ctx, current_token).await {
         Ok(Some(next)) => return Some(next),
         Ok(None) => {}
@@ -392,9 +423,10 @@ async fn queued_or_auto_next(
         .auto_next_track(token_track_id(current_token))
         .await
         .filter(|t| allow_live_auto || !t.is_live)
-        .map(|t| {
-            let token = auto_token(&t.id);
-            (t, 0, token)
+        .map(|track| NextUp {
+            token: auto_token(&track.id),
+            track,
+            offset_ms: 0,
         })
 }
 
@@ -405,12 +437,15 @@ async fn queued_or_auto_next(
 async fn pending_or_queue_next(
     ctx: &ReqCtx<'_>,
     current_token: &str,
-) -> Result<Option<(AudioTrack, u64, String)>, ()> {
+) -> Result<Option<NextUp>, ()> {
     if let Some(cmd) = ctx.state.peek_pending(&ctx.device_id).await
         && cmd.action == "play"
     {
-        let token = new_token(&cmd.track.id);
-        return Ok(Some((cmd.track, cmd.offset_ms, token)));
+        return Ok(Some(NextUp {
+            token: new_token(&cmd.track.id),
+            track: cmd.track,
+            offset_ms: cmd.offset_ms,
+        }));
     }
 
     // If the currently playing track's entry is still at the head (e.g.,
@@ -423,7 +458,13 @@ async fn pending_or_queue_next(
             }
             continue;
         }
-        return Ok(Some((track, 0, entry)));
+        // Queue-sourced playback uses the entry itself as the token so
+        // PlaybackStarted / PlaybackFailed can consume it by value match.
+        return Ok(Some(NextUp {
+            track,
+            offset_ms: 0,
+            token: entry,
+        }));
     }
     Ok(None)
 }
@@ -510,25 +551,23 @@ async fn retry_playback(
     // Carry forward the auto-continuation marker only if playback hasn't
     // progressed yet. Resuming a partially-played track is not a new
     // auto-continuation, so don't stop it if the mode was switched to "off"
-    let retry_token = if is_auto_token(token) && offset_ms == 0 {
-        auto_token(&track.id)
-    } else {
-        new_token(&track.id)
+    let retry = NextUp {
+        token: if is_auto_token(token) && offset_ms == 0 {
+            auto_token(&track.id)
+        } else {
+            new_token(&track.id)
+        },
+        track,
+        offset_ms,
     };
 
     // If another track is currently playing and the ENQUEUE'd next track
     // failed, retry as ENQUEUE to avoid interrupting the current track
     if !failed_current {
         let current = cps["token"].as_str()?;
-        return Some(play_response(
-            ctx,
-            &track,
-            offset_ms,
-            Some(current),
-            retry_token,
-        ));
+        return Some(play_response(ctx, &retry, Some(current)));
     }
-    Some(play_directive(ctx, &track, offset_ms, retry_token).await)
+    Some(play_directive(ctx, &retry).await)
 }
 
 /// Wrap a response body in the standard Alexa response envelope.
@@ -547,37 +586,32 @@ async fn stop_directive(ctx: &ReqCtx<'_>, status: &str) -> Value {
     }))
 }
 
-async fn play_directive(
-    ctx: &ReqCtx<'_>,
-    track: &AudioTrack,
-    offset_ms: u64,
-    token: String,
-) -> Value {
+/// Start `next` now, replacing whatever is playing, and reflect it in the
+/// device state right away rather than waiting for PlaybackStarted.
+async fn play_directive(ctx: &ReqCtx<'_>, next: &NextUp) -> Value {
     ctx.state
         .update_device(
             &ctx.device_id,
             DeviceUpdate::new()
                 .status("playing")
-                .track(track.clone())
-                .position(offset_ms),
+                .track(next.track.clone())
+                .position(next.offset_ms),
         )
         .await;
 
-    play_response(ctx, track, offset_ms, None, token)
+    play_response(ctx, next, None)
 }
 
 /// Build an AudioPlayer.Play response.
 /// If enqueue_after (the preceding token) is provided, use ENQUEUE; otherwise
-/// REPLACE_ALL. The token identifies this playback (for queue-sourced playback,
-/// it is the queue entry itself). Device state is not updated for ENQUEUE
-/// (PlaybackStarted will reflect it once playback actually starts).
-fn play_response(
-    ctx: &ReqCtx<'_>,
-    track: &AudioTrack,
-    offset_ms: u64,
-    enqueue_after: Option<&str>,
-    token: String,
-) -> Value {
+/// REPLACE_ALL. Device state is not updated for ENQUEUE (PlaybackStarted will
+/// reflect it once playback actually starts).
+fn play_response(ctx: &ReqCtx<'_>, next: &NextUp, enqueue_after: Option<&str>) -> Value {
+    let NextUp {
+        track,
+        offset_ms,
+        token,
+    } = next;
     let stream_url = format!(
         "{}{}",
         ctx.base_url,
