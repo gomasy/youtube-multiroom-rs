@@ -189,10 +189,12 @@ impl AppState {
         let mut tracks: Vec<AudioTrack> = order.iter().filter_map(|id| by_id.remove(id)).collect();
 
         let mut rest: Vec<AudioTrack> = by_id.into_values().collect();
+        // total_cmp rather than partial_cmp: it is a total order over every f64,
+        // so there is no incomparable case left to decide what to do about, and
+        // it matches how playlists() sorts by the same field.
         rest.sort_by(|a, b| {
             b.created_at
-                .partial_cmp(&a.created_at)
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .total_cmp(&a.created_at)
                 .then_with(|| a.id.cmp(&b.id))
         });
         tracks.extend(rest);
