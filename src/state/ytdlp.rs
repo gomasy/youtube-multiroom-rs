@@ -129,19 +129,18 @@ pub(crate) async fn run_yt_dlp_cancellable(
         WaitOutcome::Exited(result) => {
             result.map_err(|e| format!("Failed to wait for yt-dlp: {e}"))?
         }
-        WaitOutcome::TimedOut => {
-            stop_yt_dlp(&mut child).await;
-            // Descendant processes may inherit the pipes, so do not wait for
-            // EOF after the timed-out parent has been killed and reaped.
-            stdout_task.abort();
-            stderr_task.abort();
-            return Err("yt-dlp timed out".into());
-        }
-        WaitOutcome::Cancelled => {
+        // A timeout and a stop end the run the same way, and sharing the
+        // teardown is what keeps them from drifting apart: kill the whole
+        // process group, then abandon the pipes rather than waiting for EOF,
+        // which a descendant that inherited them can delay indefinitely.
+        stopped => {
             stop_yt_dlp(&mut child).await;
             stdout_task.abort();
             stderr_task.abort();
-            return Err(DownloadError::Cancelled);
+            return Err(match stopped {
+                WaitOutcome::TimedOut => "yt-dlp timed out".into(),
+                _ => DownloadError::Cancelled,
+            });
         }
     };
     let Some(stdout) = drain_output(stdout_task).await else {
