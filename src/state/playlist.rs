@@ -3,6 +3,7 @@
 
 use super::job::{VideoJob, Visited};
 use super::model::{AudioTrack, Playlist, PlaylistImportInfo, PlaylistJson};
+use super::progress::playlist_progress_key;
 use super::url::{is_video_id, watch_url};
 use super::warn_redis;
 use super::ytdlp::{DownloadError, run_yt_dlp_cancellable};
@@ -327,7 +328,23 @@ impl AppState {
     /// with the same name (created if absent) in the background. Returns the
     /// playlist name and item count at start. Per-video download progress is
     /// broadcast via the same downloads_update as extract_audio.
+    ///
+    /// Expanding the playlist is a yt-dlp run of its own, before there is a
+    /// single video to report progress for, so the import holds a progress
+    /// entry of its own for that stretch.
     pub async fn import_playlist(
+        self: &Arc<Self>,
+        list_id: &str,
+        cancel: &CancellationToken,
+    ) -> Result<PlaylistImportInfo, DownloadError> {
+        let key = playlist_progress_key(list_id);
+        let stamp = self.begin_progress(&key, list_id).await;
+        let result = self.expand_and_start_import(list_id, cancel).await;
+        self.settle_progress(&key, stamp, &result).await;
+        result
+    }
+
+    async fn expand_and_start_import(
         self: &Arc<Self>,
         list_id: &str,
         cancel: &CancellationToken,

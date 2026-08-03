@@ -68,12 +68,20 @@ impl AppState {
     ) -> Result<AudioTrack, DownloadError> {
         let video_id = extract_video_id(url).ok_or("Could not recognize YouTube URL")?;
 
+        // On display from here rather than from the first yt-dlp call: queuing
+        // behind another request for the same video and the cache lookup both
+        // happen before that, and a request the user has sent has to be visible
+        // for all of it.
+        let stamp = self.begin_progress(&video_id, &video_id).await;
         // Serialize concurrent requests for the same video. Subsequent callers
         // hit the cache check after acquiring the lock and return immediately.
-        self.under_extract_slot(&video_id, cancel, async |slot| {
-            self.extract_audio_locked(&video_id, slot, cancel).await
-        })
-        .await
+        let result = self
+            .under_extract_slot(&video_id, cancel, async |slot| {
+                self.extract_audio_locked(&video_id, slot, cancel).await
+            })
+            .await;
+        self.settle_progress(&video_id, stamp, &result).await;
+        result
     }
 
     /// Run `work` holding the video's extract slot, then release the slot.
@@ -170,11 +178,7 @@ impl AppState {
             }
         }
 
-        // Fetch while broadcasting progress to all clients.
-        self.begin_progress(video_id, video_id).await;
-        let result = self.fetch_and_register(video_id, slot, cancel).await;
-        self.settle_progress(video_id, &result).await;
-        result
+        self.fetch_and_register(video_id, slot, cancel).await
     }
 
     /// Fetch metadata → download (non-live) → register in Redis.
@@ -383,11 +387,11 @@ impl AppState {
 
         // Shown under its current title while the fetch runs: it is the only
         // name the user has for the track being worked on, stale or not.
-        self.begin_progress(video_id, &existing.title).await;
+        let stamp = self.begin_progress(video_id, &existing.title).await;
         let result = self
             .fetch_and_rewrite_metadata(&existing, slot, cancel)
             .await;
-        self.settle_progress(video_id, &result).await;
+        self.settle_progress(video_id, stamp, &result).await;
         result
     }
 

@@ -265,12 +265,26 @@ pub enum DownloadStatus {
     Error,
 }
 
+/// What a progress entry is tracking. Lowercase wire format must match the
+/// frontend DownloadProgress["kind"] union.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DownloadKind {
+    Video,
+    /// A playlist import that has not expanded into per-video jobs yet.
+    Playlist,
+}
+
 /// In-progress download progress. Kept in-process and broadcast to all
 /// WebSocket clients so any browser (including after a reload) can track it.
 #[derive(Debug, Clone, Serialize)]
 pub struct DownloadProgress {
+    /// Identifies the entry, not the video: a playlist import is namespaced
+    /// apart from the video IDs (see progress::playlist_progress_key).
     pub id: String,
-    /// Filled with the video ID before metadata is fetched.
+    pub kind: DownloadKind,
+    /// Filled with the video ID (a playlist import: the playlist ID) before
+    /// metadata is fetched.
     pub title: String,
     pub status: DownloadStatus,
     /// Download progress percentage (0.0–100.0).
