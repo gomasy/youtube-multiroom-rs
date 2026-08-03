@@ -279,126 +279,169 @@ async fn on_playback_controller(ctx: &ReqCtx<'_>, event_type: &str, body: &Value
 
 // ── AudioPlayer Events ──
 
+/// Everything an AudioPlayer event reports about the playback it concerns.
+/// Read once in [`on_audio_event`] and passed to whichever handler the event
+/// type selects, so no two of them can read the same field differently.
+struct AudioEvent<'a> {
+    /// The AudioPlayer token, which is also the queue entry for a
+    /// queue-sourced play (see [`NextUp`]).
+    token: &'a str,
+    /// The track the token names, whether or not it is still registered.
+    track_id: &'a str,
+    /// Playback position the event reports, in milliseconds.
+    offset: u64,
+}
+
 async fn on_audio_event(ctx: &ReqCtx<'_>, event_type: &str, body: &Value) -> Value {
-    let state = ctx.state;
-    let device_id = &ctx.device_id;
-    let offset = body["request"]["offsetInMilliseconds"]
-        .as_u64()
-        .unwrap_or(0);
     let token = body["request"]["token"].as_str().unwrap_or("");
-    let track_id = token_track_id(token);
+    let event = AudioEvent {
+        token,
+        track_id: token_track_id(token),
+        offset: body["request"]["offsetInMilliseconds"]
+            .as_u64()
+            .unwrap_or(0),
+    };
 
     match event_type {
-        "AudioPlayer.PlaybackStarted" => {
-            // If an auto-continued track (loop/shuffle ENQUEUE) has started but
-            // the mode was switched to "off" in the meantime, stop it now.
-            // NearlyFinished often fires right after playback starts, so the
-            // mode check at ENQUEUE time alone is not enough.
-            // (playback_mode_is_off errs on the side of NOT stopping on Redis errors)
-            if is_auto_token(token) && state.playback_mode_is_off().await {
-                tracing::info!(
-                    "Stopping auto-continued track on {} (playback mode is off)",
-                    ctx.log_id()
-                );
-                return stop_directive(ctx, "idle").await;
-            }
-            tracing::info!("Playback started: {}", ctx.log_id());
-            // Reflect the current track from the token and the start position
-            // (seek-based ENQUEUE may start from a non-zero offset)
-            let mut upd = DeviceUpdate::new().status("playing").position(offset);
-            if let Some(track) = state.get_track(track_id).await {
-                upd = upd.track(track);
-            }
-            state.update_device(device_id, upd).await;
-            // If the started track matches a web-queued pending command, clear it.
-            // Also compare offset to avoid clearing a newer seek command (different
-            // offset) that arrived between directive issuance and playback start.
-            if state
-                .peek_pending(device_id)
-                .await
-                .is_some_and(|cmd| cmd.track.id == track_id && cmd.offset_ms == offset)
-            {
-                state.clear_pending(device_id).await;
-            }
-            // If the started track came from the "next up" queue, remove its
-            // entry by value match (pending and auto-continuation tokens won't
-            // match any queue entry). Deferring consumption to here ensures we
-            // don't lose a track if ENQUEUE is discarded, and prevents double
-            // consumption on event replays.
-            state.remove_queue_entry(device_id, token).await;
-        }
+        "AudioPlayer.PlaybackStarted" => return on_playback_started(ctx, &event).await,
         "AudioPlayer.PlaybackFinished" => {
             // Track finished successfully; reset failure counter
-            state.clear_playback_failures(device_id).await;
-            state
-                .update_device(device_id, DeviceUpdate::new().status("idle").position(0))
-                .await;
+            ctx.state.clear_playback_failures(&ctx.device_id).await;
+            mark_idle(ctx).await;
         }
         "AudioPlayer.PlaybackStopped" => {
             // Also fires for external interruptions (e.g., another content starting).
             // Transition to "paused" to stop the client's estimated position from
             // advancing while playback is actually stopped.
-            state.pause_if_playing(device_id, offset).await;
+            ctx.state
+                .pause_if_playing(&ctx.device_id, event.offset)
+                .await;
         }
         "AudioPlayer.PlaybackNearlyFinished" => {
             // Don't consume pending here (PlaybackStarted handles that).
             // ENQUEUE being discarded won't lose the track, and replayed events
             // produce the same result.
-            if let Some(next) = queued_or_auto_next(ctx, token, true).await {
+            if let Some(next) = queued_or_auto_next(ctx, event.token, true).await {
                 tracing::info!(
                     "Enqueueing next track '{}' on {}",
                     next.track.title,
                     ctx.log_id()
                 );
-                return play_response(ctx, &next, Some(token));
+                return play_response(ctx, &next, Some(event.token));
             }
         }
-        "AudioPlayer.PlaybackFailed" => {
-            let err = &body["request"]["error"];
-            // If the failed track came from the "next up" queue, consume its
-            // entry so an unplayable item (e.g., ended live stream) doesn't block
-            // subsequent tracks
-            state.remove_queue_entry(device_id, token).await;
-            let track = state.get_track(track_id).await;
-            // Live streams become unresolvable after they end, causing PlaybackFailed.
-            // This is normal termination, not an error — advance to the next track
-            // as with PlaybackFinished.
-            if let Some(track) = track.as_ref().filter(|t| t.is_live) {
-                tracing::info!(
-                    "Live stream '{}' ended on {} ({:?})",
-                    track.title,
-                    ctx.log_id(),
-                    err
-                );
-                state
-                    .update_device(device_id, DeviceUpdate::new().status("idle").position(0))
-                    .await;
-                // Avoid auto-selecting another live stream (it may also have ended,
-                // causing a failure chain). Pending (explicit web commands) are tried
-                // once (if it fails, pending remains and the same-track exclusion
-                // stops infinite retry).
-                if let Some(next) = queued_or_auto_next(ctx, token, false)
-                    .await
-                    .filter(|next| next.track.id != track_id)
-                {
-                    return play_directive(ctx, &next).await;
-                }
-            } else {
-                // Retry a few times for transient failures (network drops, etc.).
-                // Only mark as error after exhausting retries.
-                if let Some(resp) = retry_playback(ctx, body, token, track, err).await {
-                    return resp;
-                }
-                tracing::error!("Playback failed on {}: {:?}", ctx.log_id(), err);
-                state
-                    .update_device(device_id, DeviceUpdate::new().status("error"))
-                    .await;
-            }
-        }
+        "AudioPlayer.PlaybackFailed" => return on_playback_failed(ctx, &event, body).await,
         _ => {}
     }
 
     alexa_response(json!({ "shouldEndSession": true }))
+}
+
+/// Playback of `event.token` has begun: adopt it as the device's current track
+/// and retire whatever queued it.
+async fn on_playback_started(ctx: &ReqCtx<'_>, event: &AudioEvent<'_>) -> Value {
+    let state = ctx.state;
+    let device_id = &ctx.device_id;
+
+    // If an auto-continued track (loop/shuffle ENQUEUE) has started but
+    // the mode was switched to "off" in the meantime, stop it now.
+    // NearlyFinished often fires right after playback starts, so the
+    // mode check at ENQUEUE time alone is not enough.
+    // (playback_mode_is_off errs on the side of NOT stopping on Redis errors)
+    if is_auto_token(event.token) && state.playback_mode_is_off().await {
+        tracing::info!(
+            "Stopping auto-continued track on {} (playback mode is off)",
+            ctx.log_id()
+        );
+        return stop_directive(ctx, "idle").await;
+    }
+    tracing::info!("Playback started: {}", ctx.log_id());
+    // Reflect the current track from the token and the start position
+    // (seek-based ENQUEUE may start from a non-zero offset)
+    let mut upd = DeviceUpdate::new().status("playing").position(event.offset);
+    if let Some(track) = state.get_track(event.track_id).await {
+        upd = upd.track(track);
+    }
+    state.update_device(device_id, upd).await;
+    // If the started track matches a web-queued pending command, clear it.
+    // Also compare offset to avoid clearing a newer seek command (different
+    // offset) that arrived between directive issuance and playback start.
+    if state
+        .peek_pending(device_id)
+        .await
+        .is_some_and(|cmd| cmd.track.id == event.track_id && cmd.offset_ms == event.offset)
+    {
+        state.clear_pending(device_id).await;
+    }
+    // If the started track came from the "next up" queue, remove its
+    // entry by value match (pending and auto-continuation tokens won't
+    // match any queue entry). Deferring consumption to here ensures we
+    // don't lose a track if ENQUEUE is discarded, and prevents double
+    // consumption on event replays.
+    state.remove_queue_entry(device_id, event.token).await;
+
+    alexa_response(json!({ "shouldEndSession": true }))
+}
+
+/// The device could not play `event.token`. An ended live stream is normal
+/// termination and advances like PlaybackFinished; anything else is retried a
+/// few times before the device is marked as errored.
+async fn on_playback_failed(ctx: &ReqCtx<'_>, event: &AudioEvent<'_>, body: &Value) -> Value {
+    let state = ctx.state;
+    let device_id = &ctx.device_id;
+    let err = &body["request"]["error"];
+
+    // If the failed track came from the "next up" queue, consume its
+    // entry so an unplayable item (e.g., ended live stream) doesn't block
+    // subsequent tracks
+    state.remove_queue_entry(device_id, event.token).await;
+    let track = state.get_track(event.track_id).await;
+
+    // Live streams become unresolvable after they end, causing PlaybackFailed.
+    // This is normal termination, not an error — advance to the next track
+    // as with PlaybackFinished.
+    if let Some(track) = track.as_ref().filter(|t| t.is_live) {
+        tracing::info!(
+            "Live stream '{}' ended on {} ({:?})",
+            track.title,
+            ctx.log_id(),
+            err
+        );
+        mark_idle(ctx).await;
+        // Avoid auto-selecting another live stream (it may also have ended,
+        // causing a failure chain). Pending (explicit web commands) are tried
+        // once (if it fails, pending remains and the same-track exclusion
+        // stops infinite retry).
+        if let Some(next) = queued_or_auto_next(ctx, event.token, false)
+            .await
+            .filter(|next| next.track.id != event.track_id)
+        {
+            return play_directive(ctx, &next).await;
+        }
+    } else {
+        // Retry a few times for transient failures (network drops, etc.).
+        // Only mark as error after exhausting retries.
+        if let Some(resp) = retry_playback(ctx, body, event.token, track, err).await {
+            return resp;
+        }
+        tracing::error!("Playback failed on {}: {:?}", ctx.log_id(), err);
+        state
+            .update_device(device_id, DeviceUpdate::new().status("error"))
+            .await;
+    }
+
+    alexa_response(json!({ "shouldEndSession": true }))
+}
+
+/// Park the device at the start of nothing: what both a track finishing and a
+/// live stream ending leave behind.
+async fn mark_idle(ctx: &ReqCtx<'_>) {
+    ctx.state
+        .update_device(
+            &ctx.device_id,
+            DeviceUpdate::new().status("idle").position(0),
+        )
+        .await;
 }
 
 // ── Helpers ──
