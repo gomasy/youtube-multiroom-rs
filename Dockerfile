@@ -3,7 +3,7 @@
 # renovate: datasource=docker depName=denoland/deno extractVersion=^alpine-(?<version>.+)$
 ARG DENO_VERSION=2.9.4
 
-FROM node:24.18.1-alpine AS frontend
+FROM node:24.19.0-alpine AS frontend
 WORKDIR /app/front
 COPY front/package.json front/package-lock.json ./
 RUN npm ci
