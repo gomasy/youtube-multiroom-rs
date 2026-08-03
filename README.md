@@ -60,7 +60,7 @@ youtube-multiroom-rs/
 │       ├── api.ts         # Auth-aware fetch wrapper
 │       ├── errors.ts      # Turns a rejected API call into a toast
 │       ├── format.ts      # Shared time/duration formatters
-│       ├── hooks.ts       # WebSocket hook
+│       ├── hooks.ts       # WebSocket channel & drag-to-reorder hooks
 │       ├── i18n.ts        # Frontend i18n runtime (locale detection & lookup)
 │       ├── types.ts       # Shared type definitions
 │       ├── parcel-env.d.ts # Ambient types for Parcel-specific imports

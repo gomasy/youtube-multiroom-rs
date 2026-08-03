@@ -11,10 +11,10 @@ import {
   refreshTracksMetadata,
   removeFromPlaylist,
   renamePlaylist,
-  reorderTrack,
   PER_PAGE,
 } from "../api";
 import { showApiError } from "../errors";
+import { useTrackReorder } from "../hooks";
 import { t, tFmt } from "../i18n";
 import { TrackRowInfo } from "./TrackRowInfo";
 import { AddToPlaylistMenu } from "./AddToPlaylistMenu";
@@ -49,14 +49,7 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
   const [menuTrackId, setMenuTrackId] = useState<string | null>(null);
   const [localVersion, setLocalVersion] = useState(0);
   const consumedInitial = useRef<TracksPage | null>(null);
-  const [dragId, setDragId] = useState<string | null>(null);
-  const [dropIndex, setDropIndex] = useState<number | null>(null);
-  const dragOrigin = useRef<{ track: Track; globalIndex: number } | null>(null);
-  const [flipDir, setFlipDir] = useState(0);
   const [loadedPage, setLoadedPage] = useState(1);
-  const listRef = useRef<HTMLDivElement>(null);
-  const prevBtnRef = useRef<HTMLButtonElement>(null);
-  const nextBtnRef = useRef<HTMLButtonElement>(null);
   const [filterInput, setFilterInput] = useState("");
   const [filter, setFilter] = useState("");
   const filterTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -67,6 +60,21 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
 
   const totalPages = lastPage(total);
   const viewingPlaylist = playlists.find((p) => p.id === viewPlaylist) ?? null;
+  const reorder = useTrackReorder({
+    page,
+    loadedPage,
+    totalPages,
+    setPage,
+    tracks,
+    setTracks,
+    // A filtered view is not showing the stored order, so a drop position in it
+    // would name the wrong slot.
+    enabled: total > 1 && !filter,
+    playlistId: viewPlaylist,
+    onUnauthorized,
+    onError: (e) => showApiError(showToast, e),
+    onSettled: () => setLocalVersion((v) => v + 1),
+  });
 
   useEffect(() => {
     if (viewPlaylist && !playlists.some((p) => p.id === viewPlaylist)) {
@@ -103,16 +111,6 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
       cancelled = true;
     };
   }, [active, initialData, page, refreshKey, localVersion, viewPlaylist, filter, onUnauthorized]);
-
-  useEffect(() => {
-    if (flipDir === 0) return;
-    if (flipDir === -1 ? page <= 1 : page >= totalPages) {
-      setFlipDir(0);
-      return;
-    }
-    const timer = window.setInterval(() => setPage((p) => p + flipDir), 650);
-    return () => clearInterval(timer);
-  }, [flipDir, page, totalPages]);
 
   if (total === 0 && !filter && !viewPlaylist && playlists.length === 0) return null;
 
@@ -169,7 +167,7 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
     setFilterInput("");
     setFilter("");
     exitSelectMode();
-    resetDrag();
+    reorder.reset();
   }
 
   function handleFilterChange(value: string) {
@@ -179,88 +177,6 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
       setFilter(value.trim());
       setPage(1);
     }, 300);
-  }
-
-  function updateDropIndex(clientY: number) {
-    const list = listRef.current;
-    if (!list) return;
-    const items = list.querySelectorAll<HTMLElement>(".history-item");
-    let idx = items.length;
-    for (let i = 0; i < items.length; i++) {
-      const rect = items[i].getBoundingClientRect();
-      if (clientY < rect.top + rect.height / 2) {
-        idx = i;
-        break;
-      }
-    }
-    setDropIndex(idx);
-  }
-
-  function resetDrag() {
-    setFlipDir(0);
-    dragOrigin.current = null;
-    setDragId(null);
-    setDropIndex(null);
-  }
-
-  function isOver(el: HTMLElement | null, e: React.PointerEvent) {
-    if (!el) return false;
-    const r = el.getBoundingClientRect();
-    return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
-  }
-
-  function handleDragStart(e: React.PointerEvent<HTMLElement>, track: Track, index: number) {
-    if (total < 2 || filter) return;
-    e.preventDefault();
-    listRef.current?.setPointerCapture(e.pointerId);
-    dragOrigin.current = { track, globalIndex: (loadedPage - 1) * PER_PAGE + index };
-    setDragId(track.id);
-    updateDropIndex(e.clientY);
-  }
-
-  function handleDragMove(e: React.PointerEvent<HTMLElement>) {
-    if (dragId === null) return;
-    const dir =
-      page > 1 && isOver(prevBtnRef.current, e) ? -1
-      : page < totalPages && isOver(nextBtnRef.current, e) ? 1
-      : 0;
-    setFlipDir(dir);
-    if (dir !== 0) {
-      setDropIndex(null);
-      return;
-    }
-    if (e.clientY < 70) {
-      window.scrollBy({ top: -14 });
-    } else if (e.clientY > window.innerHeight - 70) {
-      window.scrollBy({ top: 14 });
-    }
-    updateDropIndex(e.clientY);
-  }
-
-  async function commitReorder() {
-    const id = dragId;
-    const to = dropIndex;
-    const origin = dragOrigin.current;
-    resetDrag();
-    if (id === null || to === null || origin === null) return;
-    const from = tracks.findIndex((t) => t.id === id);
-    const origGlobal = from !== -1 ? (loadedPage - 1) * PER_PAGE + from : origin.globalIndex;
-    const targetGlobal = (loadedPage - 1) * PER_PAGE + to;
-    if (targetGlobal === origGlobal || targetGlobal === origGlobal + 1) return;
-    const newIndex = targetGlobal > origGlobal ? targetGlobal - 1 : targetGlobal;
-
-    const moved = from !== -1 ? tracks[from] : origin.track;
-    const next = tracks.filter((t) => t.id !== id);
-    next.splice(from !== -1 && from < to ? to - 1 : to, 0, moved);
-    setTracks(next.slice(0, PER_PAGE));
-
-    try {
-      await reorderTrack(id, newIndex, onUnauthorized, viewPlaylist);
-    } catch (e) {
-      showError(e);
-    } finally {
-      setLocalVersion((v) => v + 1);
-    }
   }
 
   async function deleteTrack(track: Track) {
@@ -576,18 +492,18 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
 
       <div
         className="history-list"
-        ref={listRef}
-        onPointerMove={handleDragMove}
-        onPointerUp={() => commitReorder()}
-        onPointerCancel={resetDrag}
+        ref={reorder.listRef}
+        onPointerMove={reorder.handleDragMove}
+        onPointerUp={() => reorder.commit()}
+        onPointerCancel={reorder.reset}
       >
         {tracks.map((tr, i) => {
           const isCurrent = currentTrack?.id === tr.id;
           const isSelected = selected.has(tr.id);
           const classes = ["history-item"];
-          if (dragId === tr.id) classes.push("dragging");
-          if (dropIndex === i) classes.push("drop-before");
-          if (i === tracks.length - 1 && dropIndex === tracks.length) {
+          if (reorder.dragId === tr.id) classes.push("dragging");
+          if (reorder.dropIndex === i) classes.push("drop-before");
+          if (i === tracks.length - 1 && reorder.dropIndex === tracks.length) {
             classes.push("drop-after");
           }
           if (selectMode && isSelected) classes.push("selected");
@@ -609,7 +525,7 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
                   className="drag-handle"
                   title={t("history.dragToReorder")}
                   onClick={(e) => e.stopPropagation()}
-                  onPointerDown={(e) => handleDragStart(e, tr, i)}
+                  onPointerDown={(e) => reorder.handleDragStart(e, tr, i)}
                 >
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
                     <circle cx="9" cy="5" r="1.7" />
@@ -659,8 +575,8 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
       {totalPages > 1 && (
         <div className="pagination">
           <button
-            ref={prevBtnRef}
-            className={"btn btn-outline btn-sm" + (flipDir === -1 ? " drag-over" : "")}
+            ref={reorder.prevBtnRef}
+            className={"btn btn-outline btn-sm" + (reorder.flipDir === -1 ? " drag-over" : "")}
             disabled={page <= 1}
             onClick={() => setPage(page - 1)}
           >
@@ -670,8 +586,8 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
             {page} / {totalPages}
           </span>
           <button
-            ref={nextBtnRef}
-            className={"btn btn-outline btn-sm" + (flipDir === 1 ? " drag-over" : "")}
+            ref={reorder.nextBtnRef}
+            className={"btn btn-outline btn-sm" + (reorder.flipDir === 1 ? " drag-over" : "")}
             disabled={page >= totalPages}
             onClick={() => setPage(page + 1)}
           >

@@ -1,5 +1,6 @@
-import { useEffect, useRef, useCallback } from "react";
-import { getToken } from "./api";
+import { useEffect, useRef, useCallback, useState } from "react";
+import type { Dispatch, SetStateAction } from "react";
+import { getToken, reorderTrack, PER_PAGE } from "./api";
 import type { Device, DownloadProgress, PlaybackMode, Playlist, Track, WSMessage } from "./types";
 
 interface WSCallbacks {
@@ -153,4 +154,169 @@ export function useWebSocket(active: boolean, callbacks: WSCallbacks) {
   }, [active, connect]);
 
   return { sendMessage };
+}
+
+/// How long a drag held over a pagination button waits before turning the page,
+/// and how far from the viewport edge it starts scrolling (and by how much).
+const PAGE_FLIP_MS = 650;
+const EDGE_SCROLL_MARGIN = 70;
+const EDGE_SCROLL_STEP = 14;
+
+interface ReorderOptions {
+  /// The page on screen, and the page the loaded tracks were fetched for. They
+  /// differ between a page change and its fetch landing, and every index below
+  /// is global (page offset + row), so both are needed.
+  page: number;
+  loadedPage: number;
+  totalPages: number;
+  setPage: Dispatch<SetStateAction<number>>;
+  tracks: Track[];
+  setTracks: Dispatch<SetStateAction<Track[]>>;
+  /// Whether there is an order to edit at all. A single track has nothing to
+  /// move, and a filtered view is not showing the stored order, so a drop
+  /// position in it would name the wrong slot.
+  enabled: boolean;
+  /// Playlist whose order is being edited (null reorders the whole library).
+  playlistId: string | null;
+  onUnauthorized: () => void;
+  onError: (error: unknown) => void;
+  /// Run once the move has been persisted or has failed, so the caller can
+  /// re-fetch and replace the optimistic order with what the server stored.
+  onSettled: () => void;
+}
+
+/// Drag-to-reorder for a paginated track list.
+///
+/// Owns the pointer gesture end to end: where the row would drop, dragging past
+/// the viewport edge to scroll, holding over a pagination button to turn the
+/// page, and the optimistic reorder that is written back when the pointer is
+/// released. The caller supplies the list state and gets back the refs to
+/// attach and the two indices that drive the row styling.
+export function useTrackReorder(opts: ReorderOptions) {
+  const { page, loadedPage, totalPages, setPage, tracks, setTracks, enabled } = opts;
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [dropIndex, setDropIndex] = useState<number | null>(null);
+  /// Where the drag began. Kept because the row can leave the loaded page
+  /// mid-drag (a page flip), and the move is still relative to where it started.
+  const dragOrigin = useRef<{ track: Track; globalIndex: number } | null>(null);
+  /// Direction the held-over pagination button is flipping in, 0 for neither.
+  const [flipDir, setFlipDir] = useState(0);
+  const listRef = useRef<HTMLDivElement>(null);
+  const prevBtnRef = useRef<HTMLButtonElement>(null);
+  const nextBtnRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (flipDir === 0) return;
+    if (flipDir === -1 ? page <= 1 : page >= totalPages) {
+      setFlipDir(0);
+      return;
+    }
+    const timer = window.setInterval(() => setPage((p) => p + flipDir), PAGE_FLIP_MS);
+    return () => clearInterval(timer);
+  }, [flipDir, page, totalPages, setPage]);
+
+  function reset() {
+    setFlipDir(0);
+    dragOrigin.current = null;
+    setDragId(null);
+    setDropIndex(null);
+  }
+
+  /// The row index the drop would land before, from the pointer's position
+  /// relative to each row's midpoint. Past the last midpoint it is the end.
+  function updateDropIndex(clientY: number) {
+    const list = listRef.current;
+    if (!list) return;
+    const items = list.querySelectorAll<HTMLElement>(".history-item");
+    let idx = items.length;
+    for (let i = 0; i < items.length; i++) {
+      const rect = items[i].getBoundingClientRect();
+      if (clientY < rect.top + rect.height / 2) {
+        idx = i;
+        break;
+      }
+    }
+    setDropIndex(idx);
+  }
+
+  function isOver(el: HTMLElement | null, e: React.PointerEvent) {
+    if (!el) return false;
+    const r = el.getBoundingClientRect();
+    return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+  }
+
+  function handleDragStart(e: React.PointerEvent<HTMLElement>, track: Track, index: number) {
+    if (!enabled) return;
+    e.preventDefault();
+    listRef.current?.setPointerCapture(e.pointerId);
+    dragOrigin.current = { track, globalIndex: (loadedPage - 1) * PER_PAGE + index };
+    setDragId(track.id);
+    updateDropIndex(e.clientY);
+  }
+
+  function handleDragMove(e: React.PointerEvent<HTMLElement>) {
+    if (dragId === null) return;
+    const dir =
+      page > 1 && isOver(prevBtnRef.current, e) ? -1
+      : page < totalPages && isOver(nextBtnRef.current, e) ? 1
+      : 0;
+    setFlipDir(dir);
+    // While a page flip is armed there is no drop slot: the rows under the
+    // pointer are about to be replaced by another page's.
+    if (dir !== 0) {
+      setDropIndex(null);
+      return;
+    }
+    if (e.clientY < EDGE_SCROLL_MARGIN) {
+      window.scrollBy({ top: -EDGE_SCROLL_STEP });
+    } else if (e.clientY > window.innerHeight - EDGE_SCROLL_MARGIN) {
+      window.scrollBy({ top: EDGE_SCROLL_STEP });
+    }
+    updateDropIndex(e.clientY);
+  }
+
+  /// Apply the move where the pointer was released: reorder the visible rows at
+  /// once so the list does not snap back while the request is in flight, then
+  /// persist and let the caller re-fetch the authoritative order.
+  async function commit() {
+    const id = dragId;
+    const to = dropIndex;
+    const origin = dragOrigin.current;
+    reset();
+    if (id === null || to === null || origin === null) return;
+    const from = tracks.findIndex((t) => t.id === id);
+    const origGlobal = from !== -1 ? (loadedPage - 1) * PER_PAGE + from : origin.globalIndex;
+    const targetGlobal = (loadedPage - 1) * PER_PAGE + to;
+    // Dropping onto either side of where the row already sits is not a move.
+    if (targetGlobal === origGlobal || targetGlobal === origGlobal + 1) return;
+    // The drop slot is counted with the row still in place, so a move downwards
+    // shifts by one once it has been lifted out.
+    const newIndex = targetGlobal > origGlobal ? targetGlobal - 1 : targetGlobal;
+
+    const moved = from !== -1 ? tracks[from] : origin.track;
+    const next = tracks.filter((t) => t.id !== id);
+    next.splice(from !== -1 && from < to ? to - 1 : to, 0, moved);
+    setTracks(next.slice(0, PER_PAGE));
+
+    try {
+      await reorderTrack(id, newIndex, opts.onUnauthorized, opts.playlistId);
+    } catch (e) {
+      opts.onError(e);
+    } finally {
+      opts.onSettled();
+    }
+  }
+
+  return {
+    listRef,
+    prevBtnRef,
+    nextBtnRef,
+    dragId,
+    dropIndex,
+    flipDir,
+    handleDragStart,
+    handleDragMove,
+    commit,
+    reset,
+  };
 }
