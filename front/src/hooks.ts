@@ -12,7 +12,6 @@ interface WSCallbacks {
   onPlaybackMode: (mode: PlaybackMode) => void;
   onExtractResult: (track: Track) => void;
   onExtractError: (error: string) => void;
-  onExtractCancelled: () => void;
   onDownloadsUpdate: (downloads: DownloadProgress[]) => void;
   onPlaylistsUpdate: (playlists: Playlist[]) => void;
   onActivePlaylist: (playlistId: string | null) => void;
@@ -105,9 +104,6 @@ export function useWebSocket(active: boolean, callbacks: WSCallbacks) {
           break;
         case "extract_audio_error":
           cb.onExtractError(data.error);
-          break;
-        case "extract_audio_cancelled":
-          cb.onExtractCancelled();
           break;
         case "downloads_update":
           cb.onDownloadsUpdate(data.downloads || []);

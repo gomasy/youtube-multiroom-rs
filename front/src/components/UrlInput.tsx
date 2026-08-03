@@ -1,17 +1,14 @@
-import { useRef, useState, useImperativeHandle, forwardRef } from "react";
+import { useRef, useState } from "react";
 import { searchYouTube } from "../api";
 import { showApiError } from "../errors";
 import { t } from "../i18n";
 import { TrackRowInfo } from "./TrackRowInfo";
 import type { Track } from "../types";
 
-export interface UrlInputHandle {
-  clear: () => void;
-}
-
 interface Props {
-  extracting: boolean;
-  onExtract: (url: string) => void;
+  /// Returns whether the request actually went out. A rejected one leaves the
+  /// text where it is, so it can be sent again once the socket is back.
+  onExtract: (url: string) => boolean;
   onUnauthorized: () => void;
   showToast: (msg: string) => void;
 }
@@ -39,17 +36,13 @@ function isYoutubeUrl(value: string): boolean {
   }
 }
 
-export const UrlInput = forwardRef<UrlInputHandle, Props>(function UrlInput(
-  { extracting, onExtract, onUnauthorized, showToast },
-  ref,
-) {
+export function UrlInput({ onExtract, onUnauthorized, showToast }: Props) {
   const [value, setValue] = useState("");
   const [searching, setSearching] = useState(false);
   const [results, setResults] = useState<Track[] | null>(null);
   const pastedRef = useRef(false);
   const searchRef = useRef<AbortController>(null);
 
-  const busy = extracting || searching;
   const isUrl = isYoutubeUrl(value);
 
   /// Drop any in-flight search so a late response cannot overwrite the results
@@ -60,24 +53,21 @@ export const UrlInput = forwardRef<UrlInputHandle, Props>(function UrlInput(
     setSearching(false);
   }
 
-  useImperativeHandle(ref, () => ({
-    clear: () => {
-      cancelSearch();
-      setValue("");
-      setResults(null);
-    },
-  }));
-
   function submit(input: string) {
-    if (busy) return;
     const trimmed = input.trim();
     if (!trimmed) {
       showToast(t("url.empty"));
       return;
     }
     if (isYoutubeUrl(trimmed)) {
+      // Hand the box back the moment the request is out. The server puts the
+      // request on display in the list below and keeps it there across a
+      // reload, so holding the input until it finishes would do nothing but
+      // keep the next URL from being queued behind it.
+      if (!onExtract(trimmed)) return;
+      cancelSearch();
+      setValue("");
       setResults(null);
-      onExtract(trimmed);
       return;
     }
     if (/^https?:\/\//i.test(trimmed)) {
@@ -101,12 +91,6 @@ export const UrlInput = forwardRef<UrlInputHandle, Props>(function UrlInput(
     } finally {
       if (!request.signal.aborted) setSearching(false);
     }
-  }
-
-  function pickResult(track: Track) {
-    if (extracting) return;
-    setResults(null);
-    onExtract(`https://www.youtube.com/watch?v=${track.id}`);
   }
 
   function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -133,13 +117,14 @@ export const UrlInput = forwardRef<UrlInputHandle, Props>(function UrlInput(
           onKeyDown={(e) => { if (e.key === "Enter") submit(value); }}
           onPaste={() => { pastedRef.current = true; }}
         />
-        <button className="btn" onClick={() => submit(value)} disabled={busy}>
-          {extracting ? <><span className="spinner" />{t("url.extracting")}</>
-            : searching ? <><span className="spinner" />{t("url.searching")}</>
+        <button className="btn" onClick={() => submit(value)}>
+          {searching ? <><span className="spinner" />{t("url.searching")}</>
             : isUrl ? t("url.extract") : t("url.search")}
         </button>
       </div>
 
+      {/* The query and the results stay up as tracks are picked: one search
+          often yields several worth fetching, and each pick is independent. */}
       {results && (
         <div className="search-results">
           <div className="search-results-header section-label">
@@ -152,7 +137,11 @@ export const UrlInput = forwardRef<UrlInputHandle, Props>(function UrlInput(
             <div className="search-empty">{t("url.noResults")}</div>
           )}
           {results.map((result) => (
-            <div key={result.id} className="history-item" onClick={() => pickResult(result)}>
+            <div
+              key={result.id}
+              className="history-item"
+              onClick={() => onExtract(`https://www.youtube.com/watch?v=${result.id}`)}
+            >
               <TrackRowInfo track={result} />
             </div>
           ))}
@@ -160,4 +149,4 @@ export const UrlInput = forwardRef<UrlInputHandle, Props>(function UrlInput(
       )}
     </div>
   );
-});
+}

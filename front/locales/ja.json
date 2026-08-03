@@ -126,7 +126,6 @@
   "url.close": "閉じる",
   "url.empty": "URL または検索キーワードを入力してください",
   "url.extract": "取得",
-  "url.extracting": "取得中",
   "url.noResults": "見つかりませんでした",
   "url.notYoutube": "YouTube の URL ではないため取得できません",
   "url.placeholder": "YouTube URL または検索キーワード...",

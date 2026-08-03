@@ -126,7 +126,6 @@
   "url.close": "Close",
   "url.empty": "Please enter a URL or search keywords",
   "url.extract": "Fetch",
-  "url.extracting": "Fetching",
   "url.noResults": "No results found",
   "url.notYoutube": "Not a YouTube URL",
   "url.placeholder": "YouTube URL or search keywords...",

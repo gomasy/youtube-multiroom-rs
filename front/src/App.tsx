@@ -5,7 +5,6 @@ import { t, tFmt } from "./i18n";
 import { useWebSocket } from "./hooks";
 import { Header } from "./components/Header";
 import { UrlInput } from "./components/UrlInput";
-import type { UrlInputHandle } from "./components/UrlInput";
 import { NowPlaying } from "./components/NowPlaying";
 import { DownloadList } from "./components/DownloadList";
 import { DeviceList } from "./components/DeviceList";
@@ -34,13 +33,10 @@ export function App() {
   const [activePlaylist, setActivePlaylist] = useState<string | null>(null);
   const [sleepTimer, setSleepTimer] = useState<number | null>(null);
   const { toasts, showToast } = useToast();
-  const urlInputRef = useRef<UrlInputHandle>(null);
 
-  const [extracting, setExtracting] = useState(false);
   const onUnauthorized = useCallback(() => {
     setWsActive(false);
     setConnected(false);
-    setExtracting(false);
     setShowAuth(true);
   }, []);
 
@@ -78,21 +74,16 @@ export function App() {
   }, [showToast]);
 
   const handleExtractResult = useCallback((track: Track) => {
-    setExtracting(false);
     setCurrentTrack(track);
     showToast(`${t("common.trackFetched")}: ${track.title}`);
-    urlInputRef.current?.clear();
   }, [showToast]);
 
   const handleExtractError = useCallback((error: string) => {
-    setExtracting(false);
     showToast(`${t("common.error")}: ${error}`);
   }, [showToast]);
 
   const handlePlaylistImportStarted = useCallback((name: string, total: number) => {
-    setExtracting(false);
     showToast(`${name}: ${tFmt("common.importStarted", { total })}`);
-    urlInputRef.current?.clear();
   }, [showToast]);
 
   /// Drop the REST snapshot and re-fetch the visible page. The snapshot only
@@ -111,10 +102,7 @@ export function App() {
 
   const { sendMessage } = useWebSocket(wsActive, {
     onVersion: setVersion,
-    onConnectedChange: (c) => {
-      setConnected(c);
-      if (!c) setExtracting(false);
-    },
+    onConnectedChange: setConnected,
     onInit: setDevices,
     onInitTracks: (rev) => {
       // The REST snapshot was served before this subscription existed. Its
@@ -134,7 +122,6 @@ export function App() {
     onPlaybackMode: setPlaybackMode,
     onExtractResult: handleExtractResult,
     onExtractError: handleExtractError,
-    onExtractCancelled: () => setExtracting(false),
     onDownloadsUpdate: setDownloads,
     onPlaylistsUpdate: setPlaylists,
     onActivePlaylist: setActivePlaylist,
@@ -187,12 +174,8 @@ export function App() {
       <div className="app">
         <Header connected={connected} version={version} />
         <UrlInput
-          ref={urlInputRef}
-          extracting={extracting}
           onUnauthorized={onUnauthorized}
-          onExtract={(url) => {
-            if (send({ type: "extract_audio", url })) setExtracting(true);
-          }}
+          onExtract={(url) => send({ type: "extract_audio", url })}
           showToast={showToast}
         />
         <DownloadList
