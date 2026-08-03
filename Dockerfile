@@ -17,11 +17,11 @@ RUN npm run build
 #   - Re-encoding non-AAC live streams: opus/vorbis decode -> AAC encode
 #   - yt-dlp m4a extraction/fixup: mov/matroska input, ipod/mp4 output, aac_adtstoasc
 FROM alpine:latest AS ffmpeg
-RUN apk add --no-cache build-base pkgconf nasm curl tar xz openssl-dev zlib-dev
+RUN apk add --no-cache build-base pkgconf nasm curl tar openssl-dev zlib-dev
 # renovate: datasource=github-tags depName=FFmpeg/FFmpeg extractVersion=^n(?<version>\d+\.\d+(\.\d+)?)$
 ARG FFMPEG_VERSION=8.1.2
-RUN curl -fsSL "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" | tar -xJ
-WORKDIR /ffmpeg-${FFMPEG_VERSION}
+RUN curl -fsSL "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n${FFMPEG_VERSION}.tar.gz" | tar -xz
+WORKDIR /FFmpeg-n${FFMPEG_VERSION}
 RUN ./configure \
         --disable-everything \
         --disable-autodetect \
