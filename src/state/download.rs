@@ -216,18 +216,16 @@ impl AppState {
             // attempt wrote is visible until publishing succeeds, so a failure
             // or cancellation only has to discard the whole directory.
             tracing::info!("Downloading: {}", title);
-            let published = match self
-                .run_download(video_id, &url, &staged_path, cancel)
-                .await
-            {
-                Ok(()) => {
-                    self.publish_download(cancel, &staged_path, &output_path)
-                        .await
-                }
-                // Cancellation and failure both leave partial files behind,
-                // and both are discarded with the staging directory below.
-                Err(e) => Err(e),
-            };
+            // Cancellation and failure both leave partial files behind, so the
+            // outcome is held until the staging directory has been discarded —
+            // the `?` cannot be taken here without leaking that directory.
+            let published = async {
+                self.run_download(video_id, &url, &staged_path, cancel)
+                    .await?;
+                self.publish_download(cancel, &staged_path, &output_path)
+                    .await
+            }
+            .await;
             remove_staging_dir(&staging_dir).await;
             published?;
             published_path = Some(output_path);
