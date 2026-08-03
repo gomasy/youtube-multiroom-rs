@@ -48,8 +48,10 @@ export type PlaybackMode = "loop" | "shuffle" | "off";
 
 /** In-progress download progress (managed server-side, broadcast to all clients) */
 export interface DownloadProgress {
+  /** Identifies the entry, not the video */
   id: string;
-  /** Contains video ID before metadata is fetched */
+  kind: "video" | "playlist";
+  /** Contains the video ID (a playlist import: the playlist ID) before metadata is fetched */
   title: string;
   status: "metadata" | "downloading" | "processing" | "error";
   /** Downloaded percentage (0–100) */

@@ -48,6 +48,7 @@
   "download.cancel": "Stop all",
   "download.error": "Error",
   "download.metadata": "Fetching info...",
+  "download.playlist": "Playlist",
   "download.processing": "Converting...",
   "header.connected": "Connected to server",
   "header.disconnected": "Disconnected",

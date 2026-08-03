@@ -48,6 +48,7 @@
   "download.cancel": "すべて停止",
   "download.error": "エラー",
   "download.metadata": "情報取得中...",
+  "download.playlist": "プレイリスト",
   "download.processing": "変換中...",
   "header.connected": "サーバー接続中",
   "header.disconnected": "切断中",

@@ -6,6 +6,11 @@ interface Props {
   onCancel: () => void;
 }
 
+/// An import that has not expanded yet has only its playlist ID to show.
+function titleText(d: DownloadProgress): string {
+  return d.kind === "playlist" ? `${t("download.playlist")}: ${d.title}` : d.title;
+}
+
 function statusText(d: DownloadProgress): string {
   switch (d.status) {
     case "downloading":
@@ -43,7 +48,7 @@ export function DownloadList({ downloads, onCancel }: Props) {
             className={`download-item${d.status === "error" ? " error" : ""}`}
           >
             <div className="download-row">
-              <span className="download-title">{d.title}</span>
+              <span className="download-title">{titleText(d)}</span>
               <span className="download-status">{statusText(d)}</span>
             </div>
             {d.status === "error" ? (
