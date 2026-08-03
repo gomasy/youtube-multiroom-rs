@@ -121,6 +121,9 @@ export function useWebSocket(active: boolean, callbacks: WSCallbacks) {
         case "playlist_import_result":
           cb.onPlaylistImportStarted(data.name, data.total);
           break;
+        // extract_audio_cancelled is deliberately silent: Stop all already
+        // clears the progress display for every job it stopped, so a toast per
+        // cancelled request would only report what the user just asked for.
       }
     };
 
