@@ -60,6 +60,26 @@ impl NextUp {
     fn fresh(track: AudioTrack) -> Self {
         Self::at(track, 0)
     }
+
+    /// A play of a queue entry, keyed by the entry itself so PlaybackStarted
+    /// and PlaybackFailed can consume it by value match.
+    fn from_queue(entry: String, track: AudioTrack) -> Self {
+        Self {
+            track,
+            offset_ms: 0,
+            token: entry,
+        }
+    }
+
+    /// A play the playback mode chose, marked so PlaybackStarted can stop it if
+    /// the mode was switched off after the ENQUEUE went out.
+    fn auto(track: AudioTrack) -> Self {
+        Self {
+            token: auto_token(&track.id),
+            track,
+            offset_ms: 0,
+        }
+    }
 }
 
 /// Process an Alexa skill request and return a response JSON.
@@ -176,12 +196,7 @@ async fn start_pending_or_queue(ctx: &ReqCtx<'_>) -> Option<Value> {
         .is_some_and(|d| d.playback_in_progress());
     if !in_progress && let Some((entry, track)) = ctx.state.peek_queue(&ctx.device_id).await {
         tracing::info!("Starting next-up track on {}", ctx.log_id());
-        let next = NextUp {
-            track,
-            offset_ms: 0,
-            token: entry,
-        };
-        return Some(play_directive(ctx, &next).await);
+        return Some(play_directive(ctx, &NextUp::from_queue(entry, track)).await);
     }
     None
 }
@@ -348,7 +363,7 @@ async fn on_audio_event(ctx: &ReqCtx<'_>, event_type: &str, body: &Value) -> Val
         _ => {}
     }
 
-    alexa_response(json!({ "shouldEndSession": true }))
+    end_session()
 }
 
 /// Playback of `event.token` has begun: adopt it as the device's current track
@@ -387,14 +402,12 @@ async fn on_playback_started(ctx: &ReqCtx<'_>, event: &AudioEvent<'_>) -> Value 
     {
         state.clear_pending(device_id).await;
     }
-    // If the started track came from the "next up" queue, remove its
-    // entry by value match (pending and auto-continuation tokens won't
-    // match any queue entry). Deferring consumption to here ensures we
-    // don't lose a track if ENQUEUE is discarded, and prevents double
-    // consumption on event replays.
+    // A queue-sourced play is consumed by value match here rather than at
+    // ENQUEUE time, so a discarded directive loses no track and a replayed
+    // event consumes nothing twice. Pending and auto tokens match no entry.
     state.remove_queue_entry(device_id, event.token).await;
 
-    alexa_response(json!({ "shouldEndSession": true }))
+    end_session()
 }
 
 /// The device could not play `event.token`. A track that has since been deleted
@@ -432,7 +445,7 @@ async fn on_playback_failed(ctx: &ReqCtx<'_>, event: &AudioEvent<'_>, body: &Val
                 event.track_id
             );
             mark_idle(ctx).await;
-            return alexa_response(json!({ "shouldEndSession": true }));
+            return end_session();
         }
         Err(e) => {
             tracing::warn!(
@@ -476,7 +489,7 @@ async fn on_playback_failed(ctx: &ReqCtx<'_>, event: &AudioEvent<'_>, body: &Val
             .await;
     }
 
-    alexa_response(json!({ "shouldEndSession": true }))
+    end_session()
 }
 
 /// Park the device at the start of nothing: what both a track finishing and a
@@ -512,17 +525,13 @@ async fn queued_or_auto_next(
         .auto_next_track(token_track_id(current_token))
         .await
         .filter(|t| allow_live_auto || !t.is_live)
-        .map(|track| NextUp {
-            token: auto_token(&track.id),
-            track,
-            offset_ms: 0,
-        })
+        .map(NextUp::auto)
 }
 
-/// Return the next candidate from pending → "next up" queue (excludes playback
-/// mode auto-selection). Ok(None) if no candidate; Err if Redis error prevents
-/// confirming state. Pending is not consumed here (both REPLACE_ALL and ENQUEUE
-/// paths rely on PlaybackStarted to clear it).
+/// The next candidate from pending → "next up" queue, without the playback-mode
+/// auto-selection. `Ok(None)` if there is none, `Err` if a Redis error left the
+/// queue state unconfirmed. Pending is peeked, not consumed: both the
+/// REPLACE_ALL and ENQUEUE paths rely on PlaybackStarted to clear it.
 async fn pending_or_queue_next(
     ctx: &ReqCtx<'_>,
     current_token: &str,
@@ -543,20 +552,14 @@ async fn pending_or_queue_next(
             }
             continue;
         }
-        // Queue-sourced playback uses the entry itself as the token so
-        // PlaybackStarted / PlaybackFailed can consume it by value match.
-        return Ok(Some(NextUp {
-            track,
-            offset_ms: 0,
-            token: entry,
-        }));
+        return Ok(Some(NextUp::from_queue(entry, track)));
     }
     Ok(None)
 }
 
-/// Determine the token identifying the current playback context. Prefers the
-/// AudioPlayer context from the request (available even after pause/stop) and
-/// falls back to the device state's current track ID.
+/// The token identifying the current playback context. The request's
+/// AudioPlayer context is preferred — it survives a pause or stop — with the
+/// device's current track ID as the fallback.
 async fn playing_context_token(ctx: &ReqCtx<'_>, body: &Value) -> String {
     if let Some(token) = body["context"]["AudioPlayer"]["token"]
         .as_str()
@@ -658,6 +661,12 @@ async fn retry_playback(
 /// Wrap a response body in the standard Alexa response envelope.
 fn alexa_response(response: Value) -> Value {
     json!({ "version": "1.0", "response": response })
+}
+
+/// The bare acknowledgement an event handler returns when it has no directive
+/// to send.
+fn end_session() -> Value {
+    alexa_response(json!({ "shouldEndSession": true }))
 }
 
 /// Update device status and return an AudioPlayer.Stop directive.
