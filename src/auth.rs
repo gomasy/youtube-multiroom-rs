@@ -126,11 +126,20 @@ fn sign(secret: &str, audio_id: &str, exp: u64) -> String {
     mac.update(audio_id.as_bytes());
     mac.update(b"\n");
     mac.update(exp.to_string().as_bytes());
-    mac.finalize()
-        .into_bytes()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    hex(&mac.finalize().into_bytes())
+}
+
+/// Lowercase hex in a single allocation. An Echo re-verifies its signed URL on
+/// every Range request it issues during a track, so this runs far more often
+/// than the one signature per playback that produces it.
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(DIGITS[(b >> 4) as usize] as char);
+        out.push(DIGITS[(b & 0x0f) as usize] as char);
+    }
+    out
 }
 
 /// Extract the track ID from "/api/audio/{id}/stream" or "/api/audio/{id}/live".
@@ -202,6 +211,18 @@ mod tests {
     fn stream_query_verifies() {
         let q = stream_query("secret", "abc123");
         assert!(verify_stream_query("secret", "abc123", Some(&q)));
+    }
+
+    #[test]
+    fn hex_pads_every_byte_to_two_digits() {
+        // Signing and verifying both go through hex(), so a byte that lost its
+        // leading zero would still compare equal to itself while quietly
+        // shortening the signature. The round-trip tests cannot catch that,
+        // which is why the encoding is pinned here directly.
+        assert_eq!(hex(&[0x00, 0x0f, 0xa5, 0xff]), "000fa5ff");
+        assert_eq!(hex(&[]), "");
+        // SHA-256 is 32 bytes, so every signature is 64 characters wide
+        assert_eq!(sign("secret", "abc123", 0).len(), 64);
     }
 
     #[test]
