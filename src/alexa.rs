@@ -114,26 +114,40 @@ pub async fn handle_alexa(state: &Arc<AppState>, body: Value, base_url: &str) ->
 // ── Launch ──
 
 async fn on_launch(ctx: &ReqCtx<'_>) -> Value {
-    // If there is a pending command or a "next up" queue entry, start playback
-    if let Some(resp) = start_pending_or_queue(ctx).await {
+    if let Some(resp) = start_or_resume(ctx).await {
         return resp;
     }
 
-    // A launch session interrupts playback, so transition from "playing" to
-    // "paused" at the estimated position (Resume can continue from there).
-    // Keep paused state as-is; otherwise fall back to idle.
-    if let Some(dev) = ctx.state.get_device(&ctx.device_id).await {
-        let status = if dev.playback_in_progress() {
-            "paused"
-        } else {
-            "idle"
-        };
-        ctx.state
-            .update_device(&ctx.device_id, DeviceUpdate::new().status(status))
-            .await;
-    }
+    // Nothing to play, so the device the launch interrupted is now idle.
+    // handle_alexa registered it, so the update lands.
+    ctx.state
+        .update_device(&ctx.device_id, DeviceUpdate::new().status("idle"))
+        .await;
 
     speech(&t!("alexa_connected", locale = &ctx.locale), false)
+}
+
+/// Start whatever opening the skill should start: a pending web command, the
+/// head of the Up Next queue, or — since the launch interrupted it — the track
+/// the device was playing or paused mid-way through. None when it has nothing
+/// to play.
+///
+/// LaunchRequest and PlayFromWebIntent both go through here because Alexa
+/// routes skill-opening phrases to either one and the user means the same thing
+/// by both. Only the reply when there is nothing to play differs.
+async fn start_or_resume(ctx: &ReqCtx<'_>) -> Option<Value> {
+    if let Some(resp) = start_pending_or_queue(ctx).await {
+        return Some(resp);
+    }
+
+    // Only an interrupted track is resumed: one that already finished leaves
+    // the device idle while still remembering it, and replaying that from the
+    // top is not what opening the skill asked for.
+    let dev = ctx.state.get_device(&ctx.device_id).await?;
+    if !dev.playback_in_progress() {
+        return None;
+    }
+    Some(resume_at(ctx, dev.current_track?, dev.position_ms).await)
 }
 
 /// Start playback from a pending command or the front of the "next up" queue.
@@ -179,12 +193,10 @@ async fn on_intent(ctx: &ReqCtx<'_>, body: &Value) -> Value {
     let locale = &ctx.locale;
 
     match intent {
-        "PlayFromWebIntent" => {
-            if let Some(resp) = start_pending_or_queue(ctx).await {
-                return resp;
-            }
-            speech(&t!("alexa_no_queued_track", locale = locale), true)
-        }
+        "PlayFromWebIntent" => match start_or_resume(ctx).await {
+            Some(resp) => resp,
+            None => speech(&t!("alexa_no_queued_track", locale = locale), true),
+        },
 
         "AMAZON.PauseIntent" => stop_directive(ctx, "paused").await,
 
@@ -212,17 +224,18 @@ async fn resume_playback(ctx: &ReqCtx<'_>) -> Value {
     if let Some(dev) = ctx.state.get_device(&ctx.device_id).await
         && let Some(track) = dev.current_track
     {
-        // Reset failure counter on explicit resume so a track that was in
-        // error state doesn't immediately error again
-        ctx.state.clear_playback_failures(&ctx.device_id).await;
-        let next = NextUp {
-            token: new_token(&track.id),
-            track,
-            offset_ms: dev.position_ms,
-        };
-        return play_directive(ctx, &next).await;
+        return resume_at(ctx, track, dev.position_ms).await;
     }
     no_track_response(ctx.can_speak, &t!("alexa_no_track", locale = &ctx.locale))
+}
+
+/// Pick `track` up again from `offset_ms`: what an explicit Resume and a launch
+/// that interrupted playback both come down to.
+async fn resume_at(ctx: &ReqCtx<'_>, track: AudioTrack, offset_ms: u64) -> Value {
+    // Carrying on with a track is a fresh chance for it, so clear the failure
+    // counter — otherwise one left in the error state errors again immediately.
+    ctx.state.clear_playback_failures(&ctx.device_id).await;
+    play_directive(ctx, &NextUp::at(track, offset_ms)).await
 }
 
 /// Explicit "next track" skip. Priority: pending → "next up" queue → playback
