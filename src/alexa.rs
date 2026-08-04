@@ -397,9 +397,10 @@ async fn on_playback_started(ctx: &ReqCtx<'_>, event: &AudioEvent<'_>) -> Value 
     alexa_response(json!({ "shouldEndSession": true }))
 }
 
-/// The device could not play `event.token`. An ended live stream is normal
-/// termination and advances like PlaybackFinished; anything else is retried a
-/// few times before the device is marked as errored.
+/// The device could not play `event.token`. A track that has since been deleted
+/// leaves the device idle, an ended live stream is normal termination and
+/// advances like PlaybackFinished, and anything else is retried a few times
+/// before the device is marked as errored.
 async fn on_playback_failed(ctx: &ReqCtx<'_>, event: &AudioEvent<'_>, body: &Value) -> Value {
     let state = ctx.state;
     let device_id = &ctx.device_id;
@@ -409,7 +410,38 @@ async fn on_playback_failed(ctx: &ReqCtx<'_>, event: &AudioEvent<'_>, body: &Val
     // entry so an unplayable item (e.g., ended live stream) doesn't block
     // subsequent tracks
     state.remove_queue_entry(device_id, event.token).await;
-    let track = state.get_track(event.track_id).await;
+
+    // A track confirmed gone explains the failure on its own: it was deleted
+    // while the device was playing it, taking its cache file along. Nothing is
+    // wrong with the device and there is nothing left to retry, so park it the
+    // way a finished track does rather than leave it reporting an error for
+    // something the user did deliberately.
+    //
+    // Which is why the lookup is try_get_track: get_track reads a Redis error
+    // as "missing" too, and clearing a device on the strength of a track we
+    // never managed to read would be inventing that explanation. An unreadable
+    // track keeps the old path instead — no track means retry_playback declines
+    // and the device is marked errored, which is the honest answer when nothing
+    // could be confirmed.
+    let track = match state.try_get_track(event.track_id).await {
+        Ok(Some(track)) => Some(track),
+        Ok(None) => {
+            tracing::info!(
+                "Playback failed on {} for deleted track {}; leaving it idle",
+                ctx.log_id(),
+                event.track_id
+            );
+            mark_idle(ctx).await;
+            return alexa_response(json!({ "shouldEndSession": true }));
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Redis error reading track {} for a playback failure: {e}",
+                event.track_id
+            );
+            None
+        }
+    };
 
     // Live streams become unresolvable after they end, causing PlaybackFailed.
     // This is normal termination, not an error — advance to the next track
