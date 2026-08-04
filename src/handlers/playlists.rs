@@ -122,18 +122,16 @@ pub async fn bulk_add_playlist_tracks(
     Json(req): Json<TrackIdsRequest>,
 ) -> AppResult<Json<Value>> {
     playlist_or_404(&state, &playlist_id).await?;
-    // Resolve every requested track in one HMGET. This is the endpoint that
-    // routinely carries a hundred IDs, and checking them one at a time spent a
-    // round-trip per ID purely to be told the track exists. A track deleted
-    // between this read and its append is dropped from the playlist by the
-    // deletion itself, which strips it from every playlist that listed it.
-    let known = state.fetch_tracks_for(req.track_ids.iter()).await;
+    // A track deleted between this resolution and its append is dropped from
+    // the playlist by the deletion itself, which strips it from every playlist
+    // that listed it — so resolving the whole list up front costs no accuracy.
+    // Dropping a repeated ID matters here beyond the saved round-trip: the
+    // script moves an already-listed track to the end, so a repeat would have
+    // reordered the playlist against the request as well as counted twice.
+    let track_ids = req.known_ids(&state).await;
     let mut added = 0u32;
     let mut failure = None;
-    for id in &req.track_ids {
-        if !known.contains_key(id.as_str()) {
-            continue;
-        }
+    for id in &track_ids {
         match state.add_playlist_track(&playlist_id, id).await {
             WriteOutcome::Written => added += 1,
             // Deleted mid-request: stop instead of appending to a playlist

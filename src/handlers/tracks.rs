@@ -110,17 +110,10 @@ pub async fn refresh_tracks_metadata(
     headers: HeaderMap,
     Json(req): Json<TrackIdsRequest>,
 ) -> AppResult<Json<Value>> {
-    // Resolve every requested track in one HMGET, as bulk_add_playlist_tracks
-    // does. An ID that names nothing is dropped here rather than costing the
-    // job a 30-second yt-dlp run that could only end in "track not found".
-    // Claiming each track as it is accepted also drops a repeated ID: the
-    // second occurrence no longer finds one, so no video is fetched twice.
-    let mut unclaimed = state.fetch_tracks_for(req.track_ids.iter()).await;
-    let track_ids: Vec<String> = req
-        .track_ids
-        .into_iter()
-        .filter(|id| unclaimed.remove(id.as_str()).is_some())
-        .collect();
+    // An ID that names nothing would cost the job a 30-second yt-dlp run that
+    // could only end in "track not found", and a repeated one would fetch the
+    // same video twice; neither survives the resolution.
+    let track_ids = req.known_ids(&state).await;
     let total = track_ids.len();
 
     if total > 0 {

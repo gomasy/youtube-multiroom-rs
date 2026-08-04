@@ -95,6 +95,30 @@ pub struct TrackIdsRequest {
     track_ids: Vec<String>,
 }
 
+impl TrackIdsRequest {
+    /// The requested tracks that exist, in the order asked for and without
+    /// repeats.
+    ///
+    /// One HMGET resolves the whole list: these are the endpoints that
+    /// routinely carry a hundred IDs, and checking them one at a time spent a
+    /// round-trip per ID purely to be told the track exists. An ID naming
+    /// nothing is dropped rather than costing its caller work that could only
+    /// end in "track not found".
+    ///
+    /// Claiming each track as it is accepted is what drops a repeated ID: the
+    /// second occurrence no longer finds one. A caller that skipped this both
+    /// paid for the duplicate work and counted the same track twice in what it
+    /// reported back.
+    pub(crate) async fn known_ids(&self, state: &AppState) -> Vec<String> {
+        let mut unclaimed = state.fetch_tracks_for(self.track_ids.iter()).await;
+        self.track_ids
+            .iter()
+            .filter(|id| unclaimed.remove(id.as_str()).is_some())
+            .cloned()
+            .collect()
+    }
+}
+
 pub(crate) async fn track_or_404(state: &AppState, track_id: &str) -> AppResult<AudioTrack> {
     state
         .get_track(track_id)
