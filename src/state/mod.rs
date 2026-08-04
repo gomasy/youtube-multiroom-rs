@@ -13,6 +13,7 @@
 //! - [`playlist`] — named playlists and YouTube playlist import
 //! - [`download`] — downloading audio and refreshing track metadata
 //! - [`progress`] — what clients are told about that work while it runs
+//! - [`remux`] — rebuilding a downloaded file's container before it is served
 //! - [`job`] — the stopping rules shared by the background per-video jobs
 //! - [`ytdlp`] — running yt-dlp and reaping its process group
 //! - [`url`] — recognizing YouTube URLs
@@ -40,6 +41,7 @@ mod model;
 mod playback;
 mod playlist;
 mod progress;
+mod remux;
 mod track;
 mod url;
 mod ytdlp;

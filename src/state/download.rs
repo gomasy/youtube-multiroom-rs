@@ -8,6 +8,7 @@
 
 use super::job::{VideoJob, Visited};
 use super::model::AudioTrack;
+use super::remux::rebuild_container;
 use super::url::extract_video_id;
 use super::warn_redis;
 use super::ytdlp::{
@@ -222,6 +223,9 @@ impl AppState {
             let published = async {
                 self.run_download(video_id, &url, &staged_path, cancel)
                     .await?;
+                // Still in staging, so a rebuild that goes wrong is discarded
+                // with the rest of the attempt rather than served.
+                rebuild_container(&staged_path, AudioTrack::extract_duration(&meta), cancel).await;
                 self.publish_download(cancel, &staged_path, &output_path)
                     .await
             }
