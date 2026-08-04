@@ -165,12 +165,12 @@ impl AppState {
         true
     }
 
-    /// Append a track to the end of an existing playlist (moves to end if
-    /// already present). [`WriteOutcome::Gone`] means the playlist no longer
-    /// exists: the existence check and the list mutation are atomic, so a slow
-    /// background import cannot recreate a playlist that was deleted meanwhile.
+    /// Append a track to an existing playlist, moving it to the end if already
+    /// present. [`WriteOutcome::Gone`] means the playlist no longer exists: the
+    /// check and the mutation are atomic, so a slow background import cannot
+    /// recreate a playlist deleted meanwhile.
     pub async fn add_playlist_track(&self, playlist_id: &str, track_id: &str) -> WriteOutcome {
-        // Serialized with reorder's read-then-replace to prevent interleaving.
+        // Serialized with reorder's read-then-replace.
         let _guard = self.order_lock.lock().await;
         let mut conn = self.redis.clone();
         match ADD_PLAYLIST_TRACK_SCRIPT
@@ -324,14 +324,11 @@ impl AppState {
         }
     }
 
-    /// Flat-expand a YouTube playlist and start importing into a local playlist
-    /// with the same name (created if absent) in the background. Returns the
-    /// playlist name and item count at start. Per-video download progress is
-    /// broadcast via the same downloads_update as extract_audio.
-    ///
-    /// Expanding the playlist is a yt-dlp run of its own, before there is a
-    /// single video to report progress for, so the import holds a progress
-    /// entry of its own for that stretch.
+    /// Flat-expand a YouTube playlist and start importing it into a local
+    /// playlist of the same name (created if absent) in the background,
+    /// returning that name and the item count. Per-video progress is broadcast
+    /// over the same downloads_update as extract_audio; the expansion itself is
+    /// a yt-dlp run with no video to report yet, so it holds its own entry.
     pub async fn import_playlist(
         self: &Arc<Self>,
         list_id: &str,
@@ -411,13 +408,13 @@ impl AppState {
             }
         };
 
-        // Spawning the worker is the import commit point. The potentially slow
-        // Redis work above stays outside this lock so Stop all is never blocked
-        // from terminating unrelated active processes.
+        // Spawning the worker is the commit point. The slow Redis work above
+        // stays outside the lock so Stop all is never blocked from terminating
+        // unrelated processes.
         let _commit_guard = self.download_cancel.lock().await;
         if cancel.is_cancelled() {
-            // A newly created playlist may already be visible to another client;
-            // leave it empty rather than risk deleting concurrent user changes.
+            // A newly created playlist may already be visible to another
+            // client; left empty rather than risk deleting their changes.
             return Err(DownloadError::Cancelled);
         }
         let total = video_ids.len();
@@ -439,11 +436,10 @@ impl AppState {
                         state.broadcast_playlists().await;
                         Ok(Visited::Done)
                     }
-                    // The playlist this import exists to fill is gone, so
-                    // there is nowhere left to put the remaining videos.
+                    // Nowhere left to put the remaining videos.
                     WriteOutcome::Gone => Ok(Visited::Stop("the playlist was deleted".to_string())),
-                    // The Redis error itself is already logged; name the video
-                    // it cost, which is all this layer knows and the log does not.
+                    // The Redis error is already logged; this names the video
+                    // it cost, which the log does not know.
                     WriteOutcome::Failed => {
                         tracing::warn!(
                             "Playlist import '{}': failed to add {video_id}",

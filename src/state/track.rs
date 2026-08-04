@@ -32,16 +32,14 @@ impl AppState {
     }
 
     pub async fn remove_track(&self, id: &str) -> Option<AudioTrack> {
-        // Nothing registered means nothing to delete. A download in flight for
-        // this video has not registered anything yet, so what it goes on to
-        // register is a fresh track rather than a resurrection of this one.
+        // Nothing registered means nothing to delete: a download still in
+        // flight for this video registers a fresh track rather than
+        // resurrecting this one.
         self.get_track(id).await?;
 
-        // Claim the video's extract slot for the duration of the deletion. A
-        // download re-fetching this track (its cache file went missing, say)
-        // rewrites the entry when it commits, so it is told to discard that
-        // registration instead — deletion never waits for a download, however
-        // long it runs.
+        // Claim the video's extract slot for the deletion. A download that
+        // would rewrite this entry when it commits is told to discard its own
+        // registration instead, so the deletion never waits it out.
         let slot = self.extract_slot(id).await;
         slot.mark_deleted();
         let removed = self.remove_track_inner(id).await;
@@ -52,9 +50,9 @@ impl AppState {
     async fn remove_track_inner(&self, id: &str) -> Option<AudioTrack> {
         let track = self.get_track(id).await?;
 
-        // Delete the file first. If removing the last track causes the tracks key
-        // to vanish, restore_tracks_if_missing may run — and if the file still
-        // exists, the deleted track would be resurrected.
+        // File first: removing the last track makes the tracks key vanish, and
+        // restore_tracks_if_missing would then rebuild this track from a
+        // surviving file.
         if !track.file_path.is_empty() {
             let _ = tokio::fs::remove_file(&track.file_path).await;
         }
@@ -115,8 +113,8 @@ impl AppState {
     }
 
     /// Every pending-command key currently in Redis. A partial scan is returned
-    /// as-is: the caller only ever deletes what it finds, so seeing fewer keys
-    /// leaves stale entries behind rather than removing the wrong ones.
+    /// as-is: callers only delete what they find, so a short result leaves
+    /// stale entries behind rather than removing the wrong ones.
     async fn pending_keys(&self) -> Vec<String> {
         let mut conn = self.redis.clone();
         let pattern = format!("{REDIS_PENDING_PREFIX}:*");
@@ -189,9 +187,9 @@ impl AppState {
         let mut tracks: Vec<AudioTrack> = order.iter().filter_map(|id| by_id.remove(id)).collect();
 
         let mut rest: Vec<AudioTrack> = by_id.into_values().collect();
-        // total_cmp rather than partial_cmp: it is a total order over every f64,
-        // so there is no incomparable case left to decide what to do about, and
-        // it matches how playlists() sorts by the same field.
+        // total_cmp rather than partial_cmp: a total order over every f64
+        // leaves no incomparable case to decide about, and playlists() sorts
+        // the same field the same way.
         rest.sort_by(|a, b| {
             b.created_at
                 .total_cmp(&a.created_at)
@@ -267,8 +265,8 @@ impl AppState {
 
         let state = self.clone();
         tokio::spawn(async move {
-            // Clear the flag on drop so a panic or early return cannot leave it
-            // latched, which would disable restore for the rest of the process.
+            // Cleared on drop, so a panic or early return cannot latch the flag
+            // and disable restore for the rest of the process.
             let _guard = RestoreGuard(&state);
             tracing::info!(
                 "Tracks key missing: restoring {} track(s) from audio_cache",
@@ -388,11 +386,10 @@ impl AppState {
 
     /// Resolve a batch of track references in a single HMGET, keyed by track ID.
     ///
-    /// A reference is either a queue entry ("{id}#{millis}") or a bare track ID,
-    /// which [`token_track_id`] reduces to the same thing — so an endpoint
-    /// handed a list of IDs pays one round-trip to learn which of them exist,
-    /// rather than one per ID. Entries naming no track are absent from the
-    /// result, which is what lets callers use it as a membership test.
+    /// A reference is either a queue entry ("{id}#{millis}") or a bare track ID;
+    /// [`token_track_id`] reduces both to the same thing, so a list of any
+    /// length costs one round-trip rather than one per ID. References naming no
+    /// track are absent from the result, which makes it a membership test too.
     pub(crate) async fn fetch_tracks_for(
         &self,
         entries: impl Iterator<Item = &String>,

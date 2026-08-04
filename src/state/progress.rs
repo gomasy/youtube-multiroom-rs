@@ -1,15 +1,13 @@
 //! What clients are told about the yt-dlp-backed work in flight, and the
 //! cancellation generation that stops it.
 //!
-//! One entry per job, broadcast to every client as `downloads_update`. Every
-//! kind of job reports through here — a download walks an entry from the
+//! One entry per job, broadcast to every client as `downloads_update`. Nothing
+//! here knows what the work actually is: a download walks its entry from the
 //! metadata stage to a percentage, a metadata refresh only opens and closes
-//! one, a playlist import holds one until it has expanded into per-video
-//! downloads — which is why nothing below knows what the work actually does.
-//! A job is on display from the moment it is accepted rather than from its
-//! first yt-dlp call, so what the user asked for is visible while it queues.
-//! Kept in-process: a restart drops the map, and clients re-sync from the init
-//! snapshot.
+//! one, a playlist import holds one until it has expanded into per-video jobs.
+//! An entry opens the moment the job is accepted rather than at its first
+//! yt-dlp call, so what the user asked for is visible while it queues. Kept
+//! in-process: a restart drops the map and clients re-sync from `init`.
 
 use super::model::{DownloadKind, DownloadProgress, DownloadStatus};
 use super::ytdlp::DownloadError;
@@ -25,8 +23,8 @@ use tokio_util::sync::CancellationToken;
 const DOWNLOAD_ERROR_TTL_SECS: u64 = 60;
 
 /// Keeps a playlist import that is still resolving its video list out of the
-/// video ID keyspace. An implementation detail of the key: what the entry is
-/// tracking reaches clients as `DownloadKind`, not as a prefix to parse off.
+/// video ID keyspace. Internal to the key: clients learn what an entry tracks
+/// from `DownloadKind`, not by parsing a prefix off.
 const PLAYLIST_PROGRESS_PREFIX: &str = "list:";
 
 /// The progress key for a playlist import, the one job not named by a video ID.
@@ -35,11 +33,10 @@ pub(super) fn playlist_progress_key(list_id: &str) -> String {
 }
 
 impl AppState {
-    /// Mutate the download progress map and broadcast if changed.
-    /// `f` returns whether a notification-worthy change was made, which is
-    /// passed back for callers with their own bookkeeping to do only when the
-    /// map really changed. The payload is built while holding the lock to avoid
-    /// drift between state and broadcast.
+    /// Mutate the download progress map and broadcast if `f` reports a
+    /// notification-worthy change; that verdict is passed back for callers with
+    /// their own bookkeeping to do. The payload is built under the lock so the
+    /// broadcast cannot drift from the state.
     async fn update_downloads(
         &self,
         f: impl FnOnce(&mut HashMap<String, DownloadProgress>) -> bool,
@@ -64,21 +61,16 @@ impl AppState {
 
     /// Put a job on display and return the stamp identifying its entry, which
     /// `settle_progress` needs to close it out. Jobs start at the metadata
-    /// stage, and `title` is what the user sees until one of them moves on: a
-    /// download has no title yet, so it shows the video ID until
-    /// set_download_meta lands the real one, a metadata refresh has the stored
-    /// title to show and never leaves this stage at all, and a playlist import
-    /// shows the playlist ID until it has expanded into per-video jobs.
+    /// stage showing `title` — the video ID for a download until
+    /// set_download_meta lands the real one, the stored title for a metadata
+    /// refresh, the playlist ID for an import.
     ///
-    /// Called as early as the job is known — before waiting for the video's
-    /// slot, before the cache lookup — so a request the user has sent is on
-    /// display for all of it. That the display lives here rather than in the
-    /// client that asked is also what carries it across a reload: it comes back
-    /// with the init snapshot, to every client.
+    /// Called as early as the job is known, before the slot wait and the cache
+    /// lookup, so a request is on display for all of it. Living here rather
+    /// than in the client that asked is what carries it across a reload.
     ///
-    /// Yields None when the key already belongs to a job on display, which a
-    /// second request for the same video must not reset. The entry is that
-    /// job's to settle, so this one has nothing to close out.
+    /// None when the key already belongs to a job on display: that entry is the
+    /// other job's to settle, and a second request must not reset it.
     pub(super) async fn begin_progress(&self, key: &str, title: &str) -> Option<f64> {
         let started_at = now_f64();
         self.update_downloads(|downloads| insert_entry(downloads, key, title, started_at))
@@ -86,11 +78,10 @@ impl AppState {
             .then_some(started_at)
     }
 
-    /// Fold a finished job into the progress display: cleared once it completed
-    /// or was stopped — a cancellation is not a failure to report — and kept as
-    /// an error display for a while otherwise. Without a stamp from
-    /// `begin_progress` there is no entry of this job's own, so nothing here is
-    /// this job's to close out.
+    /// Fold a finished job into the display: cleared once it completed or was
+    /// stopped — a cancellation is not a failure to report — and kept on
+    /// display as an error for a while otherwise. Without a stamp from
+    /// `begin_progress` this job owns no entry and has nothing to close out.
     pub(super) async fn settle_progress<T>(
         self: &Arc<Self>,
         key: &str,
@@ -106,8 +97,8 @@ impl AppState {
         }
     }
 
-    /// Set the title after metadata fetch. Live streams are not downloaded
-    /// (they leave the list immediately on registration), so advance status only for non-live.
+    /// Set the title after the metadata fetch. Live streams are never
+    /// downloaded, so only a non-live job advances past the metadata stage.
     pub(super) async fn set_download_meta(&self, video_id: &str, title: &str, is_live: bool) {
         self.update_download(video_id, |d| {
             d.title = title.to_string();
@@ -119,9 +110,9 @@ impl AppState {
         .await;
     }
 
-    /// Update download percentage. yt-dlp emits progress lines at high frequency,
-    /// so only broadcast when the integer part changes. At 100%, mark as
-    /// processing: what is left is post-processing and the container rebuild.
+    /// Update the percentage. yt-dlp emits progress lines at high frequency, so
+    /// only a change in the integer part is broadcast. 100% means the remaining
+    /// work is post-processing and the container rebuild.
     pub(super) async fn set_download_percent(&self, video_id: &str, percent: f64) {
         self.update_download(video_id, |d| {
             let before = d.percent as u64;
@@ -180,13 +171,12 @@ impl AppState {
         self.download_cancel.lock().await.clone()
     }
 
-    /// Cancel all work started under the current token. Each active yt-dlp
-    /// process observes this token, stops its process group, and removes only its
-    /// own staging directory before returning.
+    /// Cancel all work started under the current token. Each active yt-dlp run
+    /// observes it, stops its process group, and removes only its own staging
+    /// directory before returning.
     pub async fn cancel_downloads(&self) {
-        // The guard is held until the stale progress snapshot has been cleared,
-        // so a download that already picked up the replacement token cannot
-        // have its progress entry erased by this call.
+        // Held until the stale progress snapshot is cleared, so a download that
+        // already picked up the replacement token keeps its entry.
         let mut token = self.download_cancel.lock().await;
         token.cancel();
         *token = CancellationToken::new();
@@ -212,11 +202,10 @@ impl AppState {
     }
 }
 
-/// Start an entry for `key`, unless the key already belongs to a job that is
-/// still running. What is left of a job that failed is a display, not an owner:
-/// a retry takes that entry over, so its progress is the one shown and the
-/// expiry the failure scheduled no longer applies to it. Whether the entry was
-/// inserted.
+/// Start an entry for `key` unless a still-running job already owns it,
+/// reporting whether one was inserted. What a failed job left behind is a
+/// display, not an owner: a retry takes the entry over, so its progress is what
+/// is shown and the expiry the failure scheduled no longer applies.
 fn insert_entry(
     downloads: &mut HashMap<String, DownloadProgress>,
     key: &str,
@@ -233,9 +222,6 @@ fn insert_entry(
         key.to_string(),
         DownloadProgress {
             id: key.to_string(),
-            // The prefix that keeps a playlist import out of the video ID
-            // keyspace is this module's business, so what the entry tracks is
-            // published as a field the client can switch on.
             kind: if key.starts_with(PLAYLIST_PROGRESS_PREFIX) {
                 DownloadKind::Playlist
             } else {
@@ -252,10 +238,9 @@ fn insert_entry(
 }
 
 /// The entry under `key`, while it is still the one `started_at` identifies.
-/// An entry belongs to the job that started it: once that job has settled and
-/// another has taken the key, every write the first one still owes — the
-/// outcome it is about to report, the error it will expire — is aimed at an
-/// entry that is no longer its own.
+/// An entry belongs to the job that started it: once another job has taken the
+/// key, every write the first still owes — the outcome it reports, the error it
+/// expires — is aimed at an entry that is no longer its own.
 fn owned_entry<'a>(
     downloads: &'a mut HashMap<String, DownloadProgress>,
     key: &str,

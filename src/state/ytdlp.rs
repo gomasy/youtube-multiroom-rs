@@ -67,14 +67,10 @@ fn snippet(s: &str) -> String {
     s.chars().take(300).collect()
 }
 
-/// What a failed child said on stderr, ready to put in an error message:
-/// drained, lossily decoded, trimmed and bounded. Every caller wants exactly
-/// this, and only on the failure path — draining is bounded rather than free,
-/// since a descendant can hold the pipe open, so success must not pay for it.
-///
-/// `None` is a reader that was never started or was already abandoned, which
-/// reports as no output: the alternative is claiming a drain that never
-/// happened.
+/// What a failed child said on stderr, ready for an error message: drained,
+/// lossily decoded, trimmed and bounded. Only called on the failure path —
+/// draining is not free, since a descendant can hold the pipe open. `None` is a
+/// reader never started or already abandoned, and reports as no output.
 pub(crate) async fn stderr_snippet(task: Option<tokio::task::JoinHandle<Vec<u8>>>) -> String {
     let buf = match task {
         Some(task) => drain_output(task).await.unwrap_or_default(),
@@ -99,8 +95,8 @@ pub(crate) fn parse_progress_percent(line: &str) -> Option<f64> {
 /// Run yt-dlp and return stdout on success within the timeout.
 /// On failure or timeout, return an error message (including stderr snippet).
 pub async fn run_yt_dlp(args: &[&str], timeout: time::Duration) -> Result<Vec<u8>, String> {
-    // Without a token the run is uncancellable, so DownloadError::Cancelled is
-    // unreachable here and the message form loses nothing.
+    // Uncancellable without a token, so DownloadError::Cancelled is unreachable
+    // and flattening to a message loses nothing.
     run_yt_dlp_cancellable(args, timeout, None)
         .await
         .map_err(|e| e.to_string())
@@ -145,10 +141,9 @@ pub(crate) async fn run_yt_dlp_cancellable(
         WaitOutcome::Exited(result) => {
             result.map_err(|e| format!("Failed to wait for yt-dlp: {e}"))?
         }
-        // A timeout and a stop end the run the same way, and sharing the
-        // teardown is what keeps them from drifting apart: kill the whole
-        // process group, then abandon the pipes rather than waiting for EOF,
-        // which a descendant that inherited them can delay indefinitely.
+        // A timeout and a stop share one teardown: kill the whole process
+        // group, then abandon the pipes rather than wait for an EOF a
+        // descendant that inherited them can delay indefinitely.
         stopped => {
             stop_yt_dlp(&mut child).await;
             stdout_task.abort();
@@ -174,8 +169,7 @@ pub(crate) async fn run_yt_dlp_cancellable(
     Ok(stdout)
 }
 
-/// Spawn yt-dlp with no stdin and both output streams piped. Every yt-dlp
-/// invocation goes through here so the stdio setup cannot drift between them.
+/// Spawn yt-dlp with no stdin and both output streams piped.
 ///
 /// Its own process group is what makes cancellation reliable: yt-dlp spawns
 /// ffmpeg for post-processing, and signalling the group reaches the whole tree

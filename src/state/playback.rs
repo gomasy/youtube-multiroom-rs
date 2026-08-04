@@ -35,10 +35,10 @@ impl AppState {
         })
     }
 
-    /// Return true only when the mode is confirmed to be "off". Used to decide
-    /// whether to stop ongoing playback, so on Redis error it falls back to
-    /// false (don't stop) — since the default is "off", playback_mode() alone
-    /// can't distinguish a transient error from a genuine "off".
+    /// True only when the mode is *confirmed* "off". Since the default is also
+    /// "off", playback_mode() cannot tell a transient Redis error from a
+    /// genuine one — and this decides whether to stop playback, so an error
+    /// reads as false.
     pub async fn playback_mode_is_off(&self) -> bool {
         match self.try_playback_mode().await {
             Ok(mode) => mode == "off",
@@ -79,16 +79,14 @@ impl AppState {
         expiry.filter(|&t| t > now_f64())
     }
 
-    /// Set a sleep timer that fires after `minutes` minutes. Spawns a task that
-    /// stops all devices and sets playback mode to "off" when it expires.
-    /// Returns the expiry time (UNIX seconds), or None if `minutes` is out of
-    /// range.
+    /// Set a sleep timer firing after `minutes`, spawning the task that stops
+    /// all devices and switches playback mode to "off". Returns the expiry
+    /// (UNIX seconds), or None when out of range.
     ///
-    /// The range is owned here rather than at the caller: `minutes` arrives
-    /// straight from a WebSocket payload, and `minutes * 60` would overflow u64
-    /// on an absurd value. Rejected rather than clamped — a client asking for a
-    /// year of sleep timer is not asking for a day — which also leaves a running
-    /// timer undisturbed by a nonsense request.
+    /// The range is enforced here because `minutes` arrives straight from a
+    /// WebSocket payload and `minutes * 60` would overflow u64. Rejected rather
+    /// than clamped — a client asking for a year is not asking for a day — so a
+    /// nonsense request also leaves a running timer undisturbed.
     pub async fn set_sleep_timer(self: &Arc<Self>, minutes: u64) -> Option<f64> {
         if !(1..=MAX_SLEEP_TIMER_MINUTES).contains(&minutes) {
             tracing::warn!("Rejecting out-of-range sleep timer: {minutes} minutes");
@@ -108,9 +106,8 @@ impl AppState {
         Some(expiry)
     }
 
-    /// Re-spawn the sleep timer task after a server restart. If a timer is
-    /// still active in Redis, calculate the remaining time and schedule the
-    /// expiry task so the timer actually fires.
+    /// Re-spawn the expiry task after a restart, so a timer still live in Redis
+    /// actually fires.
     pub async fn restore_sleep_timer(self: &Arc<Self>) {
         let Some(expiry) = self.sleep_timer().await else {
             return;

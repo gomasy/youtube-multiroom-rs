@@ -26,10 +26,10 @@ const TIMESTAMP_TOLERANCE_SECS: i64 = 150;
 /// Timeout for fetching the certificate chain.
 const CERT_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// Cap on cert fetches in flight. /alexa is unauthenticated, so anyone can make
-/// this endpoint issue an outbound request by naming a cert URL we have not
-/// cached. Steady-state traffic reuses the cache and never reaches the fetch,
-/// so a small cap is generous for real Alexa requests while keeping a flood of
-/// forged URLs from tying up connections and sockets.
+/// this endpoint issue an outbound request by naming an uncached cert URL.
+/// Steady-state traffic reuses the cache and never fetches at all, so a small
+/// cap is generous for real requests while a flood of forged URLs cannot tie up
+/// connections and sockets.
 const CERT_FETCH_MAX_INFLIGHT: usize = 4;
 /// Bound query-variant and certificate-rotation entries. Alexa normally uses a
 /// single URL, so this leaves ample overlap while preventing unbounded growth.
@@ -63,9 +63,9 @@ async fn cached_key(cert_url: &str) -> Option<PKey<Public>> {
     cache.get(cert_url).map(|c| c.key.clone())
 }
 
-/// Cache a verified key, keeping the map bounded. Only an entry for a URL not
-/// already cached can grow the map, and the soonest-to-expire entry is the one
-/// evicted, since it is the closest to being useless anyway.
+/// Cache a verified key, keeping the map bounded. Only a URL not already cached
+/// can grow it, and the soonest-to-expire entry is evicted as the one closest
+/// to being useless anyway.
 async fn cache_verified_key(cert_url: &str, key: PKey<Public>, not_after: SystemTime) {
     let mut cache = cert_cache().lock().await;
     prune_expired(&mut cache);
@@ -196,10 +196,9 @@ async fn fetch_verified_key(cert_url: &str) -> Result<PKey<Public>, String> {
         .map_err(|_| "timed out waiting for a certificate fetch slot".to_string())?
         .map_err(|e| format!("certificate fetch semaphore closed: {e}"))?;
 
-    // A request ahead of us in the queue may have fetched the same certificate
-    // while we waited, which is what a cold-start burst looks like once the
-    // permits are taken. The first CERT_FETCH_MAX_INFLIGHT requests never wait,
-    // so they still duplicate one fetch between them — bounded and one-off, and
+    // A request ahead in the queue may have fetched the same certificate while
+    // we waited. The first CERT_FETCH_MAX_INFLIGHT requests never wait, so they
+    // can still duplicate one fetch between them — bounded and one-off, and
     // cheaper than the per-URL single-flight map it would take to avoid.
     if let Some(key) = cached_key(cert_url).await {
         return Ok(key);
@@ -266,15 +265,15 @@ fn verify_cert_chain(pem: &[u8]) -> Result<(PKey<Public>, SystemTime), String> {
         ));
     }
 
-    // Convert the certificate's expiry to SystemTime for cache retention
+    // The expiry as a SystemTime, for cache retention.
     let now = Asn1Time::days_from_now(0).map_err(|e| format!("time init failed: {e}"))?;
     let remaining = now
         .diff(leaf.not_after())
         .map_err(|e| format!("failed to read cert expiry: {e}"))?;
     let secs = i64::from(remaining.days) * 86400 + i64::from(remaining.secs);
-    // A certificate with no lifetime left can verify nothing. Rejecting it here
-    // is also what makes the conversion exact rather than a cast that would turn
-    // an expired certificate into one valid for hundreds of billions of years.
+    // A certificate with no lifetime left verifies nothing. Rejecting it here
+    // also keeps the conversion exact, where a cast would turn an expired
+    // certificate into one valid for hundreds of billions of years.
     let not_after = match u64::try_from(secs) {
         Ok(secs) if secs > 0 => SystemTime::now() + Duration::from_secs(secs),
         _ => return Err("certificate expired".to_string()),

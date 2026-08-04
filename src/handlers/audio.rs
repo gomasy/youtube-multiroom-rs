@@ -40,8 +40,8 @@ pub async fn stream_audio(
         .map_or(ByteRange::Ignored, |r| parse_byte_range(r, total));
 
     if matches!(range, ByteRange::Unsatisfiable) {
-        // The current length has to come back with the 416 so the client can
-        // reissue a range that exists rather than guessing again.
+        // The current length goes back with the 416 so the client can reissue a
+        // range that exists rather than guess again.
         return Ok((
             StatusCode::RANGE_NOT_SATISFIABLE,
             [
@@ -81,11 +81,9 @@ pub async fn stream_audio(
 
 /// GET /api/audio/:id/live
 ///
-/// Live streams cannot be saved as files, so we resolve the CDN HLS URL via
-/// yt-dlp on each request, then relay audio-only (AAC) through ffmpeg as an
-/// ADTS stream. Echo devices cannot play muxed HLS with video, so server-side
-/// audio extraction is required. Audio is codec-copied (no re-encoding) for
-/// minimal CPU overhead.
+/// A live stream cannot be cached, so its CDN HLS URL is resolved per request
+/// and relayed through ffmpeg as ADTS AAC — an Echo cannot play muxed HLS, so
+/// the audio has to be extracted here. The codec is copied where possible.
 pub async fn live_audio(
     State(state): State<Arc<AppState>>,
     Path(audio_id): Path<String>,
@@ -97,10 +95,10 @@ pub async fn live_audio(
     }
 
     let url = watch_url(&audio_id);
-    // Prefer HLS which ffmpeg handles well. Live streams often lack audio-only
-    // formats, so fall back to the lowest-bitrate muxed HLS (video+audio).
-    // Also fetch acodec to decide whether re-encoding is needed.
-    // Use a short timeout since Echo devices can't wait long.
+    // HLS is what ffmpeg handles best; live streams often lack an audio-only
+    // format, so the fallback is the lowest-bitrate muxed one. acodec comes
+    // along to decide whether re-encoding is needed. The timeout is short
+    // because an Echo cannot wait long.
     let stdout = run_yt_dlp(
         &[
             "--print",
@@ -131,9 +129,8 @@ pub async fn live_audio(
         ));
     };
 
-    // AAC can be remuxed as-is; other codecs (Opus, etc.) need transcoding
-    // since ADTS only supports AAC. "unknown" acodec (common in muxed HLS)
-    // also triggers transcoding to be safe.
+    // ADTS carries only AAC, so anything else (Opus, or the "unknown" common in
+    // muxed HLS) is transcoded rather than copied.
     let codec_args: &[&str] = if acodec.starts_with("mp4a") || acodec.starts_with("aac") {
         &["-c:a", "copy"]
     } else {
@@ -157,9 +154,9 @@ pub async fn live_audio(
         .ok_or_else(|| AppError::internal("Failed to capture ffmpeg stdout"))?;
     let stderr = child.stderr.take();
 
-    // When Echo disconnects, the response body and stdout pipe close, causing
-    // ffmpeg to exit naturally via EPIPE. Reap the child to prevent zombies
-    // and log any stderr for debugging.
+    // An Echo disconnecting closes the response body and the stdout pipe, so
+    // ffmpeg exits on its own via EPIPE. Reaped here to avoid a zombie, with
+    // whatever it said on stderr logged.
     tokio::spawn(async move {
         let mut err_buf = String::new();
         if let Some(mut stderr) = stderr {
@@ -186,9 +183,8 @@ pub async fn live_audio(
 
 /// GET /api/audio/:id/url
 ///
-/// Returns a stream URL (signed relative path when auth is enabled) for
-/// browser preview playback via the audio element. This endpoint itself
-/// requires Bearer auth, so third parties cannot mint signed URLs.
+/// A stream URL for the browser preview player, signed when auth is enabled.
+/// This endpoint requires Bearer auth, so third parties cannot mint signed URLs.
 pub async fn audio_url(
     State(state): State<Arc<AppState>>,
     Path(audio_id): Path<String>,
@@ -206,10 +202,10 @@ enum ByteRange {
     /// A well-formed range that names no byte the file has. RFC 9110 §15.5.17
     /// requires a 416 here rather than quietly serving something else.
     Unsatisfiable,
-    /// Not a range we can act on. RFC 9110 §14.2 requires an unsatisfiable-to-
-    /// parse Range header to be ignored, so the whole file goes out as a 200.
-    /// Multi-range requests land here too: a 200 always satisfies them, whereas
-    /// answering with one of the parts would be wrong.
+    /// Not a range we can act on. RFC 9110 §14.2 requires an unparsable Range
+    /// header to be ignored, so the whole file goes out as a 200. Multi-range
+    /// requests land here too: a 200 satisfies them, whereas answering with one
+    /// of the parts would not.
     Ignored,
 }
 

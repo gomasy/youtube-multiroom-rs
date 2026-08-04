@@ -5,10 +5,8 @@
 //! to stay at the crate root, so only the resolution rules live here.
 
 /// Locale used when a request advertises no language, or one we don't ship.
-///
-/// Do not swap this for a hardcoded default: the i18n! macro's constant is the
-/// single source of truth for the fallback locale. Reported through die() like
-/// every other fatal condition rather than as a panic.
+/// Read from the i18n! macro's constant rather than hardcoded, so the two
+/// cannot disagree.
 pub fn fallback() -> &'static str {
     crate::_RUST_I18N_FALLBACK_LOCALE
         .and_then(|l| l.first())

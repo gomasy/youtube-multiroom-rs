@@ -73,8 +73,8 @@ pub(crate) const AUDIO_EXT: &str = "m4a";
 pub const AUDIO_MIME: &str = "audio/mp4";
 
 /// Log the result of a fire-and-forget Redis command. These callers have no
-/// meaningful recovery, but dropping the error silently would hide a broken
-/// Redis behind seemingly successful operations.
+/// recovery to offer, but a silently dropped error would hide a broken Redis
+/// behind seemingly successful operations.
 ///
 /// A macro rather than a function so the awaited result is bound before the
 /// format arguments are built: `fmt::Arguments` is not `Send`, and holding one
@@ -112,10 +112,9 @@ pub struct AppState {
     /// Serializes modifications to youtube:tracks_order so reorder's
     /// read-then-replace and extract/remove's LPUSH/LREM don't interleave.
     order_lock: Mutex<()>,
-    /// Per-video coordination between the yt-dlp-backed work on that video —
-    /// downloads, metadata refreshes — and a deletion of the track they
-    /// register (see [`ExtractSlot`]). Entries live only while such an
-    /// operation is in flight.
+    /// Per-video coordination between downloads, metadata refreshes and a
+    /// deletion of the track they register (see [`ExtractSlot`]). An entry
+    /// lives only while one of those is in flight.
     extract_slots: Mutex<HashMap<String, Arc<ExtractSlot>>>,
     /// In-progress download progress (video ID → progress). In-process only;
     /// lost on restart (clients re-sync via the init snapshot).
@@ -132,9 +131,9 @@ pub struct AppState {
     sleep_timer_gen: AtomicU64,
     /// Bumped on every track-list change. A client that fetched a page over
     /// REST before its WebSocket existed compares the revision it was served
-    /// with the one in init: equal means nothing happened in that gap and the
-    /// page it already has is current. In-process only, so it restarts at 0 —
-    /// clients treat every reconnect as a change regardless.
+    /// with the one in `init`: equal means the page it holds is still current.
+    /// In-process only, so it restarts at 0 — clients treat every reconnect as
+    /// a change regardless.
     tracks_rev: AtomicU64,
 }
 
@@ -146,10 +145,9 @@ impl AppState {
         let (tx, _) = broadcast::channel::<String>(256);
         // An unreadable working directory leaves the cache path relative, which
         // resolves to the same place for a server started the usual way. Both
-        // that and a failed create are reported rather than swallowed: every
-        // download lands here, so a cache directory that never appeared is the
-        // explanation for failures that would otherwise surface much later, one
-        // staging-directory error at a time.
+        // that and a failed create are reported rather than swallowed: a cache
+        // directory that never appeared explains failures that would otherwise
+        // surface much later, one staging-directory error at a time.
         let cache_dir = std::env::current_dir()
             .inspect_err(|e| tracing::warn!("Cannot read the working directory: {e}"))
             .unwrap_or_default()
@@ -204,14 +202,12 @@ impl AppState {
         }));
     }
 
-    /// Notify clients that the track list changed (content is re-fetched via REST).
-    ///
-    /// Not `async`: its frame carries no payload, so unlike most of its siblings
-    /// it has no state to read before sending.
+    /// Notify clients that the track list changed (content is re-fetched via
+    /// REST). Not `async`, unlike its siblings: the frame carries no payload,
+    /// so there is no state to read before sending.
     pub fn broadcast_tracks(&self) {
-        // Bump before sending: a client that reads the revision after receiving
-        // this frame must never be told the list is older than what it just
-        // heard about.
+        // Bumped before sending, so a client reading the revision after this
+        // frame is never told the list is older than what it just heard about.
         self.tracks_rev.fetch_add(1, Ordering::SeqCst);
         self.broadcast(tracks_update_message());
     }
@@ -247,9 +243,9 @@ pub fn tracks_update_message() -> Value {
     json!({ "type": "tracks_update" })
 }
 
-/// Time elapsed since the UNIX epoch. A clock that predates 1970 reads as zero
-/// rather than an error: every caller wants a number to derive a timestamp or an
-/// ID from, and none of them has a better answer to offer than the epoch itself.
+/// Time elapsed since the UNIX epoch. A clock predating 1970 reads as zero
+/// rather than an error: every caller wants a number to derive a timestamp or
+/// an ID from, and none has a better answer than the epoch itself.
 pub(crate) fn since_epoch() -> std::time::Duration {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -1,12 +1,12 @@
 //! Rebuilding a downloaded file's container.
 //!
 //! yt-dlp downloads a DASH-sourced m4a as fragments and, seeing a file already
-//! in the target format, skips the conversion that would have merged them. What
-//! it leaves is a header indexing none of the audio, followed by fragments that
-//! each describe their own samples. ffmpeg walks all of them, so the download
-//! and the browser preview see the whole track — but an Echo takes that header
-//! at its word and reports a multi-hour live archive as nearly finished minutes
-//! in. yt-dlp fixes this only for formats it knows are fragmented, which a
+//! in the target format, skips the conversion that would have merged them. The
+//! result is a header indexing none of the audio, followed by fragments each
+//! describing their own samples. ffmpeg walks all of them, so the download and
+//! the browser preview see the whole track — but an Echo takes the header at
+//! its word and reports a multi-hour live archive as nearly finished minutes
+//! in. yt-dlp only fixes this for formats it knows are fragmented, which a
 //! finished live stream is not by the time it is downloaded.
 
 use super::ytdlp::{DownloadError, abort_reader, spawn_reader, stderr_snippet};
@@ -73,8 +73,8 @@ async fn rebuild_into_place(
         }
     }
 
-    // A stream copy either carries over everything that was read or it fails,
-    // so nothing is expected to fall through here.
+    // A stream copy either carries over everything it read or fails, so this
+    // check is not expected to fire.
     let rebuilt_secs = readable_duration(rebuilt).await;
     if !rebuild_keeps_all_audio(readable, rebuilt_secs) {
         tracing::warn!(
@@ -167,11 +167,10 @@ async fn stream_copy(
     Ok(())
 }
 
-/// How many seconds of audio ffmpeg can read out of `path`. Deliberately not
-/// what the header claims: the demuxer walks every fragment to answer this,
-/// which is what makes it a measure of the audio actually reachable. `None`
-/// when ffprobe reports nothing usable, which callers treat as a file to leave
-/// alone rather than as a length.
+/// How many seconds of audio ffmpeg can read out of `path` — deliberately not
+/// what the header claims, since the demuxer walks every fragment to answer
+/// this. `None` when ffprobe reports nothing usable, which callers treat as a
+/// file to leave alone rather than as a length.
 async fn readable_duration(path: &Path) -> Option<f64> {
     let output = Command::new("ffprobe")
         .args([
@@ -191,7 +190,7 @@ async fn readable_duration(path: &Path) -> Option<f64> {
         return None;
     }
     // "N/A" for a file that yields no duration, and parse accepts "inf"/"nan",
-    // so the value has to be checked rather than just parsed.
+    // so the value is checked as well as parsed.
     String::from_utf8_lossy(&output.stdout)
         .trim()
         .parse::<f64>()

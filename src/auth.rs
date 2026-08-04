@@ -39,14 +39,14 @@ pub async fn require_token(
         return next.run(request).await;
     }
 
-    // Echo devices cannot attach Authorization headers, so stream URLs
-    // are authenticated via HMAC-signed query parameters (exp & sig)
+    // Echo devices cannot attach Authorization headers, so stream URLs are
+    // authenticated by HMAC-signed query parameters (exp & sig). Without a
+    // valid signature the request falls through to Bearer auth below.
     if let Some(audio_id) = audio_endpoint_id(path)
         && verify_stream_query(expected, audio_id, request.uri().query())
     {
         return next.run(request).await;
     }
-    // Fall through to normal Bearer token auth even without a signature
 
     let header_ok = request
         .headers()
@@ -112,11 +112,10 @@ fn verify_stream_query(secret: &str, audio_id: &str, query: Option<&str>) -> boo
 }
 
 fn sign(secret: &str, audio_id: &str, exp: u64) -> String {
-    // The one construction in this crate that cannot fail but is still modelled
-    // as a Result: HMAC hashes a key longer than the block size and pads a
-    // shorter one, so every length is accepted. There would be nothing safe to
-    // fall back to either — signing with anything but the configured secret
-    // hands out URLs that verify against nothing.
+    // Modelled as a Result but cannot fail: HMAC hashes a key longer than the
+    // block size and pads a shorter one, so every length is accepted. Nor would
+    // there be a safe fallback — signing with anything but the configured
+    // secret hands out URLs that verify against nothing.
     #[expect(
         clippy::expect_used,
         reason = "Hmac::new_from_slice accepts a key of any length"
@@ -130,8 +129,8 @@ fn sign(secret: &str, audio_id: &str, exp: u64) -> String {
 }
 
 /// Lowercase hex in a single allocation. An Echo re-verifies its signed URL on
-/// every Range request it issues during a track, so this runs far more often
-/// than the one signature per playback that produces it.
+/// every Range request during a track, so this runs far more often than the one
+/// signature per playback that produced it.
 fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);

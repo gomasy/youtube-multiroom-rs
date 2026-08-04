@@ -8,12 +8,10 @@ pub enum UrlKind {
     Unknown,
 }
 
-/// The canonical watch URL for a video ID.
-///
-/// Every yt-dlp invocation that names a single video builds its URL here rather
-/// than forwarding what the user typed: the ID has already been validated by
-/// [`extract_video_id`] or [`is_video_id`], so reconstructing the URL is what
-/// keeps a deceptive host out of yt-dlp's hands.
+/// The canonical watch URL for a video ID. Every yt-dlp invocation naming a
+/// single video builds its URL here rather than forwarding what the user typed:
+/// the ID has been validated by [`extract_video_id`] or [`is_video_id`], so
+/// rebuilding the URL keeps a deceptive host out of yt-dlp's hands.
 pub(crate) fn watch_url(video_id: &str) -> String {
     format!("https://www.youtube.com/watch?v={video_id}")
 }

@@ -63,9 +63,8 @@ pub struct AudioTrack {
 }
 
 impl AudioTrack {
-    /// Redis representation: the API shape plus the internal file path, which is
-    /// serde(skip)ped so it never reaches clients. Callers report the failure
-    /// rather than panicking, matching write_device.
+    /// Redis representation: the API shape plus the `serde(skip)`ped file path,
+    /// which never reaches clients.
     pub(crate) fn to_redis_json(&self) -> serde_json::Result<String> {
         let mut v = serde_json::to_value(self)?;
         v["file_path"] = json!(self.file_path);
@@ -82,13 +81,12 @@ impl AudioTrack {
 
     /// Read the video length in seconds from yt-dlp metadata.
     ///
-    /// The field comes back as a whole number for most videos but as a float
-    /// for the rest — flat playlist entries carry one, and yt-dlp falls back to
-    /// a parsed duration string when YouTube omits `lengthSeconds` — so both
-    /// forms are accepted. Reading only the integer form silently stored zero
-    /// for the others, which is what makes a track unseekable and hides its
-    /// length in the UI. Anything unusable (absent, negative, non-finite) is
-    /// reported as zero, the same "length unknown" every caller already handles.
+    /// Both the integer and float forms are accepted: flat playlist entries
+    /// carry a float, as does yt-dlp's parsed-duration fallback for videos
+    /// where YouTube omits `lengthSeconds`. Reading only the integer form
+    /// stored zero for those, leaving the track unseekable and its length
+    /// hidden. Anything unusable (absent, negative, non-finite) reads as zero,
+    /// the "length unknown" every caller already handles.
     pub(crate) fn extract_duration(meta: &Value) -> u64 {
         let duration = &meta["duration"];
         duration
@@ -153,15 +151,14 @@ pub enum ReorderOutcome {
 }
 
 /// The outcome of a write that appends to something the client named: a
-/// device's pending slot, its Up Next queue, a playlist's track list. All three
-/// are guarded by a Redis script that checks the target still exists, and all
-/// three callers need the same distinction — a target that is gone is a 404 and
-/// a skipped entry in a fan-out, whereas a write that failed is our fault.
+/// device's pending slot, its Up Next queue, a playlist's track list. Each is
+/// guarded by a Redis script checking the target still exists, and each caller
+/// needs the same distinction — a target that is gone is a 404 and a skipped
+/// entry in a fan-out, whereas a write that failed is our fault.
 ///
-/// A named outcome rather than `Result<bool, _>` because the interesting case is
-/// which of three things happened, not success versus failure: `Ok(false)`
-/// carried the "target is gone" meaning only by convention, and every call site
-/// had to restate it in a comment.
+/// Named rather than `Result<bool, _>`: the interesting question is which of
+/// three things happened, and `Ok(false)` carried "target is gone" only by
+/// convention every call site had to restate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteOutcome {
     /// The write landed.
@@ -185,13 +182,13 @@ pub struct DeviceState {
 }
 
 impl DeviceState {
-    /// Apply an update and advance last_update to `now`. All device state
-    /// changes must go through this method — position_ms means "position as of
+    /// Apply an update and advance last_update to `now`. Every device state
+    /// change must go through here: position_ms means "position as of
     /// last_update", so advancing last_update alone would rewind the client's
     /// estimated position.
     pub(crate) fn apply(&mut self, upd: DeviceUpdate, now: f64) {
-        // Updates without an explicit position (e.g. re-registration) advance
-        // position by elapsed time to stay consistent.
+        // Without an explicit position (a re-registration, say), the elapsed
+        // time is folded in to keep the two consistent.
         if upd.position_ms.is_none() {
             self.advance_position(now);
         }

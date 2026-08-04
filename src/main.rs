@@ -163,10 +163,10 @@ pub(crate) fn die(msg: impl std::fmt::Display) -> ! {
     process::exit(1);
 }
 
-/// Redact user credentials from a URL for log output. Every path that puts a
-/// connection URL in front of a human goes through here — the startup banner
-/// and AppState::new's connection error alike — because a Redis URL routinely
-/// carries a password and both destinations are stderr.
+/// Redact user credentials from a URL for log output. Every path that shows a
+/// connection URL to a human goes through here — the startup banner and
+/// AppState::new's connection error alike — since a Redis URL routinely
+/// carries a password.
 pub(crate) fn redact_url(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
         return url.to_string();

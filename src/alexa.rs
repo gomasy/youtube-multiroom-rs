@@ -9,7 +9,7 @@ use std::sync::Arc;
 const MAX_PLAYBACK_RETRIES: u32 = 3;
 
 /// Everything derived once from a request and needed throughout the response.
-/// Built in handle_alexa, which is where req_type — the thing both `locale` and
+/// Built in handle_alexa, which is where req_type — what both `locale` and
 /// `can_speak` come from — lives, so neither is re-derived downstream.
 struct ReqCtx<'a> {
     state: &'a Arc<AppState>,
@@ -31,13 +31,12 @@ impl ReqCtx<'_> {
     }
 }
 
-/// A track chosen to play next, with everything the directive for it needs.
+/// A track chosen to play next, with everything its directive needs.
 ///
-/// The three travel together through every selection path — pending command,
-/// Up Next queue, playback-mode auto-selection — and the token is not derivable
-/// from the track: a queue-sourced play uses the queue entry itself so
-/// PlaybackStarted can consume it by value, and auto-continuation carries a
-/// marker that PlaybackStarted checks the playback mode against.
+/// The token is not derivable from the track, which is why it travels along:
+/// a queue-sourced play reuses the queue entry so PlaybackStarted can consume
+/// it by value, and auto-continuation carries a marker PlaybackStarted checks
+/// the playback mode against.
 struct NextUp {
     track: AudioTrack,
     offset_ms: u64,
@@ -45,9 +44,8 @@ struct NextUp {
 }
 
 impl NextUp {
-    /// A play of `track` from `offset_ms` under a freshly minted token — what
-    /// every path that is neither consuming a queue entry nor carrying an
-    /// auto-continuation marker wants.
+    /// A play from `offset_ms` under a freshly minted token: every path that is
+    /// neither consuming a queue entry nor auto-continuing.
     fn at(track: AudioTrack, offset_ms: u64) -> Self {
         Self {
             token: new_token(&track.id),
@@ -149,20 +147,18 @@ async fn on_launch(ctx: &ReqCtx<'_>) -> Value {
 
 /// Start whatever opening the skill should start: a pending web command, the
 /// head of the Up Next queue, or — since the launch interrupted it — the track
-/// the device was playing or paused mid-way through. None when it has nothing
-/// to play.
+/// the device was part-way through. None when there is nothing to play.
 ///
-/// LaunchRequest and PlayFromWebIntent both go through here because Alexa
-/// routes skill-opening phrases to either one and the user means the same thing
-/// by both. Only the reply when there is nothing to play differs.
+/// LaunchRequest and PlayFromWebIntent share this because Alexa routes
+/// skill-opening phrases to either one; only the empty-handed reply differs.
 async fn start_or_resume(ctx: &ReqCtx<'_>) -> Option<Value> {
     if let Some(resp) = start_pending_or_queue(ctx).await {
         return Some(resp);
     }
 
-    // Only an interrupted track is resumed: one that already finished leaves
-    // the device idle while still remembering it, and replaying that from the
-    // top is not what opening the skill asked for.
+    // Only an interrupted track is resumed. A finished one leaves the device
+    // idle while still remembering it, and replaying it from the top is not
+    // what opening the skill asked for.
     let dev = ctx.state.get_device(&ctx.device_id).await?;
     if !dev.playback_in_progress() {
         return None;
@@ -170,16 +166,14 @@ async fn start_or_resume(ctx: &ReqCtx<'_>) -> Option<Value> {
     Some(resume_at(ctx, dev.current_track?, dev.position_ms).await)
 }
 
-/// Start playback from a pending command or the front of the "next up" queue.
-/// Returns None if neither is available. Queue playback is limited to when
-/// nothing is currently playing (to avoid discarding a track during seek
-/// reloads, etc.). Queue entries are used directly as the token and consumed
-/// by PlaybackStarted on value match.
+/// Start playback from a pending command or the front of the "next up" queue,
+/// or None if neither is available.
 ///
-/// Similar to pending_or_queue_next but with a different role: this one
-/// "immediately starts playback as a launch/resume response," consumes
-/// pending via take, and guards against interrupting an in-progress track.
-/// Use pending_or_queue_next for choosing the next track on skip/auto-continue.
+/// The counterpart to [`pending_or_queue_next`], which only *chooses* the next
+/// track for a skip or an auto-continuation. This one starts playback as the
+/// response to a launch or resume, so it consumes pending rather than peeking
+/// at it and leaves the queue alone while a track is in progress (a seek
+/// reload would otherwise discard one).
 async fn start_pending_or_queue(ctx: &ReqCtx<'_>) -> Option<Value> {
     if let Some(cmd) = ctx.state.take_pending(&ctx.device_id).await
         && cmd.action == "play"
@@ -247,8 +241,8 @@ async fn resume_playback(ctx: &ReqCtx<'_>) -> Value {
 /// Pick `track` up again from `offset_ms`: what an explicit Resume and a launch
 /// that interrupted playback both come down to.
 async fn resume_at(ctx: &ReqCtx<'_>, track: AudioTrack, offset_ms: u64) -> Value {
-    // Carrying on with a track is a fresh chance for it, so clear the failure
-    // counter — otherwise one left in the error state errors again immediately.
+    // Carrying on is a fresh chance for the track, so the failure counter is
+    // cleared — otherwise one left in the error state errors again at once.
     ctx.state.clear_playback_failures(&ctx.device_id).await;
     play_directive(ctx, &NextUp::at(track, offset_ms)).await
 }
@@ -257,7 +251,6 @@ async fn resume_at(ctx: &ReqCtx<'_>, track: AudioTrack, offset_ms: u64) -> Value
 /// scope order (random for shuffle). Advances even when playback mode is "off"
 /// since this is an explicit user command.
 async fn skip_next(ctx: &ReqCtx<'_>, body: &Value) -> Value {
-    // Reset failure counter on explicit action
     ctx.state.clear_playback_failures(&ctx.device_id).await;
     let current_token = playing_context_token(ctx, body).await;
 
@@ -268,7 +261,7 @@ async fn skip_next(ctx: &ReqCtx<'_>, body: &Value) -> Value {
             .skip_next_track(token_track_id(&current_token))
             .await
             .map(NextUp::fresh),
-        // Cannot confirm queue state; stay on current track to be safe
+        // Queue state unconfirmed; stay on the current track to be safe
         Err(()) => None,
     };
     match next {
@@ -309,8 +302,8 @@ async fn on_playback_controller(ctx: &ReqCtx<'_>, event_type: &str, body: &Value
 // ── AudioPlayer Events ──
 
 /// Everything an AudioPlayer event reports about the playback it concerns.
-/// Read once in [`on_audio_event`] and passed to whichever handler the event
-/// type selects, so no two of them can read the same field differently.
+/// Read once in [`on_audio_event`], so no two handlers can read a field
+/// differently.
 struct AudioEvent<'a> {
     /// The AudioPlayer token, which is also the queue entry for a
     /// queue-sourced play (see [`NextUp`]).
@@ -334,22 +327,20 @@ async fn on_audio_event(ctx: &ReqCtx<'_>, event_type: &str, body: &Value) -> Val
     match event_type {
         "AudioPlayer.PlaybackStarted" => return on_playback_started(ctx, &event).await,
         "AudioPlayer.PlaybackFinished" => {
-            // Track finished successfully; reset failure counter
             ctx.state.clear_playback_failures(&ctx.device_id).await;
             mark_idle(ctx).await;
         }
         "AudioPlayer.PlaybackStopped" => {
-            // Also fires for external interruptions (e.g., another content starting).
-            // Transition to "paused" to stop the client's estimated position from
-            // advancing while playback is actually stopped.
+            // Also fires for external interruptions (other content starting).
+            // "paused" stops the client's estimated position from advancing
+            // while playback is actually stopped.
             ctx.state
                 .pause_if_playing(&ctx.device_id, event.offset)
                 .await;
         }
         "AudioPlayer.PlaybackNearlyFinished" => {
-            // Don't consume pending here (PlaybackStarted handles that).
-            // ENQUEUE being discarded won't lose the track, and replayed events
-            // produce the same result.
+            // Pending is left for PlaybackStarted to consume, so a discarded
+            // ENQUEUE loses nothing and a replayed event is idempotent.
             if let Some(next) = queued_or_auto_next(ctx, event.token, true).await {
                 tracing::info!(
                     "Enqueueing next track '{}' on {}",
@@ -372,11 +363,10 @@ async fn on_playback_started(ctx: &ReqCtx<'_>, event: &AudioEvent<'_>) -> Value 
     let state = ctx.state;
     let device_id = &ctx.device_id;
 
-    // If an auto-continued track (loop/shuffle ENQUEUE) has started but
-    // the mode was switched to "off" in the meantime, stop it now.
-    // NearlyFinished often fires right after playback starts, so the
-    // mode check at ENQUEUE time alone is not enough.
-    // (playback_mode_is_off errs on the side of NOT stopping on Redis errors)
+    // An auto-continued track (loop/shuffle ENQUEUE) whose mode was switched to
+    // "off" in the meantime is stopped here: NearlyFinished often fires right
+    // after playback starts, so the check at ENQUEUE time is not enough.
+    // playback_mode_is_off errs towards NOT stopping on a Redis error.
     if is_auto_token(event.token) && state.playback_mode_is_off().await {
         tracing::info!(
             "Stopping auto-continued track on {} (playback mode is off)",
@@ -385,16 +375,16 @@ async fn on_playback_started(ctx: &ReqCtx<'_>, event: &AudioEvent<'_>) -> Value 
         return stop_directive(ctx, "idle").await;
     }
     tracing::info!("Playback started: {}", ctx.log_id());
-    // Reflect the current track from the token and the start position
-    // (seek-based ENQUEUE may start from a non-zero offset)
+    // A seek-based ENQUEUE can start from a non-zero offset, so the position
+    // comes from the event rather than being assumed to be zero.
     let mut upd = DeviceUpdate::new().status("playing").position(event.offset);
     if let Some(track) = state.get_track(event.track_id).await {
         upd = upd.track(track);
     }
     state.update_device(device_id, upd).await;
-    // If the started track matches a web-queued pending command, clear it.
-    // Also compare offset to avoid clearing a newer seek command (different
-    // offset) that arrived between directive issuance and playback start.
+    // Retire the pending command this play satisfied. The offset is compared
+    // too, so a newer seek that arrived between the directive and the start is
+    // not cleared by it.
     if state
         .peek_pending(device_id)
         .await
@@ -419,23 +409,19 @@ async fn on_playback_failed(ctx: &ReqCtx<'_>, event: &AudioEvent<'_>, body: &Val
     let device_id = &ctx.device_id;
     let err = &body["request"]["error"];
 
-    // If the failed track came from the "next up" queue, consume its
-    // entry so an unplayable item (e.g., ended live stream) doesn't block
-    // subsequent tracks
+    // Consume a queue-sourced entry so an unplayable item (an ended live
+    // stream, say) cannot block the tracks behind it.
     state.remove_queue_entry(device_id, event.token).await;
 
-    // A track confirmed gone explains the failure on its own: it was deleted
-    // while the device was playing it, taking its cache file along. Nothing is
-    // wrong with the device and there is nothing left to retry, so park it the
-    // way a finished track does rather than leave it reporting an error for
-    // something the user did deliberately.
+    // A track confirmed gone explains the failure by itself: it was deleted
+    // mid-playback, cache file and all. Nothing is wrong with the device and
+    // nothing is left to retry, so it is parked the way a finished track is
+    // rather than left reporting an error for something the user chose.
     //
-    // Which is why the lookup is try_get_track: get_track reads a Redis error
-    // as "missing" too, and clearing a device on the strength of a track we
-    // never managed to read would be inventing that explanation. An unreadable
-    // track keeps the old path instead — no track means retry_playback declines
-    // and the device is marked errored, which is the honest answer when nothing
-    // could be confirmed.
+    // Hence try_get_track: get_track reads a Redis error as "missing" too, and
+    // an unread track is no basis for that explanation. An unreadable one takes
+    // the retry path instead, which declines without a track and marks the
+    // device errored — the honest answer when nothing could be confirmed.
     let track = match state.try_get_track(event.track_id).await {
         Ok(Some(track)) => Some(track),
         Ok(None) => {
@@ -456,9 +442,9 @@ async fn on_playback_failed(ctx: &ReqCtx<'_>, event: &AudioEvent<'_>, body: &Val
         }
     };
 
-    // Live streams become unresolvable after they end, causing PlaybackFailed.
-    // This is normal termination, not an error — advance to the next track
-    // as with PlaybackFinished.
+    // A live stream becomes unresolvable once it ends, which surfaces as
+    // PlaybackFailed. That is normal termination, so it advances like
+    // PlaybackFinished rather than counting as an error.
     if let Some(track) = track.as_ref().filter(|t| t.is_live) {
         tracing::info!(
             "Live stream '{}' ended on {} ({:?})",
@@ -467,10 +453,10 @@ async fn on_playback_failed(ctx: &ReqCtx<'_>, event: &AudioEvent<'_>, body: &Val
             err
         );
         mark_idle(ctx).await;
-        // Avoid auto-selecting another live stream (it may also have ended,
-        // causing a failure chain). Pending (explicit web commands) are tried
-        // once (if it fails, pending remains and the same-track exclusion
-        // stops infinite retry).
+        // No auto-selecting another live stream: it may have ended too, and a
+        // chain of failures would follow. An explicit pending command is still
+        // tried once — it survives a failure, and the same-track exclusion
+        // stops it from retrying forever.
         if let Some(next) = queued_or_auto_next(ctx, event.token, false)
             .await
             .filter(|next| next.track.id != event.track_id)
@@ -478,8 +464,8 @@ async fn on_playback_failed(ctx: &ReqCtx<'_>, event: &AudioEvent<'_>, body: &Val
             return play_directive(ctx, &next).await;
         }
     } else {
-        // Retry a few times for transient failures (network drops, etc.).
-        // Only mark as error after exhausting retries.
+        // Transient failures (network drops) are retried; only an exhausted
+        // retry budget marks the device as errored.
         if let Some(resp) = retry_playback(ctx, body, event.token, track, err).await {
             return resp;
         }
@@ -505,10 +491,9 @@ async fn mark_idle(ctx: &ReqCtx<'_>) {
 
 // ── Helpers ──
 
-/// Determine the next track to play from: pending command → "next up" queue →
-/// playback mode auto-selection.
-/// When allow_live_auto is false, auto-selected live streams are excluded
-/// (pending and queue items are explicit user choices and are not filtered).
+/// The next track: pending command → "next up" queue → playback-mode
+/// auto-selection. With `allow_live_auto` false, only the auto-selected track
+/// is filtered for liveness — pending and queue items are explicit choices.
 async fn queued_or_auto_next(
     ctx: &ReqCtx<'_>,
     current_token: &str,
@@ -517,7 +502,7 @@ async fn queued_or_auto_next(
     match pending_or_queue_next(ctx, current_token).await {
         Ok(Some(next)) => return Some(next),
         Ok(None) => {}
-        // Cannot confirm queue state; skip auto-selection too for safety
+        // Queue state unconfirmed; skip auto-selection too, for safety
         Err(()) => return None,
     }
 
@@ -542,9 +527,8 @@ async fn pending_or_queue_next(
         return Ok(Some(NextUp::at(cmd.track, cmd.offset_ms)));
     }
 
-    // If the currently playing track's entry is still at the head (e.g.,
-    // PlaybackStarted consumption was lost to a Redis error), remove it
-    // before looking at the next entry
+    // The playing track's own entry can still be at the head if PlaybackStarted
+    // lost its consumption to a Redis error; drop it before looking further.
     while let Some((entry, track)) = ctx.state.peek_queue(&ctx.device_id).await {
         if entry == current_token {
             if !ctx.state.remove_queue_entry(&ctx.device_id, &entry).await {
@@ -585,9 +569,9 @@ fn no_track_response(can_speak: bool, text: &str) -> Value {
     }
 }
 
-/// Build a retry directive for PlaybackFailed. Returns None if the track
-/// cannot be resolved, the situation doesn't warrant a retry, or consecutive
-/// failures exceed MAX_PLAYBACK_RETRIES (caller should mark as error).
+/// Build a retry directive for PlaybackFailed. None when the track cannot be
+/// resolved, the situation does not warrant a retry, or consecutive failures
+/// exceed MAX_PLAYBACK_RETRIES — the caller marks the device errored.
 async fn retry_playback(
     ctx: &ReqCtx<'_>,
     body: &Value,
@@ -599,17 +583,15 @@ async fn retry_playback(
     let cps = &body["request"]["currentPlaybackState"];
     let failed_current = cps["token"].as_str() == Some(token);
 
-    // If the failed track is an ENQUEUE'd next track (not failed_current) and
-    // nothing is currently playing, don't retry — REPLACE_ALL during pause/stop
-    // would unexpectedly resume playback the user had stopped
+    // An ENQUEUE'd next track that failed while nothing is playing is not
+    // retried: the REPLACE_ALL would resume playback the user had stopped.
     if !failed_current && cps["playerActivity"].as_str() != Some("PLAYING") {
         return None;
     }
 
-    // Resume position: measured position for the failed current track; for a
-    // track that hadn't started yet (ENQUEUE failure), use the pending offset
-    // (web seek position) to preserve seek state and prevent PlaybackStarted
-    // from missing the pending
+    // The measured position for the track that was playing; for one that never
+    // started, the pending command's offset, so a web seek is preserved and
+    // PlaybackStarted still recognizes the pending it satisfies.
     let offset_ms = if failed_current {
         cps["offsetInMilliseconds"].as_u64().unwrap_or(0)
     } else {
@@ -636,9 +618,9 @@ async fn retry_playback(
         err
     );
 
-    // Carry forward the auto-continuation marker only if playback hasn't
-    // progressed yet. Resuming a partially-played track is not a new
-    // auto-continuation, so don't stop it if the mode was switched to "off"
+    // The auto-continuation marker only carries forward while playback has not
+    // progressed: resuming a partially played track is not a new
+    // auto-continuation and must not be stopped by a mode switched to "off".
     let retry = NextUp {
         token: if is_auto_token(token) && offset_ms == 0 {
             auto_token(&track.id)
@@ -649,8 +631,8 @@ async fn retry_playback(
         offset_ms,
     };
 
-    // If another track is currently playing and the ENQUEUE'd next track
-    // failed, retry as ENQUEUE to avoid interrupting the current track
+    // Retried as an ENQUEUE when it was the next track that failed, so the one
+    // still playing is not interrupted.
     if !failed_current {
         let current = cps["token"].as_str()?;
         return Some(play_response(ctx, &retry, Some(current)));
@@ -696,10 +678,9 @@ async fn play_directive(ctx: &ReqCtx<'_>, next: &NextUp) -> Value {
     play_response(ctx, next, None)
 }
 
-/// Build an AudioPlayer.Play response.
-/// If enqueue_after (the preceding token) is provided, use ENQUEUE; otherwise
-/// REPLACE_ALL. Device state is not updated for ENQUEUE (PlaybackStarted will
-/// reflect it once playback actually starts).
+/// Build an AudioPlayer.Play response: ENQUEUE after `enqueue_after`, or
+/// REPLACE_ALL without it. An ENQUEUE leaves the device state alone —
+/// PlaybackStarted reflects it once playback actually begins.
 fn play_response(ctx: &ReqCtx<'_>, next: &NextUp, enqueue_after: Option<&str>) -> Value {
     let NextUp {
         track,

@@ -32,9 +32,8 @@ static QUEUE_PLAY_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
 });
 
 /// Append to an Up Next queue only while the device is still registered. RPUSH
-/// creates the list key implicitly, so an unguarded append would leave an
-/// orphaned queue behind for a device that no longer exists — the same reason
-/// QUEUE_PLAY_SCRIPT guards the pending key.
+/// creates the list key implicitly, so an unguarded append would orphan a queue
+/// for a device that no longer exists.
 /// KEYS: devices hash, queue key. ARGV: device id, queue entry.
 /// Returns 1 when appended, 0 when the device is unknown.
 static PUSH_QUEUE_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
@@ -141,8 +140,8 @@ impl AppState {
             })
     }
 
-    /// Record the actual stop position. If still "playing", transition to "paused".
-    /// Does not overwrite "paused"/"stopped" already set by a Pause/Stop intent.
+    /// Record the reported stop position, moving "playing" to "paused". A
+    /// "paused"/"stopped" already set by a Pause/Stop intent is left alone.
     pub async fn pause_if_playing(&self, device_id: &str, offset_ms: u64) {
         let Some(mut dev) = self.get_device(device_id).await else {
             return;
@@ -191,10 +190,10 @@ impl AppState {
         self.playback_failures.lock().await.remove(device_id);
     }
 
-    /// Return device states with their Up Next queues attached. Called from
-    /// every Alexa webhook response path and every broadcast, so it is held to
-    /// three round-trips regardless of device count: HGETALL for the devices,
-    /// one pipeline for all queues, one HMGET for the tracks they reference.
+    /// Device states with their Up Next queues attached. On every Alexa webhook
+    /// response path and every broadcast, so it is held to three round-trips
+    /// regardless of device count: HGETALL for the devices, one pipeline for
+    /// all queues, one HMGET for the tracks they reference.
     pub async fn devices_json(&self) -> Value {
         let devices = self.all_devices().await;
         if devices.is_empty() {
@@ -248,13 +247,10 @@ impl AppState {
     // ── Pending command ──
 
     /// Queue playback for a device. [`WriteOutcome::Gone`] means the device is
-    /// not registered: the existence check and the pending write happen in one
-    /// Redis script, so a stale client targeting a deleted device cannot leave
-    /// an orphan pending key behind.
-    ///
-    /// A failure carries no detail because there is nothing a caller could do
-    /// with it — what went wrong is logged here, at the point that knows it, the
-    /// way every other write in this module reports its own errors.
+    /// not registered: the existence check and the write share one Redis
+    /// script, so a stale client targeting a deleted device cannot leave an
+    /// orphan pending key behind. A failure carries no detail — it is logged
+    /// here, where what went wrong is known.
     pub async fn queue_play(
         &self,
         device_id: &str,
@@ -293,10 +289,9 @@ impl AppState {
             return WriteOutcome::Gone;
         }
 
-        // Explicit play command from the web UI — reset consecutive failure
-        // records to allow retries.
+        // An explicit play from the web UI earns the track fresh retries
         self.clear_playback_failures(device_id).await;
-        // Align position to the queued start offset (used by Resume and the web UI)
+        // Aligned to the queued start offset, which Resume and the web UI read
         self.update_device(
             device_id,
             DeviceUpdate::new()
@@ -336,8 +331,7 @@ impl AppState {
     // ── Up Next queue ──
 
     /// Append a track to the device's Up Next queue. [`WriteOutcome::Gone`]
-    /// means the device is not registered; the check and the append share one
-    /// script, so a stale client cannot leave an orphaned queue behind.
+    /// means the device is not registered.
     pub async fn push_queue(&self, device_id: &str, track_id: &str) -> WriteOutcome {
         let mut conn = self.redis.clone();
         match PUSH_QUEUE_SCRIPT

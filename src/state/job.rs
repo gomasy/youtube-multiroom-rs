@@ -1,11 +1,10 @@
 //! The shape shared by the background jobs that visit one video at a time.
 //!
-//! A playlist import and a bulk metadata refresh do different work, but they
-//! stop under the same rules, and those rules are the subtle part: only a real
-//! Stop all ends the job, a cancellation without one means that single video
-//! dropped out — its track was deleted mid-fetch — and the rest still stands,
-//! and however the job ends it reports how far it got. Keeping that in one
-//! place is what stops the two from drifting apart.
+//! A playlist import and a bulk metadata refresh do different work but stop
+//! under the same rules, which are the subtle part: only a real Stop all ends
+//! the job, a cancellation without one means that single video dropped out (its
+//! track was deleted mid-fetch) and the rest still stands, and however the job
+//! ends it reports how far it got.
 
 use super::ytdlp::DownloadError;
 use tokio_util::sync::CancellationToken;
@@ -42,20 +41,17 @@ impl VideoJob {
         }
     }
 
-    /// Visit each video in turn until the list runs out or the job is stopped.
-    ///
-    /// `visit` owns the work and its own success logging; everything it can
-    /// report — progress, a per-video failure, a reason to stop early — is
-    /// folded into the tally and the log lines here.
+    /// Visit each video in turn until the list runs out or the job is stopped,
+    /// returning the tally however it ended. `visit` owns the work and its own
+    /// success logging; what it reports — a per-video failure, a reason to stop
+    /// early — is folded into the tally and log lines here.
     ///
     /// The ID is handed over owned rather than lent: an `AsyncFnMut` borrowing
-    /// it makes the returned future higher-ranked, which is enough to stop
-    /// `tokio::spawn` from proving the whole job `Send`. One `String` per
-    /// yt-dlp run is not a cost worth contorting the signature for.
+    /// it makes the returned future higher-ranked, which stops `tokio::spawn`
+    /// from proving the job `Send`.
     ///
-    /// Returns the tally, however the job ended. Both callers spawn it and
-    /// ignore the number — it has already been logged — but having the loop
-    /// report what it did is what lets the stopping rules be tested.
+    /// Both callers spawn this and ignore the tally — it is already logged —
+    /// but returning it is what lets the stopping rules be tested.
     pub(crate) async fn run<F, Fut>(
         self,
         video_ids: &[String],

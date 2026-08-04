@@ -44,19 +44,16 @@ pub async fn play_on_all(
 
 /// Apply a per-device write to every target, returning the devices it reached.
 ///
-/// A device the client named but that is no longer registered is skipped rather
-/// than failing the request: the client's list is a snapshot, and one stale
-/// entry must not cost the user the devices that are still there. Reaching none
-/// at all is the error, and which error depends on why — a device that exists
-/// but could not be written to is our fault, not a malformed request.
+/// A named device that is no longer registered is skipped rather than failing
+/// the request: the client's list is a snapshot, and one stale entry must not
+/// cost the user the devices still there. Reaching none at all is the error,
+/// and which error depends on why — a device that exists but could not be
+/// written to is our fault, not a malformed request. `failed` carries no Redis
+/// detail; the write already logged it.
 ///
-/// `failed` carries no Redis detail: the write that failed already logged its
-/// own error, and repeating it to the client only exposes internals.
-///
-/// The ID is handed over owned for the reason [`crate::state`]'s `VideoJob::run`
-/// documents: a `write` that borrowed it would make the returned future
-/// higher-ranked, which is enough to stop axum from proving the handler `Send`.
-/// One `String` clone per device is not a cost worth contorting the signature for.
+/// The ID is handed over owned for the reason `VideoJob::run` documents: a
+/// borrowing `write` makes the returned future higher-ranked, which stops axum
+/// from proving the handler `Send`.
 async fn reach_devices<F, Fut>(
     device_ids: Vec<String>,
     failed: &'static str,
@@ -118,8 +115,8 @@ pub async fn queue_next(
 ) -> AppResult<Json<Value>> {
     let locale = client_locale(&headers);
     let track = track_or_404(&state, &req.track_id).await?;
-    // Lent to the closure rather than moved: `reach_devices` calls it once per
-    // device, so it has to stay callable, and both are needed again below.
+    // Lent rather than moved: the closure is called once per device, and both
+    // are needed again below.
     let (state, track) = (&state, &track);
     let queued = reach_devices(req.device_ids, "Failed to queue track", |did| async move {
         state.push_queue(&did, &track.id).await
@@ -136,15 +133,14 @@ pub async fn queue_next(
 
 /// DELETE /api/devices/:id/queue/:entry
 ///
-/// Remove a single queue item by entry value match. Entries are unique, so
-/// even if a device consumes it concurrently, a different track won't be
-/// accidentally removed.
+/// Remove one queue item by value match. Entries are unique, so a device
+/// consuming one concurrently cannot cause the wrong track to be removed.
 pub async fn remove_queue_item(
     State(state): State<Arc<AppState>>,
     Path((device_id, entry)): Path<(String, String)>,
 ) -> AppResult<Json<Value>> {
     let removed = state.remove_queue_entry(&device_id, &entry).await;
-    // Always broadcast latest state even on miss (client's view may be stale)
+    // Broadcast even on a miss: the client's view may be the stale one
     state.broadcast_devices().await;
     if !removed {
         return Err(AppError::not_found("Queue item not found"));
@@ -158,7 +154,7 @@ pub async fn clear_queue(
     Path(device_id): Path<String>,
 ) -> AppResult<Json<Value>> {
     // DEL cannot tell "no device" from "empty queue", so existence is checked
-    // separately — but only for existence, not for the device's contents
+    // separately.
     if !state.device_exists(&device_id).await {
         return Err(AppError::not_found("Device not found"));
     }
@@ -210,8 +206,8 @@ pub async fn stop_device(
     State(state): State<Arc<AppState>>,
     Path(device_id): Path<String>,
 ) -> AppResult<Json<Value>> {
-    // update_device already reads the device, so let it report the 404 rather
-    // than paying for a second lookup
+    // update_device already reads the device, so it reports the 404 rather than
+    // us paying for a second lookup
     if !state
         .update_device(&device_id, DeviceUpdate::new().status("stopped"))
         .await

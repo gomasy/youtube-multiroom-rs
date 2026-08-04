@@ -15,14 +15,13 @@ pub async fn ws_upgrade(State(state): State<Arc<AppState>>, ws: WebSocketUpgrade
     ws.on_upgrade(move |socket| ws_handler(socket, state))
 }
 
-/// Snapshot of the pushed state a client mirrors. Deliberately excludes the
-/// track list, which the client pages in over REST — callers that also need
-/// tracks refreshed must send tracks_update_message() alongside it. Applied
-/// idempotently by the client, so resending is always safe.
+/// Snapshot of the pushed state a client mirrors, applied idempotently so
+/// resending is always safe. Deliberately excludes the track list, which the
+/// client pages in over REST — callers that need it refreshed too must send
+/// tracks_update_message() alongside.
 ///
-/// The six reads are independent, so they are issued together: the Redis
-/// connection is multiplexed, and this runs on both connect and lag resync,
-/// where the client is already behind.
+/// The six reads are independent and the Redis connection is multiplexed, so
+/// they are issued together.
 async fn init_message(state: &AppState) -> String {
     let (devices, playback_mode, downloads, playlists, active_playlist, sleep_timer) = tokio::join!(
         state.devices_json(),
@@ -49,13 +48,10 @@ async fn init_message(state: &AppState) -> String {
 }
 
 async fn ws_handler(mut socket: WebSocket, state: Arc<AppState>) {
-    // Subscribe before building the snapshot to avoid missing updates that
-    // arrive during snapshot assembly (e.g., download completion removing an
-    // entry), which would leave init stale with no subsequent correction.
+    // Subscribed before the snapshot is built: an update landing mid-assembly
+    // would otherwise leave init stale with no correction behind it.
     let mut rx = state.tx.subscribe();
 
-    // Send initial state (track list is fetched via REST pagination).
-    // Include in-progress downloads so the progress display is restored after reload.
     if socket
         .send(Message::Text(init_message(&state).await.into()))
         .await
@@ -81,9 +77,9 @@ async fn ws_handler(mut socket: WebSocket, state: Arc<AppState>) {
                             break;
                         }
                     }
-                    // This client fell behind and the skipped messages are gone.
-                    // Resend the full snapshot plus a tracks_update so it
-                    // re-syncs everything instead of drifting silently.
+                    // The skipped messages are gone, so the full snapshot plus a
+                    // tracks_update resyncs the client rather than letting it
+                    // drift silently.
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         tracing::warn!("WebSocket client lagged by {n} message(s); resyncing");
                         let init = init_message(&state).await;
@@ -109,8 +105,8 @@ async fn ws_handler(mut socket: WebSocket, state: Arc<AppState>) {
 
             // Client → server
             recv = socket.recv() => {
-                // Handle both clean disconnects (None) and errors to ensure we
-                // always break out of the loop and don't leak the task
+                // Clean disconnects (None) and errors both have to break the
+                // loop, or the task leaks.
                 match recv {
                     Some(Ok(Message::Text(text))) => {
                         if let Ok(data) = serde_json::from_str::<Value>(&text) {
@@ -158,11 +154,10 @@ async fn handle_ws_message(
         }
         "set_sleep_timer" => {
             let requested = &data["minutes"];
-            // Absent and null both mean "no timer"; anything else has to be a
-            // whole number of minutes. A field that is present but unusable
-            // (negative, fractional, non-numeric) is a malformed request, not a
-            // cancellation — reading it as one would silently drop a running
-            // timer the user never asked to stop.
+            // Absent and null both mean "no timer"; anything else must be a
+            // whole number of minutes. A present but unusable value (negative,
+            // fractional, non-numeric) is malformed, not a cancellation —
+            // treating it as one would drop a timer nobody asked to stop.
             let minutes = if requested.is_null() {
                 Some(0)
             } else {
@@ -171,9 +166,8 @@ async fn handle_ws_message(
             match minutes {
                 Some(0) => state.cancel_sleep_timer().await,
                 Some(minutes) => {
-                    // The valid range belongs to set_sleep_timer; a rejected
-                    // value leaves any running timer alone, so there is nothing
-                    // to broadcast
+                    // The range belongs to set_sleep_timer; a rejected value
+                    // leaves a running timer alone, so nothing to broadcast
                     if state.set_sleep_timer(minutes).await.is_none() {
                         return;
                     }
@@ -190,10 +184,9 @@ async fn handle_ws_message(
 }
 
 /// Kick off a download for the requested URL. Downloads can take minutes, so
-/// the work runs on its own task and reports back over client_tx; the select
-/// loop must stay free to service broadcasts and further commands meanwhile.
-/// The client is not left holding anything either: the work puts itself on
-/// display as soon as it is accepted, so the reply below is only the outcome.
+/// the work runs on its own task and reports back over client_tx, leaving the
+/// select loop free for broadcasts and further commands. The work puts itself
+/// on display as soon as it is accepted, so the reply is only the outcome.
 async fn start_extract(
     state: &Arc<AppState>,
     client_tx: &UnboundedSender<String>,
@@ -207,8 +200,8 @@ async fn start_extract(
         let _ = client_tx.send(msg.to_string());
         return;
     };
-    // Capture the token before spawning, so a stop received immediately
-    // afterward still cancels this request.
+    // Captured before spawning, so a stop arriving immediately afterwards still
+    // cancels this request.
     let cancel = state.download_token().await;
     let state = state.clone();
     let tx = client_tx.clone();
