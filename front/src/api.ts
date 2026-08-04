@@ -5,8 +5,10 @@ export const PER_PAGE = 10;
 
 let apiToken = localStorage.getItem("api_token");
 
-/// Thrown on a 401. Callers that already react via onUnauthorized (auth modal)
-/// can use this to avoid also showing a redundant error toast.
+/**
+ * Thrown on a 401. Callers that already react via onUnauthorized (auth modal)
+ * can use this to avoid also showing a redundant error toast.
+ */
 export class UnauthorizedError extends Error {}
 
 export function getToken(): string | null {
@@ -32,8 +34,8 @@ async function authFetch(
   options: RequestInit = {},
   onUnauthorized?: () => void,
 ): Promise<Response> {
-  // Copy rather than assign into `options`: it belongs to the caller, and a
-  // request that is retried or reused must not inherit an earlier token.
+  // Copied rather than assigned into `options`, which belongs to the caller: a
+  // reused request must not inherit an earlier token.
   const res = await fetch(url, {
     ...options,
     headers: { ...authHeaders(), ...(options.headers as Record<string, string>) },
@@ -45,7 +47,7 @@ async function authFetch(
   return res;
 }
 
-/// Perform an authFetch and throw t(errorKey) on a non-OK response.
+/** Perform an authFetch and throw t(errorKey) on a non-OK response. */
 export async function authOk(
   url: string,
   errorKey: string,
@@ -57,13 +59,13 @@ export async function authOk(
   return res;
 }
 
-/// Path builders for the resources addressed by ID. Routed through here so no
-/// call site can forget to escape an ID into the URL.
+// Path builders for the resources addressed by ID. Routed through here so no
+// call site can forget to escape an ID into the URL.
 const playlistPath = (playlistId: string) =>
   `/api/playlists/${encodeURIComponent(playlistId)}`;
 const devicePath = (deviceId: string) => `/api/devices/${encodeURIComponent(deviceId)}`;
 
-/// authOk that parses the response body as JSON.
+/** authOk that parses the response body as JSON. */
 async function authJson<T>(
   url: string,
   errorKey: string,
@@ -203,9 +205,11 @@ export async function bulkDeleteTracks(
   );
 }
 
-/// Start a background re-fetch of the given tracks' metadata. `total` is how
-/// many tracks the job will visit — the refresh itself lands later, as
-/// tracks_update frames.
+/**
+ * Start a background re-fetch of the given tracks' metadata. `total` is how
+ * many tracks the job will visit; the refresh itself lands later, as
+ * tracks_update frames.
+ */
 export async function refreshTracksMetadata(
   trackIds: string[],
   onUnauthorized?: () => void,

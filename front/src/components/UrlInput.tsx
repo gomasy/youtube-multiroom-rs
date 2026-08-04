@@ -6,16 +6,20 @@ import { TrackRowInfo } from "./TrackRowInfo";
 import type { Track } from "../types";
 
 interface Props {
-  /// Returns whether the request actually went out. A rejected one leaves the
-  /// text where it is, so it can be sent again once the socket is back.
+  /**
+   * Returns whether the request actually went out. A rejected one leaves the
+   * text where it is, so it can be sent again once the socket is back.
+   */
   onExtract: (url: string) => boolean;
   onUnauthorized: () => void;
   showToast: (msg: string) => void;
 }
 
 const SCHEME_RE = /^[a-z][a-z\d+.-]*:\/\//i;
-/// Only decides the button label and paste auto-submit. The authoritative check
-/// is parse_youtube_url() in src/state/url.rs — keep the host list in sync with it.
+/**
+ * Only decides the button label and paste auto-submit. The authoritative check
+ * is parse_youtube_url() in src/state/url.rs — keep the host list in sync with it.
+ */
 const YOUTUBE_HOSTS = new Set([
   "youtube.com",
   "www.youtube.com",
@@ -45,8 +49,10 @@ export function UrlInput({ onExtract, onUnauthorized, showToast }: Props) {
 
   const isUrl = isYoutubeUrl(value);
 
-  /// Drop any in-flight search so a late response cannot overwrite the results
-  /// the user is now looking at.
+  /**
+   * Drop any in-flight search so a late response cannot overwrite the results
+   * the user is now looking at.
+   */
   function cancelSearch() {
     searchRef.current?.abort();
     searchRef.current = null;
@@ -60,10 +66,9 @@ export function UrlInput({ onExtract, onUnauthorized, showToast }: Props) {
       return;
     }
     if (isYoutubeUrl(trimmed)) {
-      // Hand the box back the moment the request is out. The server puts the
-      // request on display in the list below and keeps it there across a
-      // reload, so holding the input until it finishes would do nothing but
-      // keep the next URL from being queued behind it.
+      // The box is handed back the moment the request is out: the server
+      // displays it in the list below and keeps it there across a reload, so
+      // holding the input would only stop the next URL being queued.
       if (!onExtract(trimmed)) return;
       cancelSearch();
       setValue("");

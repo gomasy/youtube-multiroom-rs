@@ -21,13 +21,15 @@ interface WSCallbacks {
   onConnectedChange: (connected: boolean) => void;
 }
 
-/// Reconnect backoff. Doubles per consecutive failure so a server that stays
-/// down is not hammered once every 3 seconds by every open tab.
+// Reconnect backoff, doubling per consecutive failure so a server that stays
+// down is not hammered once every 3 seconds by every open tab.
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 
-/// A frame we cannot parse is not worth tearing the connection down for, so
-/// report it and let the socket carry on.
+/**
+ * A frame we cannot parse is not worth tearing the connection down for, so
+ * report it and let the socket carry on.
+ */
 function parseMessage(raw: string): WSMessage | null {
   try {
     return JSON.parse(raw);
@@ -81,11 +83,11 @@ export function useWebSocket(active: boolean, callbacks: WSCallbacks) {
         case "init":
           if (data.version) cb.onVersion(data.version);
           cb.onInit(data.devices || {});
-          // The REST snapshot is fetched before this subscription exists, so
-          // the gap has to be reconciled here rather than waited out.
+          // The REST snapshot predates this subscription, so the gap is
+          // reconciled here rather than waited out.
           cb.onInitTracks(data.tracks_rev);
           if (data.playback_mode) cb.onPlaybackMode(data.playback_mode);
-          // Re-sync in-progress download display on reload/reconnect
+          // Restores the progress display after a reload or reconnect
           cb.onDownloadsUpdate(data.downloads || []);
           cb.onPlaylistsUpdate(data.playlists || []);
           cb.onActivePlaylist(data.active_playlist ?? null);
@@ -122,8 +124,8 @@ export function useWebSocket(active: boolean, callbacks: WSCallbacks) {
           cb.onPlaylistImportStarted(data.name, data.total);
           break;
         // extract_audio_cancelled is deliberately silent: Stop all already
-        // clears the progress display for every job it stopped, so a toast per
-        // cancelled request would only report what the user just asked for.
+        // clears the display for every job it stopped, so a toast per cancelled
+        // request would only report what the user just asked for.
       }
     };
 
@@ -159,50 +161,59 @@ export function useWebSocket(active: boolean, callbacks: WSCallbacks) {
   return { sendMessage };
 }
 
-/// How long a drag held over a pagination button waits before turning the page,
-/// and how far from the viewport edge it starts scrolling (and by how much).
+// How long a drag held over a pagination button waits before turning the page,
+// and how far from the viewport edge it starts scrolling (and by how much).
 const PAGE_FLIP_MS = 650;
 const EDGE_SCROLL_MARGIN = 70;
 const EDGE_SCROLL_STEP = 14;
 
 interface ReorderOptions {
-  /// The page on screen, and the page the loaded tracks were fetched for. They
-  /// differ between a page change and its fetch landing, and every index below
-  /// is global (page offset + row), so both are needed.
+  /**
+   * The page on screen, and the page the loaded tracks were fetched for. These
+   * differ between a page change and its fetch landing, and every index here is
+   * global (page offset + row), so both are needed.
+   */
   page: number;
   loadedPage: number;
   totalPages: number;
   setPage: Dispatch<SetStateAction<number>>;
   tracks: Track[];
   setTracks: Dispatch<SetStateAction<Track[]>>;
-  /// Whether there is an order to edit at all. A single track has nothing to
-  /// move, and a filtered view is not showing the stored order, so a drop
-  /// position in it would name the wrong slot.
+  /**
+   * Whether there is an order to edit. A single track has nothing to move, and
+   * a filtered view is not showing the stored order, so a drop position in it
+   * would name the wrong slot.
+   */
   enabled: boolean;
-  /// Playlist whose order is being edited (null reorders the whole library).
+  /** Playlist whose order is being edited (null reorders the whole library). */
   playlistId: string | null;
   onUnauthorized: () => void;
   onError: (error: unknown) => void;
-  /// Run once the move has been persisted or has failed, so the caller can
-  /// re-fetch and replace the optimistic order with what the server stored.
+  /**
+   * Run once the move has been persisted or has failed, so the caller can
+   * re-fetch and replace the optimistic order with what the server stored.
+   */
   onSettled: () => void;
 }
 
-/// Drag-to-reorder for a paginated track list.
-///
-/// Owns the pointer gesture end to end: where the row would drop, dragging past
-/// the viewport edge to scroll, holding over a pagination button to turn the
-/// page, and the optimistic reorder that is written back when the pointer is
-/// released. The caller supplies the list state and gets back the refs to
-/// attach and the two indices that drive the row styling.
+/**
+ * Drag-to-reorder for a paginated track list.
+ *
+ * Owns the pointer gesture end to end: the drop position, edge scrolling,
+ * holding over a pagination button to turn the page, and the optimistic
+ * reorder written back on release. The caller supplies the list state and gets
+ * back the refs to attach and the indices that drive the row styling.
+ */
 export function useTrackReorder(opts: ReorderOptions) {
   const { page, loadedPage, totalPages, setPage, tracks, setTracks, enabled } = opts;
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropIndex, setDropIndex] = useState<number | null>(null);
-  /// Where the drag began. Kept because the row can leave the loaded page
-  /// mid-drag (a page flip), and the move is still relative to where it started.
+  /**
+   * Where the drag began. Kept because the row can leave the loaded page
+   * mid-drag (a page flip), and the move is still relative to where it started.
+   */
   const dragOrigin = useRef<{ track: Track; globalIndex: number } | null>(null);
-  /// Direction the held-over pagination button is flipping in, 0 for neither.
+  /** Direction the held-over pagination button is flipping in, 0 for neither. */
   const [flipDir, setFlipDir] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
   const prevBtnRef = useRef<HTMLButtonElement>(null);
@@ -225,8 +236,10 @@ export function useTrackReorder(opts: ReorderOptions) {
     setDropIndex(null);
   }
 
-  /// The row index the drop would land before, from the pointer's position
-  /// relative to each row's midpoint. Past the last midpoint it is the end.
+  /**
+   * The row index the drop would land before, from the pointer's position
+   * relative to each row's midpoint. Past the last midpoint it is the end.
+   */
   function updateDropIndex(clientY: number) {
     const list = listRef.current;
     if (!list) return;
@@ -278,9 +291,11 @@ export function useTrackReorder(opts: ReorderOptions) {
     updateDropIndex(e.clientY);
   }
 
-  /// Apply the move where the pointer was released: reorder the visible rows at
-  /// once so the list does not snap back while the request is in flight, then
-  /// persist and let the caller re-fetch the authoritative order.
+  /**
+   * Apply the move where the pointer was released: reorder the visible rows at
+   * once so the list does not snap back mid-request, then persist and let the
+   * caller re-fetch the authoritative order.
+   */
   async function commit() {
     const id = dragId;
     const to = dropIndex;

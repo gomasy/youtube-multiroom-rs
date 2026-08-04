@@ -279,17 +279,18 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
     });
   }
 
-  // The bulk action: removal from the open playlist, or permanent deletion
-  // from the library when no playlist is open. The two are never
-  // interchangeable, so the view is resolved once up front and every later
-  // step is checked against it — the awaits below give the user time to switch
-  // views, and acting on the new view would touch the wrong tracks.
+  /**
+   * Removal from the open playlist, or permanent deletion from the library when
+   * none is open. The two are never interchangeable, so the view is resolved
+   * once up front and re-checked after every await — those give the user time
+   * to switch views, and acting on the new one would touch the wrong tracks.
+   */
   async function bulkRemove() {
     if (selected.size === 0) return;
     const trackIds = Array.from(selected);
     const playlist = viewingPlaylist;
-    // A playlist is open but its metadata is gone (concurrently deleted, say).
-    // Do nothing rather than fall through to deleting from the library.
+    // A playlist is open but its metadata is gone (deleted concurrently). Do
+    // nothing rather than fall through to deleting from the library.
     if (viewPlaylist !== null && playlist === null) return;
 
     const confirmed = playlist
@@ -318,9 +319,11 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
     }
   }
 
-  // Unlike the other bulk actions this one is not scoped to the open view:
-  // metadata belongs to the track itself, so refreshing from inside a playlist
-  // updates the same library entries the library view would.
+  /**
+   * Unlike the other bulk actions, not scoped to the open view: metadata
+   * belongs to the track itself, so refreshing from inside a playlist updates
+   * the same library entries the library view would.
+   */
   async function bulkRefreshMetadata() {
     if (selected.size === 0) return;
     try {

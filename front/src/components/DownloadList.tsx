@@ -6,7 +6,7 @@ interface Props {
   onCancel: () => void;
 }
 
-/// An import that has not expanded yet has only its playlist ID to show.
+/** An import that has not expanded yet has only its playlist ID to show. */
 function titleText(d: DownloadProgress): string {
   return d.kind === "playlist" ? `${t("download.playlist")}: ${d.title}` : d.title;
 }

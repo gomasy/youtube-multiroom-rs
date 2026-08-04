@@ -9,8 +9,10 @@ let nextId = 0;
 
 export function useToast() {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
-  /// Dismissal timers still pending. Tracked so unmounting cancels them instead
-  /// of leaving each outstanding toast holding a timer for its full duration.
+  /**
+   * Dismissal timers still pending. Tracked so unmounting cancels them instead
+   * of leaving each outstanding toast holding a timer for its full duration.
+   */
   const timers = useRef(new Set<ReturnType<typeof setTimeout>>());
 
   useEffect(
