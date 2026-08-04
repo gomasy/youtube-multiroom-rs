@@ -112,6 +112,15 @@ fn verify_stream_query(secret: &str, audio_id: &str, query: Option<&str>) -> boo
 }
 
 fn sign(secret: &str, audio_id: &str, exp: u64) -> String {
+    // The one construction in this crate that cannot fail but is still modelled
+    // as a Result: HMAC hashes a key longer than the block size and pads a
+    // shorter one, so every length is accepted. There would be nothing safe to
+    // fall back to either — signing with anything but the configured secret
+    // hands out URLs that verify against nothing.
+    #[expect(
+        clippy::expect_used,
+        reason = "Hmac::new_from_slice accepts a key of any length"
+    )]
     let mut mac =
         HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts keys of any length");
     mac.update(audio_id.as_bytes());
