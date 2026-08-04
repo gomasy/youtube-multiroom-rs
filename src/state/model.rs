@@ -75,7 +75,7 @@ impl AudioTrack {
     pub(crate) fn extract_channel(meta: &Value) -> String {
         meta["channel"]
             .as_str()
-            .or(meta["uploader"].as_str())
+            .or_else(|| meta["uploader"].as_str())
             .unwrap_or("")
             .to_string()
     }

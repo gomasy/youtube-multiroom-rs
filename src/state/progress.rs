@@ -236,9 +236,10 @@ fn insert_entry(
             // The prefix that keeps a playlist import out of the video ID
             // keyspace is this module's business, so what the entry tracks is
             // published as a field the client can switch on.
-            kind: match key.starts_with(PLAYLIST_PROGRESS_PREFIX) {
-                true => DownloadKind::Playlist,
-                false => DownloadKind::Video,
+            kind: if key.starts_with(PLAYLIST_PROGRESS_PREFIX) {
+                DownloadKind::Playlist
+            } else {
+                DownloadKind::Video
             },
             title: title.to_string(),
             status: DownloadStatus::Metadata,
