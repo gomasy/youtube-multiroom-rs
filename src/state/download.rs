@@ -12,8 +12,8 @@ use super::remux::rebuild_container;
 use super::url::extract_video_id;
 use super::warn_redis;
 use super::ytdlp::{
-    DownloadError, PROGRESS_PREFIX, abort_reader, drain_output, fetch_metadata,
-    parse_progress_percent, snippet, spawn_reader, spawn_yt_dlp, stop_yt_dlp,
+    DownloadError, PROGRESS_PREFIX, abort_reader, fetch_metadata, parse_progress_percent,
+    spawn_reader, spawn_yt_dlp, stderr_snippet, stop_yt_dlp,
 };
 use super::{AUDIO_EXT, AppState, REDIS_KEY_TRACKS, REDIS_KEY_TRACKS_ORDER, now_f64, watch_url};
 use redis::AsyncCommands;
@@ -564,15 +564,9 @@ impl AppState {
             }
         };
         if !status.success() {
-            // Only the failure path needs stderr, and draining it is bounded
-            // (descendants can keep the pipe open), so success must not pay it.
-            let stderr_buf = match stderr_task {
-                Some(task) => drain_output(task).await.unwrap_or_default(),
-                None => Vec::new(),
-            };
             return Err(DownloadError::Failed(format!(
                 "Failed to download audio: {}",
-                snippet(&String::from_utf8_lossy(&stderr_buf))
+                stderr_snippet(stderr_task).await
             )));
         }
         Ok(())

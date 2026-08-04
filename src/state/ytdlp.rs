@@ -63,8 +63,24 @@ impl From<&str> for DownloadError {
     }
 }
 
-pub(crate) fn snippet(s: &str) -> String {
+fn snippet(s: &str) -> String {
     s.chars().take(300).collect()
+}
+
+/// What a failed child said on stderr, ready to put in an error message:
+/// drained, lossily decoded, trimmed and bounded. Every caller wants exactly
+/// this, and only on the failure path — draining is bounded rather than free,
+/// since a descendant can hold the pipe open, so success must not pay for it.
+///
+/// `None` is a reader that was never started or was already abandoned, which
+/// reports as no output: the alternative is claiming a drain that never
+/// happened.
+pub(crate) async fn stderr_snippet(task: Option<tokio::task::JoinHandle<Vec<u8>>>) -> String {
+    let buf = match task {
+        Some(task) => drain_output(task).await.unwrap_or_default(),
+        None => Vec::new(),
+    };
+    snippet(String::from_utf8_lossy(&buf).trim())
 }
 
 /// Extract the percentage from a yt-dlp progress line (PROGRESS_PREFIX + " 23.4%" etc.).
@@ -236,7 +252,7 @@ where
 
 /// Await a pipe-drain task, giving up after the grace period so a descendant
 /// holding the pipe open cannot block the caller forever.
-pub(crate) async fn drain_output(mut task: tokio::task::JoinHandle<Vec<u8>>) -> Option<Vec<u8>> {
+async fn drain_output(mut task: tokio::task::JoinHandle<Vec<u8>>) -> Option<Vec<u8>> {
     let grace = time::Duration::from_secs(OUTPUT_DRAIN_GRACE_SECS);
     match time::timeout(grace, &mut task).await {
         Ok(joined) => Some(joined.unwrap_or_default()),

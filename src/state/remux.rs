@@ -9,7 +9,7 @@
 //! in. yt-dlp fixes this only for formats it knows are fragmented, which a
 //! finished live stream is not by the time it is downloaded.
 
-use super::ytdlp::{DownloadError, abort_reader, drain_output, snippet, spawn_reader};
+use super::ytdlp::{DownloadError, abort_reader, spawn_reader, stderr_snippet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::process::Command;
@@ -159,14 +159,9 @@ async fn stream_copy(
         }
     };
     if !status.success() {
-        // Only the failure path needs stderr, so success does not pay for it.
-        let err = match stderr {
-            Some(task) => drain_output(task).await.unwrap_or_default(),
-            None => Vec::new(),
-        };
         return Err(DownloadError::Failed(format!(
             "ffmpeg failed: {}",
-            snippet(String::from_utf8_lossy(&err).trim())
+            stderr_snippet(stderr).await
         )));
     }
     Ok(())
