@@ -378,7 +378,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn redis_json_roundtrip_preserves_is_live() {
+    fn redis_json_round_trips_and_tolerates_legacy_entries() {
         let track = AudioTrack {
             id: "dQw4w9WgXcQ".into(),
             title: "配信".into(),
@@ -392,53 +392,38 @@ mod tests {
         let restored = AudioTrack::from_redis_json(&track.to_redis_json().unwrap()).unwrap();
         assert!(restored.is_live);
         assert!(restored.file_path.is_empty());
+
+        // Entries written before is_live existed must still parse
+        let legacy = r#"{"id":"dQw4w9WgXcQ","title":"t","thumbnail":"","duration":10,"channel":"","created_at":1.0,"file_path":"/tmp/a.m4a"}"#;
+        assert!(!AudioTrack::from_redis_json(legacy).unwrap().is_live);
     }
 
     #[test]
     fn duration_is_read_from_both_forms_yt_dlp_reports() {
-        // Whole seconds, the usual shape
-        assert_eq!(
-            AudioTrack::extract_duration(&json!({ "duration": 213 })),
-            213
-        );
-        // Fractional seconds: flat playlist entries and the parsed-duration
-        // fallback both report one, and reading only the integer form used to
-        // register these tracks with no length at all
-        assert_eq!(
-            AudioTrack::extract_duration(&json!({ "duration": 213.4 })),
-            213
-        );
-        // Live streams and unavailable videos have no length to report
+        let secs = |v: Value| AudioTrack::extract_duration(&json!({ "duration": v }));
+        // Whole seconds, the usual shape; fractional from flat playlist entries
+        // and the parsed-duration fallback, which used to register as no length
+        assert_eq!(secs(json!(213)), 213);
+        assert_eq!(secs(json!(213.4)), 213);
+        // Live streams and unavailable videos report no length
         assert_eq!(AudioTrack::extract_duration(&json!({})), 0);
-        assert_eq!(
-            AudioTrack::extract_duration(&json!({ "duration": Value::Null })),
-            0
-        );
+        assert_eq!(secs(Value::Null), 0);
         // Nothing unusable may reach the wire format as a length
-        assert_eq!(
-            AudioTrack::extract_duration(&json!({ "duration": -5.0 })),
-            0
-        );
-        assert_eq!(
-            AudioTrack::extract_duration(&json!({ "duration": "3:33" })),
-            0
-        );
+        assert_eq!(secs(json!(-5.0)), 0);
+        assert_eq!(secs(json!("3:33")), 0);
     }
 
     #[test]
-    fn token_roundtrip_preserves_track_id() {
-        let token = new_token("dQw4w9WgXcQ");
-        assert_eq!(token_track_id(&token), "dQw4w9WgXcQ");
-        // Also accepts values without '#' (legacy format or bare track IDs)
+    fn every_token_form_yields_its_track_id() {
+        assert_eq!(token_track_id(&new_token("dQw4w9WgXcQ")), "dQw4w9WgXcQ");
+        assert_eq!(token_track_id(&auto_token("dQw4w9WgXcQ")), "dQw4w9WgXcQ");
+        // Bare track IDs (legacy tokens) pass through unchanged
         assert_eq!(token_track_id("dQw4w9WgXcQ"), "dQw4w9WgXcQ");
     }
 
     #[test]
-    fn auto_token_is_detectable_and_preserves_track_id() {
-        let token = auto_token("dQw4w9WgXcQ");
-        assert!(is_auto_token(&token));
-        assert_eq!(token_track_id(&token), "dQw4w9WgXcQ");
-        // Normal tokens and queue entries are not detected as auto-selected
+    fn only_an_auto_token_reads_as_auto_continued() {
+        assert!(is_auto_token(&auto_token("dQw4w9WgXcQ")));
         assert!(!is_auto_token(&new_token("dQw4w9WgXcQ")));
         assert!(!is_auto_token("dQw4w9WgXcQ"));
     }
@@ -459,7 +444,7 @@ mod tests {
             },
         };
         let v = serde_json::to_value(&item).unwrap();
-        // entry and track fields are flattened at the same level (file_path is not exposed)
+        // Entry and track sit at the same level, and file_path stays internal
         assert_eq!(v["entry"], "dQw4w9WgXcQ#123");
         assert_eq!(v["id"], "dQw4w9WgXcQ");
         assert!(v.get("file_path").is_none());
@@ -467,7 +452,7 @@ mod tests {
 
     #[test]
     fn pending_command_without_offset_defaults_to_zero() {
-        // Pending commands queued before offset_ms was introduced should still parse
+        // Commands queued before offset_ms existed must still parse
         let legacy = r#"{"action":"play","track":{"id":"dQw4w9WgXcQ","title":"t"}}"#;
         let cmd: PendingCommand = serde_json::from_str(legacy).unwrap();
         assert_eq!(cmd.offset_ms, 0);
@@ -501,12 +486,12 @@ mod tests {
         dev.advance_position(102.0);
         assert_eq!(dev.position_ms, 7_000);
 
-        // Clamp at track end
+        // Clamped at the end of the track
         dev.last_update = 102.0;
         dev.advance_position(200.0);
         assert_eq!(dev.position_ms, 10_000);
 
-        // Don't advance if not playing
+        // Nothing advances while not playing
         dev.status = "paused".into();
         dev.position_ms = 1_000;
         dev.advance_position(300.0);
@@ -515,13 +500,13 @@ mod tests {
 
     #[test]
     fn apply_keeps_position_consistent_with_last_update() {
-        // Even without an explicit position, the estimated position doesn't rewind
+        // Without an explicit position the estimate must not rewind
         let mut dev = playing_device();
         dev.apply(DeviceUpdate::new(), 102.0);
         assert_eq!(dev.position_ms, 7_000);
         assert_eq!(dev.last_update, 102.0);
 
-        // Explicit position is adopted as-is
+        // An explicit one is adopted as given
         let mut dev = playing_device();
         dev.apply(DeviceUpdate::new().position(1_000), 102.0);
         assert_eq!(dev.position_ms, 1_000);
@@ -532,24 +517,22 @@ mod tests {
     fn failure_record_counts_consecutive_failures() {
         let mut rec = FailureRecord::default();
 
-        // Consecutive as long as failures happen at the same position
+        // Consecutive as long as they happen at the same position
         assert_eq!(rec.record(5_000, 100.0), 1);
         assert_eq!(rec.record(5_000, 105.0), 2);
         assert_eq!(rec.record(5_000, 110.0), 3);
 
-        // A failure at a later position resets the count (evidence of a successful retry in between)
+        // A later position proves a retry succeeded in between
         assert_eq!(rec.record(30_000, 115.0), 1);
-
-        // A failure that hasn't advanced (e.g. restart failure) counts as consecutive
+        // One that has not advanced (a restart failure) is consecutive
         assert_eq!(rec.record(0, 120.0), 2);
-
-        // A failure more than FAILURE_RESET_SECS after the last one also resets
+        // So is time: past FAILURE_RESET_SECS the count starts over
         assert_eq!(rec.record(0, 120.0 + FAILURE_RESET_SECS + 1.0), 1);
     }
 
     #[test]
     fn download_status_serializes_lowercase() {
-        // Pin the wire format to match the frontend (types.ts) status union
+        // Pins the wire format to the frontend's status union in types.ts
         for (status, expected) in [
             (DownloadStatus::Metadata, "metadata"),
             (DownloadStatus::Downloading, "downloading"),
@@ -558,12 +541,5 @@ mod tests {
         ] {
             assert_eq!(serde_json::to_value(status).unwrap(), json!(expected));
         }
-    }
-
-    #[test]
-    fn redis_json_without_is_live_defaults_to_false() {
-        let legacy = r#"{"id":"dQw4w9WgXcQ","title":"t","thumbnail":"","duration":10,"channel":"","created_at":1.0,"file_path":"/tmp/a.m4a"}"#;
-        let track = AudioTrack::from_redis_json(legacy).unwrap();
-        assert!(!track.is_live);
     }
 }

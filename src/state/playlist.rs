@@ -482,10 +482,9 @@ mod tests {
 
     #[test]
     fn playlist_ids_are_distinct() {
-        // No duplicates even when generated consecutively (nanosecond precision)
+        // Consecutive calls must not collide (nanosecond precision)
         let a = new_playlist_id();
-        let b = new_playlist_id();
-        assert_ne!(a, b);
+        assert_ne!(a, new_playlist_id());
         assert!(a.starts_with("pl"));
     }
 
@@ -495,8 +494,8 @@ mod tests {
         assert_eq!(valid_playlist_name(""), None);
         assert_eq!(valid_playlist_name("   "), None);
 
-        // The cap counts characters, not bytes, so a name of multi-byte
-        // characters is accepted right up to the same limit as an ASCII one
+        // The cap counts characters, not bytes, so a multi-byte name is
+        // accepted right up to the same limit as an ASCII one
         let kana = "あ".repeat(PLAYLIST_NAME_MAX_CHARS);
         assert_eq!(valid_playlist_name(&kana).map(str::len), Some(kana.len()));
         assert_eq!(

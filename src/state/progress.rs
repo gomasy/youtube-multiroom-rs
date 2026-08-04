@@ -285,7 +285,7 @@ mod tests {
         let entry = &downloads["vid"];
         assert_eq!(entry.started_at, 101.0);
         assert!(entry.error.is_none());
-        // The failure's expiry now points at an entry that is not its own.
+        // The failure's expiry now points at an entry that is not its own
         assert!(owned_entry(&mut downloads, "vid", 100.0).is_none());
     }
 
@@ -293,7 +293,7 @@ mod tests {
     fn an_entry_belongs_to_the_job_that_started_it() {
         let mut downloads = map_with("vid", 100.0);
         assert!(owned_entry(&mut downloads, "vid", 100.0).is_some());
-        // What a retry after this job settled looks like: same key, new stamp.
+        // Same key, different stamp: a job whose entry has been taken over
         assert!(owned_entry(&mut downloads, "vid", 99.0).is_none());
         assert!(owned_entry(&mut downloads, "other", 100.0).is_none());
     }

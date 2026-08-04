@@ -137,6 +137,10 @@ mod tests {
                 .as_deref(),
             Some("dQw4w9WgXcQ")
         );
+        // The ID format check the extraction rests on
+        assert!(is_video_id("dQw4w9WgXcQ"));
+        assert!(!is_video_id("short"));
+        assert!(!is_video_id("dQw4w9WgXcQ-too-long"));
     }
 
     #[test]
@@ -145,7 +149,7 @@ mod tests {
             classify_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
             UrlKind::Video
         ));
-        // URL with both v= and list= is treated as video
+        // Both v= and list= reads as a video
         assert!(matches!(
             classify_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL0123456789abcdefghij"),
             UrlKind::Video
@@ -154,12 +158,12 @@ mod tests {
             UrlKind::Playlist(id) => assert_eq!(id, "PL0123456789abcdefghij"),
             _ => panic!("expected playlist"),
         }
-        // watch?list= without v= is also treated as playlist
+        // list= without v= is a playlist too
         assert!(matches!(
             classify_url("https://www.youtube.com/watch?list=PL0123456789abcdefghij"),
             UrlKind::Playlist(_)
         ));
-        // Short special list IDs like WL are also accepted (expansion is left to yt-dlp)
+        // Short special IDs like WL are accepted; expansion is yt-dlp's problem
         assert!(matches!(
             classify_url("https://www.youtube.com/playlist?list=WL"),
             UrlKind::Playlist(_)
@@ -176,12 +180,5 @@ mod tests {
             classify_url("https://youtube.com.evil.example/playlist?list=PL0123456789abcdefghij"),
             UrlKind::Unknown
         ));
-    }
-
-    #[test]
-    fn video_id_format_check() {
-        assert!(is_video_id("dQw4w9WgXcQ"));
-        assert!(!is_video_id("short"));
-        assert!(!is_video_id("dQw4w9WgXcQ-too-long"));
     }
 }

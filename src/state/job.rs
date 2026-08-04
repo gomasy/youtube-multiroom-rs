@@ -147,11 +147,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_video_dropping_out_does_not_end_the_job() {
-        // The rule the two callers depend on: a cancellation with the token
-        // still live means that one video was deleted mid-fetch. The rest of
-        // the job must still run, and must not count the one that dropped.
-        let cancel = CancellationToken::new();
-        let (done, seen) = run_recording(&ids(3), &cancel, |id| async move {
+        // A cancellation with the token still live means that one video was
+        // deleted mid-fetch: the rest still runs, and it is not counted.
+        let (done, seen) = run_recording(&ids(3), &CancellationToken::new(), |id| async move {
             if id == "video1" {
                 Err(DownloadError::Cancelled)
             } else {
@@ -181,7 +179,7 @@ mod tests {
     async fn a_real_stop_ends_the_job_at_once() {
         // Stop all cancels the shared token, so the in-flight video reports
         // Cancelled *and* the token reads cancelled. Nothing after it is
-        // fetched — that is what makes Stop all prompt.
+        // fetched, which is what makes Stop all prompt.
         let cancel = CancellationToken::new();
         let (done, seen) = run_recording(&ids(4), &cancel, |id| {
             let cancel = cancel.clone();
@@ -200,8 +198,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_stop_between_videos_buys_the_next_one_no_fetch() {
-        // A visit that completes normally and only then gets stopped must still
-        // not let the loop start the following yt-dlp run.
+        // A visit stopped only after completing normally must still not let the
+        // loop start the following yt-dlp run.
         let cancel = CancellationToken::new();
         let (done, seen) = run_recording(&ids(4), &cancel, |id| {
             let cancel = cancel.clone();

@@ -207,17 +207,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stream_query_verifies() {
-        let q = stream_query("secret", "abc123");
-        assert!(verify_stream_query("secret", "abc123", Some(&q)));
-    }
-
-    #[test]
     fn hex_pads_every_byte_to_two_digits() {
         // Signing and verifying both go through hex(), so a byte that lost its
         // leading zero would still compare equal to itself while quietly
-        // shortening the signature. The round-trip tests cannot catch that,
-        // which is why the encoding is pinned here directly.
+        // shortening the signature — invisible to the round-trip tests.
         assert_eq!(hex(&[0x00, 0x0f, 0xa5, 0xff]), "000fa5ff");
         assert_eq!(hex(&[]), "");
         // SHA-256 is 32 bytes, so every signature is 64 characters wide
@@ -225,10 +218,20 @@ mod tests {
     }
 
     #[test]
-    fn rejects_wrong_track_or_secret() {
+    fn a_signed_stream_query_verifies_only_as_issued() {
         let q = stream_query("secret", "abc123");
+        assert!(verify_stream_query("secret", "abc123", Some(&q)));
+        // Neither another track nor another secret may reuse it
         assert!(!verify_stream_query("secret", "other", Some(&q)));
         assert!(!verify_stream_query("wrong", "abc123", Some(&q)));
+        // Both parameters are required
+        assert!(!verify_stream_query("secret", "abc123", None));
+        assert!(!verify_stream_query("secret", "abc123", Some("exp=123")));
+        assert!(!verify_stream_query(
+            "secret",
+            "abc123",
+            Some("sig=deadbeef")
+        ));
     }
 
     #[test]
@@ -246,14 +249,14 @@ mod tests {
 
     #[test]
     fn stream_path_matches_endpoint_and_auth() {
-        // Without auth: bare path
+        // Without auth: bare path, /live for a live track
         assert_eq!(
             stream_path(None, "abc123", false),
             "/api/audio/abc123/stream"
         );
         assert_eq!(stream_path(None, "abc123", true), "/api/audio/abc123/live");
 
-        // With auth: signed query that passes verification
+        // With auth: a signed query that passes verification
         let path = stream_path(Some("secret"), "abc123", false);
         let (base, query) = path.split_once('?').unwrap();
         assert_eq!(base, "/api/audio/abc123/stream");
@@ -295,16 +298,5 @@ mod tests {
             Some("plain")
         );
         assert_eq!(query_param(Some("token=x"), "other"), None);
-    }
-
-    #[test]
-    fn rejects_missing_query() {
-        assert!(!verify_stream_query("secret", "abc123", None));
-        assert!(!verify_stream_query("secret", "abc123", Some("exp=123")));
-        assert!(!verify_stream_query(
-            "secret",
-            "abc123",
-            Some("sig=deadbeef")
-        ));
     }
 }

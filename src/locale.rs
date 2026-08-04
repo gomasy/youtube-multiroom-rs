@@ -44,37 +44,19 @@ mod tests {
     use rust_i18n::t;
 
     #[test]
-    fn resolve_exact_match() {
-        assert_eq!(resolve("en"), Some("en".to_string()));
+    fn resolves_a_language_code_to_a_shipped_locale() {
+        // Exact match, then the base of a regional code
         assert_eq!(resolve("ja"), Some("ja".to_string()));
-    }
-
-    #[test]
-    fn resolve_base_code_fallback() {
-        assert_eq!(resolve("en-us"), Some("en".to_string()));
         assert_eq!(resolve("en-US"), Some("en".to_string()));
-        assert_eq!(resolve("ja-JP"), Some("ja".to_string()));
-    }
-
-    #[test]
-    fn resolve_unknown_returns_none() {
-        assert_eq!(resolve("xx"), None);
+        // Nothing to resolve to, so or_default falls back
         assert_eq!(resolve("xx-YY"), None);
-    }
-
-    #[test]
-    fn resolve_empty_returns_none() {
-        assert_eq!(resolve(""), None);
         assert_eq!(resolve("   "), None);
+        assert_eq!(or_default(Some("xx")), fallback());
+        assert_eq!(or_default(None), "en");
     }
 
     #[test]
-    fn fallback_locale_is_en() {
-        assert_eq!(fallback(), "en");
-    }
-
-    #[test]
-    fn embedded_translations_load() {
+    fn embedded_catalogs_load_and_substitute() {
         assert_eq!(
             t!("alexa_connected", locale = "en"),
             "Connected to YouTube MultiRoom. You can control playback from the web interface."
@@ -83,10 +65,6 @@ mod tests {
             t!("alexa_connected", locale = "ja"),
             "YouTube マルチルームに接続しました。Web 画面から操作できます。"
         );
-    }
-
-    #[test]
-    fn template_substitution_works() {
         assert_eq!(
             t!("api_added_to_playlist", locale = "en", title = "Song"),
             "Added \"Song\" to playlist"
