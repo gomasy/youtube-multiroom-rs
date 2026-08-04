@@ -42,3 +42,17 @@ export function AddToListIcon({ size = 16 }: { size?: number }) {
     </svg>
   );
 }
+
+/** Drag-to-reorder grip (⋮⋮) */
+export function GripIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor">
+      <circle cx="9" cy="5" r="1.7" />
+      <circle cx="15" cy="5" r="1.7" />
+      <circle cx="9" cy="12" r="1.7" />
+      <circle cx="15" cy="12" r="1.7" />
+      <circle cx="9" cy="19" r="1.7" />
+      <circle cx="15" cy="19" r="1.7" />
+    </svg>
+  );
+}

@@ -18,7 +18,7 @@ import { useTrackReorder } from "../hooks";
 import { t, tFmt } from "../i18n";
 import { TrackRowInfo } from "./TrackRowInfo";
 import { AddToPlaylistMenu } from "./AddToPlaylistMenu";
-import { AddToListIcon, CloseIcon, TrashIcon } from "./icons";
+import { AddToListIcon, CloseIcon, GripIcon, TrashIcon } from "./icons";
 import type { Playlist, Track, TracksPage } from "../types";
 
 function lastPage(total: number): number {
@@ -530,14 +530,7 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
                   onClick={(e) => e.stopPropagation()}
                   onPointerDown={(e) => reorder.handleDragStart(e, tr, i)}
                 >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                    <circle cx="9" cy="5" r="1.7" />
-                    <circle cx="15" cy="5" r="1.7" />
-                    <circle cx="9" cy="12" r="1.7" />
-                    <circle cx="15" cy="12" r="1.7" />
-                    <circle cx="9" cy="19" r="1.7" />
-                    <circle cx="15" cy="19" r="1.7" />
-                  </svg>
+                  <GripIcon />
                 </span>
               )}
               <TrackRowInfo track={tr} />
