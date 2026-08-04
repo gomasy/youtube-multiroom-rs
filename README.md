@@ -30,6 +30,7 @@ youtube-multiroom-rs/
 │   │   ├── playback.rs    # Playback mode & sleep timer
 │   │   ├── playlist.rs    # Named playlists & YouTube playlist import
 │   │   ├── download.rs    # Audio downloading & track metadata refresh
+│   │   ├── remux.rs       # Rebuilding a downloaded file's container
 │   │   ├── progress.rs    # Progress reporting & the cancellation generation
 │   │   ├── job.rs         # Stopping rules shared by the per-video background jobs
 │   │   ├── ytdlp.rs       # yt-dlp invocation & process group reaping
@@ -98,7 +99,7 @@ youtube-multiroom-rs/
 - Node.js 22.12+
 - Redis
 - yt-dlp
-- ffmpeg
+- ffmpeg (`ffprobe` included)
 - A tunnel to expose the server (e.g. ngrok, Cloudflare Tunnel, Tailscale Funnel)
 
 ### Build
@@ -307,11 +308,13 @@ If the track metadata hash is ever lost (e.g. Redis was wiped), the next `GET /a
 
 ### Download Progress
 
-Download progress is tracked server-side in memory and broadcast to all WebSocket clients via `downloads_update` messages. This means every connected browser (including tabs opened after a download started) sees the same real-time progress. The progress goes through four stages: `metadata` (resolving title and format), `downloading` (with a percentage), `processing` (yt-dlp post-processing / m4a conversion), and on failure `error` (displayed for 60 seconds then cleared).
+Download progress is tracked server-side in memory and broadcast to all WebSocket clients via `downloads_update` messages. This means every connected browser (including tabs opened after a download started) sees the same real-time progress. The progress goes through four stages: `metadata` (resolving title and format), `downloading` (with a percentage), `processing` (yt-dlp post-processing / m4a conversion, then the container rebuild), and on failure `error` (displayed for 60 seconds then cleared).
 
 An entry is opened as soon as the job is known — before it queues behind another request for the same video, before the cache lookup, and for a playlist import before it has expanded — not when yt-dlp starts. That is what makes a request the user has sent outlive the reload of the client that sent it. Until a title is known the entry shows the bare ID; a playlist import that is still expanding is reported with `kind: "playlist"` (labelled 「プレイリスト」 in the Web UI) and namespaced apart from the video IDs. An entry belongs to the job that opened it: a second request for a video already on display gets no entry of its own and never resets the first one's progress, and a job only ever settles the entry it opened. Progress is not persisted to Redis — it resets on server restart. 「すべて停止」 terminates the active yt-dlp process groups (including ffmpeg descendants) and removes their staging directories; completed cache files and downloads started after the cancellation are left intact.
 
 Each download attempt writes into its own directory under `audio_cache/.downloads/`, so partial and post-processing files are never visible to the cache scanner or the stream endpoint. A finished file is published into `audio_cache/` with a hard link, which is atomic and refuses to overwrite an existing entry — a download that completes alongside a cached copy can never truncate what is being served. The whole staging root is discarded at startup, cleaning up after a crash or a hard kill.
+
+Still in staging, the file's container is rebuilt with `ffmpeg -c copy` — the AAC frames are unchanged, only the boxes describing them are rewritten, plus `+faststart`. This is what keeps finished live streams playing to the end: yt-dlp downloads their audio as DASH fragments and skips the conversion that would have merged them, leaving a header that indexes none of the audio, which an Echo takes at its word and reports a multi-hour archive as nearly finished minutes in. The rebuild is best effort and never installs a file holding less audio than the download: if ffprobe finds that ffmpeg can already read only a fraction of the duration YouTube reports, rewriting would publish that truncation, so the file is left alone and logged. Only tracks downloaded after this was added have a rebuilt container; re-add an older one to fix it.
 
 ### Metadata Refresh
 

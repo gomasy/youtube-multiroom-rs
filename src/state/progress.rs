@@ -120,8 +120,8 @@ impl AppState {
     }
 
     /// Update download percentage. yt-dlp emits progress lines at high frequency,
-    /// so only broadcast when the integer part changes. At 100%, mark as processing
-    /// (yt-dlp post-processing).
+    /// so only broadcast when the integer part changes. At 100%, mark as
+    /// processing: what is left is post-processing and the container rebuild.
     pub(super) async fn set_download_percent(&self, video_id: &str, percent: f64) {
         self.update_download(video_id, |d| {
             let before = d.percent as u64;

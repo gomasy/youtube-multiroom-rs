@@ -281,7 +281,7 @@ pub enum DownloadStatus {
     /// Fetching metadata (before title / live detection is resolved).
     Metadata,
     Downloading,
-    /// Post-processing by yt-dlp (conversion to m4a).
+    /// Post-processing: yt-dlp's conversion to m4a, then the container rebuild.
     Processing,
     Error,
 }
