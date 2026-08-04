@@ -1,7 +1,10 @@
 //! Named playlists: their lifecycle, and which tracks belong to them.
 
-use super::{AppError, AppResult, TrackIdsRequest, client_locale, playlist_or_404, track_or_404};
-use crate::state::{AppState, WriteOutcome};
+use super::{
+    AppError, AppResult, TrackIdsRequest, client_locale, playlist_or_404, track_or_404,
+    written_or_err,
+};
+use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::response::Json;
@@ -83,13 +86,11 @@ pub async fn add_playlist_track(
 ) -> AppResult<Json<Value>> {
     playlist_or_404(&state, &playlist_id).await?;
     let track = track_or_404(&state, &req.track_id).await?;
-    match state.add_playlist_track(&playlist_id, &track.id).await {
-        WriteOutcome::Written => {}
-        WriteOutcome::Gone => return Err(AppError::not_found("Playlist not found")),
-        WriteOutcome::Failed => {
-            return Err(AppError::internal("Failed to add track to playlist"));
-        }
-    }
+    written_or_err(
+        state.add_playlist_track(&playlist_id, &track.id).await,
+        "Playlist not found",
+        "Failed to add track to playlist",
+    )?;
     state.broadcast_playlists().await;
     // Notify clients viewing this playlist to refresh their track list
     state.broadcast_tracks();
@@ -122,26 +123,25 @@ pub async fn bulk_add_playlist_tracks(
     Json(req): Json<TrackIdsRequest>,
 ) -> AppResult<Json<Value>> {
     playlist_or_404(&state, &playlist_id).await?;
-    // A track deleted between this resolution and its append is dropped from
-    // the playlist by the deletion itself, which strips it from every playlist
-    // that listed it — so resolving the whole list up front costs no accuracy.
-    // Dropping a repeated ID matters here beyond the saved round-trip: the
-    // script moves an already-listed track to the end, so a repeat would have
-    // reordered the playlist against the request as well as counted twice.
+    // Resolving the whole list up front costs no accuracy: a track deleted
+    // between here and its append is stripped from every playlist by the
+    // deletion itself. Dropping repeats matters beyond the saved round-trip —
+    // the script moves an already-listed track to the end, so a repeat would
+    // have reordered the playlist against the request.
     let track_ids = req.known_ids(&state).await;
     let mut added = 0u32;
     let mut failure = None;
     for id in &track_ids {
-        match state.add_playlist_track(&playlist_id, id).await {
-            WriteOutcome::Written => added += 1,
-            // Deleted mid-request: stop instead of appending to a playlist
-            // nobody can see any more.
-            WriteOutcome::Gone => {
-                failure = Some(AppError::not_found("Playlist not found"));
-                break;
-            }
-            WriteOutcome::Failed => {
-                failure = Some(AppError::internal("Failed to add tracks to playlist"));
+        // A playlist deleted mid-request stops the loop rather than being
+        // appended to where nobody can see it.
+        match written_or_err(
+            state.add_playlist_track(&playlist_id, id).await,
+            "Playlist not found",
+            "Failed to add tracks to playlist",
+        ) {
+            Ok(()) => added += 1,
+            Err(e) => {
+                failure = Some(e);
                 break;
             }
         }

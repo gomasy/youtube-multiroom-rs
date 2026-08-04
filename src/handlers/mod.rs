@@ -40,7 +40,7 @@ pub use tracks::{
 };
 pub use ws::ws_upgrade;
 
-use crate::state::{AppState, AudioTrack, DeviceState};
+use crate::state::{AppState, AudioTrack, DeviceState, WriteOutcome};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use serde::Deserialize;
@@ -116,6 +116,22 @@ impl TrackIdsRequest {
             .filter(|id| unclaimed.remove(id.as_str()).is_some())
             .cloned()
             .collect()
+    }
+}
+
+/// Turn a guarded write's outcome into a handler result. The three cases mean
+/// the same thing at every call site: the target vanishing between the caller's
+/// 404 check and the write itself is still the client's 404, and a write that
+/// failed is ours to report as a 500.
+pub(crate) fn written_or_err(
+    outcome: WriteOutcome,
+    gone: &'static str,
+    failed: &'static str,
+) -> AppResult<()> {
+    match outcome {
+        WriteOutcome::Written => Ok(()),
+        WriteOutcome::Gone => Err(AppError::not_found(gone)),
+        WriteOutcome::Failed => Err(AppError::internal(failed)),
     }
 }
 

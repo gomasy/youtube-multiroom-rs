@@ -2,7 +2,7 @@
 //! the skill cannot push directives, so every command is parked in Redis and
 //! applied the next time the device connects (see crate::alexa).
 
-use super::{AppError, AppResult, client_locale, device_or_404, track_or_404};
+use super::{AppError, AppResult, client_locale, device_or_404, track_or_404, written_or_err};
 use crate::state::{AppState, AudioTrack, DeviceUpdate, PlayRequest, SeekRequest, WriteOutcome};
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
@@ -184,20 +184,19 @@ pub async fn seek_device(
     if track.is_live {
         return Err(AppError::bad_request("Cannot seek a live stream"));
     }
-    // Unknown duration means we can't clamp properly; reject rather than
-    // silently seeking to the start
+    // Nothing to clamp against; rejected rather than silently seeking to 0
     if track.duration == 0 {
         return Err(AppError::bad_request("Track duration is unknown"));
     }
 
-    // Clamp to 1 second before the end to avoid immediate playback termination
+    // A second short of the end, so playback does not terminate immediately
     let max_ms = track.duration.saturating_mul(1000).saturating_sub(1000);
     let position_ms = req.position_ms.min(max_ms);
-    match state.queue_play(&device_id, track, position_ms).await {
-        WriteOutcome::Written => {}
-        WriteOutcome::Gone => return Err(AppError::not_found("Device not found")),
-        WriteOutcome::Failed => return Err(AppError::internal("Failed to queue seek")),
-    }
+    written_or_err(
+        state.queue_play(&device_id, track, position_ms).await,
+        "Device not found",
+        "Failed to queue seek",
+    )?;
     state.broadcast_devices().await;
 
     Ok(Json(json!({
