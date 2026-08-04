@@ -45,15 +45,20 @@ struct NextUp {
 }
 
 impl NextUp {
-    /// A play of `track` from the start under a freshly minted token — what
-    /// every path that is not resuming a position or consuming a queue entry
-    /// wants.
-    fn fresh(track: AudioTrack) -> Self {
+    /// A play of `track` from `offset_ms` under a freshly minted token — what
+    /// every path that is neither consuming a queue entry nor carrying an
+    /// auto-continuation marker wants.
+    fn at(track: AudioTrack, offset_ms: u64) -> Self {
         Self {
             token: new_token(&track.id),
             track,
-            offset_ms: 0,
+            offset_ms,
         }
+    }
+
+    /// The same, from the start of the track.
+    fn fresh(track: AudioTrack) -> Self {
+        Self::at(track, 0)
     }
 }
 
@@ -146,11 +151,7 @@ async fn start_pending_or_queue(ctx: &ReqCtx<'_>) -> Option<Value> {
         && cmd.action == "play"
     {
         tracing::info!("Auto-playing queued track on {}", ctx.log_id());
-        let next = NextUp {
-            token: new_token(&cmd.track.id),
-            track: cmd.track,
-            offset_ms: cmd.offset_ms,
-        };
+        let next = NextUp::at(cmd.track, cmd.offset_ms);
         return Some(play_directive(ctx, &next).await);
     }
 
@@ -484,11 +485,7 @@ async fn pending_or_queue_next(
     if let Some(cmd) = ctx.state.peek_pending(&ctx.device_id).await
         && cmd.action == "play"
     {
-        return Ok(Some(NextUp {
-            token: new_token(&cmd.track.id),
-            track: cmd.track,
-            offset_ms: cmd.offset_ms,
-        }));
+        return Ok(Some(NextUp::at(cmd.track, cmd.offset_ms)));
     }
 
     // If the currently playing track's entry is still at the head (e.g.,
