@@ -8,6 +8,7 @@
 //!
 //! - [`model`] — wire types, and the tokens identifying a queued play
 //! - [`track`] — the audio library: registration, ordering, selection
+//! - [`matching`] — ranking stored text against a spoken phrase
 //! - [`device`] — per-device state, pending commands, Up Next queues
 //! - [`playback`] — playback mode and the sleep timer
 //! - [`playlist`] — named playlists and YouTube playlist import
@@ -37,6 +38,7 @@ use tokio_util::sync::CancellationToken;
 mod device;
 mod download;
 mod job;
+mod matching;
 mod model;
 mod playback;
 mod playlist;

@@ -1,6 +1,7 @@
 //! The audio library: registering tracks, keeping their order, and choosing
 //! what plays next.
 
+use super::matching::{EXACT, best_scored, fold, match_score};
 use super::model::{AudioTrack, ReorderOutcome};
 use super::url::{is_video_id, watch_url};
 use super::warn_redis;
@@ -235,6 +236,16 @@ impl AppState {
         }
     }
 
+    /// The library track a spoken phrase names, or None if none is close
+    /// enough. Searched over the whole library rather than the playback scope:
+    /// asking for something by name is an escape from whatever scope is set.
+    pub async fn find_track(&self, query: &str) -> Option<AudioTrack> {
+        let folded = fold(query);
+        best_scored(self.list_tracks().await, |track| {
+            track_score(track, &folded)
+        })
+    }
+
     /// If the youtube:tracks key is missing in Redis (e.g. after a fresh init),
     /// re-fetch metadata from audio_cache m4a filenames and register them.
     /// Since yt-dlp takes time per track, restoration runs in the background
@@ -457,6 +468,24 @@ fn random_track_from(mut tracks: Vec<AudioTrack>, current_id: &str) -> Option<Au
     Some(tracks.swap_remove(nanos % tracks.len()))
 }
 
+/// How well a track answers a spoken query, already folded by the caller. The
+/// title is scored a whole tier above the channel, so a weak title match still
+/// outranks a perfect channel one rather than being decided by which happens to
+/// score higher — asking for a song by name is far more common than asking for
+/// everything by an uploader.
+fn track_score(track: &AudioTrack, folded_query: &str) -> Option<u32> {
+    let by_title = match_score(&track.title, folded_query).map(|score| score + TITLE_TIER);
+    // A title that answers the query outright leaves the channel nothing to
+    // add, and reading it costs another fold of the field.
+    if by_title == Some(EXACT + TITLE_TIER) {
+        return by_title;
+    }
+    by_title.max(match_score(&track.channel, folded_query))
+}
+
+/// Added to every title score, putting it out of reach of any channel score.
+const TITLE_TIER: u32 = 1000;
+
 /// List {video_id}.m4a files in audio_cache as (video_id, path) pairs.
 fn cached_video_ids(cache_dir: &Path) -> Vec<(String, PathBuf)> {
     let Ok(entries) = std::fs::read_dir(cache_dir) else {
@@ -560,5 +589,57 @@ mod tests {
             "aaaaaaaaaa1"
         );
         assert!(random_track_from(Vec::new(), "aaaaaaaaaa1").is_none());
+    }
+
+    /// Track with a title and channel of its own, for query matching.
+    fn named(id: &str, title: &str, channel: &str) -> AudioTrack {
+        AudioTrack {
+            title: title.into(),
+            channel: channel.into(),
+            ..track(id)
+        }
+    }
+
+    /// The track a spoken query resolves to, as `find_track` picks it.
+    fn best_match<'a>(tracks: &'a [AudioTrack], query: &str) -> Option<&'a AudioTrack> {
+        let folded = fold(query);
+        best_scored(tracks, |track| track_score(track, &folded))
+    }
+
+    #[test]
+    fn a_query_picks_the_best_titled_track() {
+        let tracks = vec![
+            named("aaaaaaaaaa1", "Live at the Park", "Never Gonna Records"),
+            named("aaaaaaaaaa2", "Never Gonna Give You Up", "Rick Astley"),
+            named("aaaaaaaaaa3", "Never Gonna Give You Up (Remix)", "Someone"),
+        ];
+
+        // A whole title beats a title it is only the start of
+        assert_eq!(
+            best_match(&tracks, "never gonna give you up").unwrap().id,
+            "aaaaaaaaaa2"
+        );
+        // Channel names are searched too, but never at a title's expense: this
+        // phrase is the channel of track 1 and inside the title of tracks 2–3
+        assert_eq!(
+            best_match(&tracks, "never gonna").unwrap().id,
+            "aaaaaaaaaa2"
+        );
+        assert_eq!(
+            best_match(&tracks, "rick astley").unwrap().id,
+            "aaaaaaaaaa2"
+        );
+        // Nothing close enough plays nothing at all
+        assert!(best_match(&tracks, "bohemian rhapsody").is_none());
+        assert!(best_match(&[], "anything").is_none());
+    }
+
+    #[test]
+    fn equally_good_matches_resolve_to_library_order() {
+        let tracks = vec![
+            named("aaaaaaaaaa1", "Mix", "A"),
+            named("aaaaaaaaaa2", "Mix", "B"),
+        ];
+        assert_eq!(best_match(&tracks, "mix").unwrap().id, "aaaaaaaaaa1");
     }
 }

@@ -2,6 +2,7 @@
 //! playlist into a local one.
 
 use super::job::{VideoJob, Visited};
+use super::matching::{best_scored, fold, match_score};
 use super::model::{AudioTrack, Playlist, PlaylistImportInfo, PlaylistJson, WriteOutcome};
 use super::progress::playlist_progress_key;
 use super::url::{is_video_id, watch_url};
@@ -135,6 +136,27 @@ impl AppState {
                 .then_with(|| a.id.cmp(&b.id))
         });
         playlists
+    }
+
+    /// The playlist a spoken phrase names, or None if none is close enough.
+    /// Ties go to the oldest, which is the order `playlists` already returns.
+    pub async fn find_playlist(&self, name: &str) -> Option<Playlist> {
+        let folded = fold(name);
+        best_scored(self.playlists().await, |playlist| {
+            match_score(&playlist.name, &folded)
+        })
+    }
+
+    /// The first track of a playlist that still resolves to something, which is
+    /// where playing one by name starts. Only the ids are read until one
+    /// answers, rather than materializing a playlist to take one track off it.
+    pub async fn first_playlist_track(&self, playlist_id: &str) -> Option<AudioTrack> {
+        for track_id in self.playlist_track_ids(playlist_id).await {
+            if let Some(track) = self.get_track(&track_id).await {
+                return Some(track);
+            }
+        }
+        None
     }
 
     /// Delete a playlist. Also removes its track list and clears the active playlist

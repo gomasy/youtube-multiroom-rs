@@ -207,6 +207,10 @@ async fn on_intent(ctx: &ReqCtx<'_>, body: &Value) -> Value {
             None => speech(&t!("alexa_no_queued_track", locale = locale), true),
         },
 
+        "PlayTrackIntent" => play_named_track(ctx, slot_value(body, "query")).await,
+
+        "PlayPlaylistIntent" => play_named_playlist(ctx, slot_value(body, "name")).await,
+
         "AMAZON.PauseIntent" => stop_directive(ctx, "paused").await,
 
         "AMAZON.StopIntent" | "AMAZON.CancelIntent" => stop_directive(ctx, "stopped").await,
@@ -221,6 +225,84 @@ async fn on_intent(ctx: &ReqCtx<'_>, body: &Value) -> Value {
 
         _ => speech(&t!("alexa_use_web", locale = locale), false),
     }
+}
+
+/// Play the library track a spoken phrase names, on the device that heard it.
+///
+/// Searched over the whole library rather than the playback scope: naming
+/// something is how a listener escapes whatever scope the web UI was left on.
+/// Nothing close enough plays nothing at all — an arbitrary track is a worse
+/// answer than saying so.
+async fn play_named_track(ctx: &ReqCtx<'_>, query: &str) -> Value {
+    let locale = &ctx.locale;
+    if query.is_empty() {
+        return speech(&t!("alexa_not_understood", locale = locale), true);
+    }
+    let Some(track) = ctx.state.find_track(query).await else {
+        return speech(
+            &t!("alexa_track_not_found", locale = locale, query = query),
+            true,
+        );
+    };
+
+    // A track the user just asked for by name gets a clean slate, the way an
+    // explicit resume does.
+    ctx.state.clear_playback_failures(&ctx.device_id).await;
+    let title = track.title.clone();
+    let resp = play_directive(ctx, &NextUp::fresh(track)).await;
+    with_speech(resp, &t!("alexa_playing", locale = locale, title = title))
+}
+
+/// Switch the selection scope to the playlist a spoken phrase names and start
+/// it from the top.
+///
+/// The scope moves with it: having asked for a playlist by name, what follows
+/// the first track should come from that playlist and not from whatever the web
+/// UI was last set to.
+async fn play_named_playlist(ctx: &ReqCtx<'_>, name: &str) -> Value {
+    let locale = &ctx.locale;
+    if name.is_empty() {
+        return speech(&t!("alexa_not_understood", locale = locale), true);
+    }
+    let Some(playlist) = ctx.state.find_playlist(name).await else {
+        return speech(
+            &t!("alexa_playlist_not_found", locale = locale, name = name),
+            true,
+        );
+    };
+    let Some(track) = ctx.state.first_playlist_track(&playlist.id).await else {
+        return speech(
+            &t!(
+                "alexa_playlist_empty",
+                locale = locale,
+                name = playlist.name
+            ),
+            true,
+        );
+    };
+
+    if ctx.state.set_active_playlist(Some(&playlist.id)).await {
+        ctx.state.broadcast_active_playlist().await;
+    }
+    ctx.state.clear_playback_failures(&ctx.device_id).await;
+    let resp = play_directive(ctx, &NextUp::fresh(track)).await;
+    with_speech(
+        resp,
+        &t!(
+            "alexa_playing_playlist",
+            locale = locale,
+            name = playlist.name
+        ),
+    )
+}
+
+/// What Alexa filled a slot with, trimmed. Empty when it heard nothing usable,
+/// which is a case every caller has to answer for itself.
+fn slot_value<'a>(body: &'a Value, name: &str) -> &'a str {
+    body["request"]["intent"]["slots"][name]["value"]
+        .as_str()
+        .unwrap_or("")
+        .trim()
 }
 
 /// Resume the current track from its estimated position (Resume intent / play
@@ -729,6 +811,14 @@ fn tail_chars(s: &str, n: usize) -> &str {
     let skip = s.chars().count().saturating_sub(n);
     let offset = s.char_indices().nth(skip).map_or(s.len(), |(i, _)| i);
     &s[offset..]
+}
+
+/// Add spoken confirmation to a response that already carries a directive. An
+/// AudioPlayer.Play may be announced — Alexa speaks first and starts the audio
+/// after — which is what lets "playing X" answer a request that names X.
+fn with_speech(mut resp: Value, text: &str) -> Value {
+    resp["response"]["outputSpeech"] = json!({ "type": "PlainText", "text": text });
+    resp
 }
 
 fn speech(text: &str, end_session: bool) -> Value {

@@ -22,6 +22,7 @@ youtube-multiroom-rs/
 │   │   ├── mod.rs              # AppState itself; re-exports the module API
 │   │   ├── model.rs            # Wire/storage types and AudioPlayer tokens
 │   │   ├── track.rs            # Audio library: registration, ordering, selection
+│   │   ├── matching.rs         # Ranking stored text against a spoken phrase
 │   │   ├── device.rs           # Per-device state, pending commands, queues
 │   │   ├── playback.rs         # Playback mode & sleep timer
 │   │   ├── playlist.rs         # Named playlists & YouTube playlist import
@@ -178,7 +179,7 @@ WantedBy=multi-user.target
 
 A skill can carry several languages: add each under Build > Language settings and paste the matching model into that language's JSON editor. The backend answers in the language the device reports, regardless of which model was built.
 
-When upgrading from an older version, re-paste and rebuild the model — `AMAZON.NextIntent` / `AMAZON.PreviousIntent` (voice skip) were added.
+When upgrading from an older version, re-paste and rebuild the model — `AMAZON.NextIntent` / `AMAZON.PreviousIntent` (voice skip) and `PlayTrackIntent` / `PlayPlaylistIntent` (naming what to play) were added.
 
 ## PWA
 
@@ -193,7 +194,7 @@ The Web UI ships a web app manifest and icons, so it can be installed to the hom
 5. Optionally pick a playback mode (off / loop / shuffle) to auto-play the next track, and narrow the scope to a playlist with 再生範囲
 6. Drag the grip handle (⋮⋮) on a row to reorder the library; hold the drag over the pagination buttons to flip pages and drop the track elsewhere
 7. 「次に再生に追加」 appends the selected track to the play-next queue of the selected devices; queued tracks play before the loop/shuffle mode kicks in and can be reviewed or removed on each device card
-8. Say 「アレクサ、次の曲」 / 「アレクサ、前の曲」 while playing to skip; on an Echo Show the on-screen buttons work too
+8. Say 「アレクサ、次の曲」 / 「アレクサ、前の曲」 while playing to skip; on an Echo Show the on-screen buttons work too. 「アレクサ、YouTube プレーヤーで〇〇をかけて」 plays a track from the library by name, and 「〇〇のプレイリストをかけて」 a playlist
 9. The ▶ button under 選択中のトラック previews the selected track in the browser
 10. The filter input above the track list searches title and channel (debounced 300 ms, case-insensitive)
 11. Click a playlist name to rename it inline — Enter saves, Escape cancels
@@ -274,6 +275,14 @@ On `AudioPlayer.PlaybackNearlyFinished` the server picks the next track and enqu
 Tracks can be organized into named playlists, created from the Web UI or by an import. A playlist stores an ordered list of track ids in `youtube:playlist:{id}` and shares the library's files, so adding or removing entries never touches the cache. Playlist rows reorder by dragging, as the library does. Deleting a track from the library removes it from every playlist.
 
 Pasting a YouTube playlist URL (or any YouTube URL with `list=` but no `v=`) bulk-imports it: the playlist is expanded with `yt-dlp --flat-playlist` (capped at 100 entries), a local playlist of the same name is created or appended to, and each video is downloaded sequentially in the background with the usual progress display. Videos that fail are skipped. A watch URL carrying both `v=` and `list=` is treated as a single video.
+
+### Naming What to Play
+
+`PlayTrackIntent` (「アレクサ、YouTube プレーヤーで〇〇をかけて」 / "Alexa, ask YouTube Player to play …") plays a library track by name, and `PlayPlaylistIntent` (「〇〇のプレイリストをかけて」) starts a playlist and makes it the selection scope, so what follows comes from it rather than from whatever 再生範囲 was left on. Both are `AMAZON.SearchQuery` slots, so re-paste the interaction model after upgrading.
+
+What Alexa hands over is what it heard, not what was typed, so neither side is compared as written: both are folded to lowercase with everything but letters and digits dropped. 「けもの フレンズ」 therefore answers to "けものフレンズ", and a title like `【MV】Hello, World! - Official` to "hello world". A whole name beats a name it merely starts, which beats a name it only mentions; a title match always beats a channel match, so a song is never lost to the uploader of another one; and equal matches go to whichever is earlier in the library order, so a phrase always plays the same thing. Nothing close enough plays nothing at all and says so — an arbitrary track is a worse answer than "I couldn't find it".
+
+The search covers the whole library rather than the playback scope: naming something is how a listener escapes the scope the web UI is set to.
 
 ### Voice Skip & Playback Controls
 

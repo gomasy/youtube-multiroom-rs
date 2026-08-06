@@ -17,6 +17,36 @@
           ]
         },
         {
+          "name": "PlayTrackIntent",
+          "slots": [
+            {
+              "name": "query",
+              "type": "AMAZON.SearchQuery"
+            }
+          ],
+          "samples": [
+            "{query}をかけて",
+            "{query}を再生して",
+            "{query}を流して",
+            "{query}を再生"
+          ]
+        },
+        {
+          "name": "PlayPlaylistIntent",
+          "slots": [
+            {
+              "name": "name",
+              "type": "AMAZON.SearchQuery"
+            }
+          ],
+          "samples": [
+            "プレイリスト{name}をかけて",
+            "プレイリスト{name}を再生して",
+            "{name}のプレイリストをかけて",
+            "{name}のプレイリストを再生して"
+          ]
+        },
+        {
           "name": "AMAZON.PauseIntent",
           "samples": []
         },

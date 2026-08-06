@@ -17,6 +17,36 @@
           ]
         },
         {
+          "name": "PlayTrackIntent",
+          "slots": [
+            {
+              "name": "query",
+              "type": "AMAZON.SearchQuery"
+            }
+          ],
+          "samples": [
+            "play {query}",
+            "put on {query}",
+            "start {query}",
+            "play the track {query}"
+          ]
+        },
+        {
+          "name": "PlayPlaylistIntent",
+          "slots": [
+            {
+              "name": "name",
+              "type": "AMAZON.SearchQuery"
+            }
+          ],
+          "samples": [
+            "play the playlist {name}",
+            "play playlist {name}",
+            "start the playlist {name}",
+            "put on the playlist {name}"
+          ]
+        },
+        {
           "name": "AMAZON.PauseIntent",
           "samples": []
         },
