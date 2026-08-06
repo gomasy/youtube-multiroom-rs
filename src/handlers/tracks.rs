@@ -88,12 +88,7 @@ pub async fn bulk_delete_tracks(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TrackIdsRequest>,
 ) -> AppResult<Json<Value>> {
-    let mut deleted = 0u32;
-    for id in &req.track_ids {
-        if state.remove_track(id).await.is_some() {
-            deleted += 1;
-        }
-    }
+    let deleted = state.remove_tracks(&req.track_ids).await;
     if deleted > 0 {
         broadcast_track_removal(&state).await;
     }

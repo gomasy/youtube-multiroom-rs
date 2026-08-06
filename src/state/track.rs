@@ -1,18 +1,19 @@
 //! The audio library: registering tracks, keeping their order, and choosing
 //! what plays next.
 
+use super::download::ExtractSlot;
 use super::matching::{EXACT, best_scored, fold, match_score};
 use super::model::{AudioTrack, ReorderOutcome};
 use super::url::{is_video_id, watch_url};
-use super::warn_redis;
 use super::ytdlp::fetch_metadata;
 use super::{
     AUDIO_EXT, AppState, PendingCommand, REDIS_KEY_TRACKS, REDIS_KEY_TRACKS_ORDER,
     REDIS_PENDING_PREFIX, now_f64, playlist_key, queue_key, since_epoch, token_track_id,
 };
+use super::warn_redis;
 use redis::AsyncCommands;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -33,9 +34,56 @@ impl AppState {
     }
 
     pub async fn remove_track(&self, id: &str) -> Option<AudioTrack> {
-        // Nothing registered means nothing to delete: a download still in
-        // flight for this video registers a fresh track rather than
-        // resurrecting this one.
+        let (track, slot) = self.unregister_track(id).await?;
+        self.forget_references(&HashSet::from([id])).await;
+        self.release_extract_slot(id, &slot).await;
+        Some(track)
+    }
+
+    /// Delete every registered track named, and return how many that was.
+    ///
+    /// The per-video work — claiming the extract slot, removing the cache file,
+    /// dropping the registration — is still one track at a time. What follows
+    /// is not: each of the sweeps that clears the references to a deleted track
+    /// (the library order, every playlist, the queued play commands, the device
+    /// queues) costs the same whether it clears one id or a hundred, so they
+    /// run once for the whole set. Deleting a page of tracks one at a time
+    /// meant a SCAN of the pending commands, a read of every playlist and a
+    /// read of every device queue *per track*.
+    ///
+    /// Ids naming nothing are skipped, and a repeat is deleted once.
+    pub async fn remove_tracks(&self, ids: &[String]) -> usize {
+        // A repeat finds nothing registered the second time round, so it claims
+        // no second slot and cannot appear here twice.
+        let mut claimed: Vec<(&str, Arc<ExtractSlot>)> = Vec::new();
+        for id in ids {
+            if let Some((_, slot)) = self.unregister_track(id).await {
+                claimed.push((id.as_str(), slot));
+            }
+        }
+        if claimed.is_empty() {
+            return 0;
+        }
+
+        let removed: HashSet<&str> = claimed.iter().map(|(id, _)| *id).collect();
+        self.forget_references(&removed).await;
+        for (id, slot) in &claimed {
+            self.release_extract_slot(id, slot).await;
+        }
+        removed.len()
+    }
+
+    /// Delete one track's cache file and its registration, leaving what still
+    /// refers to it for [`Self::forget_references`]. None when nothing was
+    /// registered under this id — a download still in flight for the video
+    /// registers a fresh track rather than resurrecting this one.
+    ///
+    /// The video's extract slot comes back with the track, still held: it is
+    /// what stops a re-download of the same video from registering underneath
+    /// the sweep that has yet to run, which would strip the fresh track of the
+    /// order position and playlist memberships it just earned. The caller
+    /// releases it once that sweep is done.
+    async fn unregister_track(&self, id: &str) -> Option<(AudioTrack, Arc<ExtractSlot>)> {
         self.get_track(id).await?;
 
         // Claim the video's extract slot for the deletion. A download that
@@ -43,12 +91,17 @@ impl AppState {
         // registration instead, so the deletion never waits it out.
         let slot = self.extract_slot(id).await;
         slot.mark_deleted();
-        let removed = self.remove_track_inner(id).await;
-        self.release_extract_slot(id, &slot).await;
-        removed
+        match self.unregister_track_locked(id).await {
+            Some(track) => Some((track, slot)),
+            None => {
+                self.release_extract_slot(id, &slot).await;
+                None
+            }
+        }
     }
 
-    async fn remove_track_inner(&self, id: &str) -> Option<AudioTrack> {
+    /// The half of a deletion that runs under the video's extract slot.
+    async fn unregister_track_locked(&self, id: &str) -> Option<AudioTrack> {
         let track = self.get_track(id).await?;
 
         // File first: removing the last track makes the tracks key vanish, and
@@ -60,41 +113,46 @@ impl AppState {
 
         let mut conn = self.redis.clone();
         warn_redis!("deleting track {id}", conn.hdel(REDIS_KEY_TRACKS, id).await);
-        self.unlink_track_from_order_and_playlists(id).await;
-        self.clear_pending_referencing(id).await;
-        self.detach_track_from_devices(id).await;
-
         Some(track)
     }
 
-    /// Drop a deleted track from the library order and from every playlist that
-    /// listed it.
-    async fn unlink_track_from_order_and_playlists(&self, id: &str) {
+    /// Drop every reference to a set of deleted tracks, so nothing left behind
+    /// can play one or put it back.
+    ///
+    /// Each sweep is safe to run late: a listing skips ids no track answers to,
+    /// and `peek_queue` clears a queue entry whose track is gone.
+    async fn forget_references(&self, ids: &HashSet<&str>) {
+        self.unlink_from_order_and_playlists(ids).await;
+        self.clear_pending_referencing(ids).await;
+        self.detach_from_devices(ids).await;
+    }
+
+    /// Drop deleted tracks from the library order and from every playlist that
+    /// listed them, in a single pipeline round-trip.
+    async fn unlink_from_order_and_playlists(&self, ids: &HashSet<&str>) {
         // Serialize with reorder's read-then-replace to prevent a deletion
         // from being silently undone by a concurrent reorder write-back.
         let _guard = self.order_lock.lock().await;
-        let mut conn = self.redis.clone();
-        warn_redis!(
-            "removing {id} from track order",
-            conn.lrem(REDIS_KEY_TRACKS_ORDER, 0, id).await
-        );
-
-        // Remove from all playlist track lists in a single pipeline round-trip
         let playlists = self.playlists().await;
-        if playlists.is_empty() {
-            return;
-        }
+
         let mut pipe = redis::pipe();
-        for playlist in &playlists {
-            pipe.lrem(playlist_key(&playlist.id), 0, id).ignore();
+        for id in ids {
+            pipe.lrem(REDIS_KEY_TRACKS_ORDER, 0, *id).ignore();
+            for playlist in &playlists {
+                pipe.lrem(playlist_key(&playlist.id), 0, *id).ignore();
+            }
         }
+        let mut conn = self.redis.clone();
         if let Err(e) = pipe.query_async::<()>(&mut conn).await {
-            tracing::warn!("Redis error removing track {id} from playlists: {e}");
+            // The whole pipeline failed or none of it did, so the count is what
+            // there is to report — naming one of the ids would suggest the rest
+            // succeeded.
+            tracing::warn!("Redis error unlinking {} deleted track(s): {e}", ids.len());
         }
     }
 
     /// Discard queued play commands that would resurrect a deleted track.
-    async fn clear_pending_referencing(&self, id: &str) {
+    async fn clear_pending_referencing(&self, ids: &HashSet<&str>) {
         let mut conn = self.redis.clone();
         for key in self.pending_keys().await {
             let json_str: Option<String> = match conn.get(&key).await {
@@ -106,7 +164,7 @@ impl AppState {
             };
             if json_str
                 .and_then(|s| serde_json::from_str::<PendingCommand>(&s).ok())
-                .is_some_and(|cmd| cmd.track.id == id)
+                .is_some_and(|cmd| ids.contains(cmd.track.id.as_str()))
             {
                 warn_redis!("clearing pending command {key}", conn.del(&key).await);
             }
@@ -139,9 +197,9 @@ impl AppState {
         keys
     }
 
-    /// Remove a deleted track from every device's Up Next queue, and clear it
-    /// from any device that was pointing at it.
-    async fn detach_track_from_devices(&self, id: &str) {
+    /// Remove deleted tracks from every device's Up Next queue, and clear them
+    /// from any device that was pointing at one.
+    async fn detach_from_devices(&self, ids: &HashSet<&str>) {
         let mut conn = self.redis.clone();
         for mut dev in self.all_devices().await.into_values() {
             let key = queue_key(&dev.device_id);
@@ -149,13 +207,29 @@ impl AppState {
                 tracing::warn!("Redis error reading queue for {}: {e}", dev.device_id);
                 Vec::new()
             });
-            for entry in entries.iter().filter(|e| token_track_id(e) == id) {
-                warn_redis!(
-                    "removing queue entry {entry}",
-                    conn.lrem(&key, 0, entry).await
+
+            // Entries are unique, so each is removed by value in one pipeline
+            // rather than a round-trip apiece.
+            let mut pipe = redis::pipe();
+            let mut stale = 0;
+            for entry in entries.iter().filter(|e| ids.contains(token_track_id(e))) {
+                pipe.lrem(&key, 0, entry).ignore();
+                stale += 1;
+            }
+            if stale > 0
+                && let Err(e) = pipe.query_async::<()>(&mut conn).await
+            {
+                tracing::warn!(
+                    "Redis error removing queue entries for {}: {e}",
+                    dev.device_id
                 );
             }
-            if dev.current_track.as_ref().is_some_and(|t| t.id == id) {
+
+            if dev
+                .current_track
+                .as_ref()
+                .is_some_and(|t| ids.contains(t.id.as_str()))
+            {
                 dev.current_track = None;
                 dev.status = "idle".to_string();
                 self.write_device(&dev).await;
