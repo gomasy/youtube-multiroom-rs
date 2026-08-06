@@ -129,32 +129,22 @@ pub async fn bulk_add_playlist_tracks(
     // the script moves an already-listed track to the end, so a repeat would
     // have reordered the playlist against the request.
     let track_ids = req.known_ids(&state).await;
-    let mut added = 0u32;
-    let mut failure = None;
-    for id in &track_ids {
-        // A playlist deleted mid-request stops the loop rather than being
-        // appended to where nobody can see it.
-        match written_or_err(
-            state.add_playlist_track(&playlist_id, id).await,
-            "Playlist not found",
-            "Failed to add tracks to playlist",
-        ) {
-            Ok(()) => added += 1,
-            Err(e) => {
-                failure = Some(e);
-                break;
-            }
-        }
-    }
-    // Whatever landed before the failure is real, so clients are told about it
+    let ids: Vec<&str> = track_ids.iter().map(String::as_str).collect();
+    // A playlist deleted mid-request stops the append rather than it being
+    // written where nobody can see it.
+    let (added, outcome) = state.add_playlist_tracks(&playlist_id, &ids).await;
+
+    // Whatever landed before a failure is real, so clients are told about it
     // even when the request as a whole is reported as failed.
     if added > 0 {
         state.broadcast_playlists().await;
         state.broadcast_tracks();
     }
-    if let Some(failure) = failure {
-        return Err(failure);
-    }
+    written_or_err(
+        outcome,
+        "Playlist not found",
+        "Failed to add tracks to playlist",
+    )?;
     let locale = client_locale(&headers);
     Ok(Json(json!({
         "status": "ok",

@@ -139,10 +139,26 @@ impl AppState {
                 }
             };
 
-            for track_id in entry.track_ids.iter().filter(|id| is_video_id(id)) {
-                if self.add_playlist_track(&local_id, track_id).await == WriteOutcome::Failed {
-                    tracing::warn!("Library import: failed to add {track_id} to '{name}'");
+            let track_ids: Vec<&str> = entry
+                .track_ids
+                .iter()
+                .filter(|id| is_video_id(id))
+                .map(String::as_str)
+                .collect();
+            let (added, outcome) = self.add_playlist_tracks(&local_id, &track_ids).await;
+            match outcome {
+                WriteOutcome::Written => {}
+                // Deleted from under the import. The rest of the document is
+                // still worth restoring, so only this playlist is given up on.
+                WriteOutcome::Gone => {
+                    tracing::warn!(
+                        "Library import: '{name}' was deleted while it was being filled"
+                    );
                 }
+                WriteOutcome::Failed => tracing::warn!(
+                    "Library import: added {added} of {} track(s) to '{name}'",
+                    track_ids.len()
+                ),
             }
             mapping.insert(entry.playlist.id.clone(), local_id);
         }

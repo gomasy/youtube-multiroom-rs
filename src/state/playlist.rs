@@ -6,11 +6,11 @@ use super::matching::{best_scored, fold, match_score};
 use super::model::{AudioTrack, Playlist, PlaylistImportInfo, PlaylistJson, WriteOutcome};
 use super::progress::playlist_progress_key;
 use super::url::{is_video_id, watch_url};
-use super::warn_redis;
 use super::ytdlp::{DownloadError, run_yt_dlp_cancellable};
 use super::{
     AppState, REDIS_KEY_ACTIVE_PLAYLIST, REDIS_KEY_PLAYLISTS, now_f64, playlist_key, since_epoch,
 };
+use super::warn_redis;
 use redis::AsyncCommands;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -22,20 +22,29 @@ const PLAYLIST_NAME_MAX_CHARS: usize = 100;
 /// Cap for playlist import to avoid expanding effectively-infinite mix lists.
 const PLAYLIST_IMPORT_MAX: usize = 100;
 const PLAYLIST_FLAT_TIMEOUT_SECS: u64 = 60;
+/// Track ids appended per script invocation. Each one costs an LREM that scans
+/// the list, so an unbounded batch would hold Redis — which runs a script to
+/// completion before serving anyone else — for as long as the whole append
+/// takes. A hundred keeps any one invocation short while still costing a
+/// round-trip per hundred tracks rather than one per track.
+const PLAYLIST_APPEND_CHUNK: usize = 100;
 
-/// Append a track only while the playlist is still registered. The list key is
+/// Append tracks only while the playlist is still registered. The list key is
 /// created implicitly by RPUSH, so an unguarded append would resurrect a
-/// playlist's track list after the playlist itself was deleted.
-/// KEYS: playlists hash, playlist track list. ARGV: playlist id, track id.
+/// playlist's track list after the playlist itself was deleted. Each id is
+/// removed before it is pushed, so one already listed moves to the end.
+/// KEYS: playlists hash, playlist track list. ARGV: playlist id, then track ids.
 /// Returns 1 when appended, 0 when the playlist is gone.
-static ADD_PLAYLIST_TRACK_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
+static ADD_PLAYLIST_TRACKS_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
     redis::Script::new(
         r"
         if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 0 then
             return 0
         end
-        redis.call('LREM', KEYS[2], 0, ARGV[2])
-        redis.call('RPUSH', KEYS[2], ARGV[2])
+        for i = 2, #ARGV do
+            redis.call('LREM', KEYS[2], 0, ARGV[i])
+            redis.call('RPUSH', KEYS[2], ARGV[i])
+        end
         return 1
         ",
     )
@@ -192,21 +201,55 @@ impl AppState {
     /// check and the mutation are atomic, so a slow background import cannot
     /// recreate a playlist deleted meanwhile.
     pub async fn add_playlist_track(&self, playlist_id: &str, track_id: &str) -> WriteOutcome {
+        self.add_playlist_tracks(playlist_id, std::slice::from_ref(&track_id))
+            .await
+            .1
+    }
+
+    /// Append tracks to an existing playlist in the order given, moving any
+    /// already listed to the end. Returns how many landed and why it stopped.
+    ///
+    /// The appends go out a chunk at a time rather than one id at a time: the
+    /// existence check and the mutations share a script either way, so a batch
+    /// is both fewer round-trips and *more* atomic than the same ids appended
+    /// separately. A chunk that fails leaves the ones before it in place, which
+    /// is what the count is for — the caller reports the failure but the
+    /// tracks that landed are real.
+    ///
+    /// `order_lock` is taken per chunk rather than held across all of them, so
+    /// a large import cannot lock reordering out for its whole duration.
+    pub async fn add_playlist_tracks(
+        &self,
+        playlist_id: &str,
+        track_ids: &[&str],
+    ) -> (usize, WriteOutcome) {
+        let mut written = 0;
+        for chunk in track_ids.chunks(PLAYLIST_APPEND_CHUNK) {
+            match self.append_playlist_chunk(playlist_id, chunk).await {
+                WriteOutcome::Written => written += chunk.len(),
+                stopped => return (written, stopped),
+            }
+        }
+        (written, WriteOutcome::Written)
+    }
+
+    async fn append_playlist_chunk(&self, playlist_id: &str, track_ids: &[&str]) -> WriteOutcome {
         // Serialized with reorder's read-then-replace.
         let _guard = self.order_lock.lock().await;
         let mut conn = self.redis.clone();
-        match ADD_PLAYLIST_TRACK_SCRIPT
+        let mut invocation = ADD_PLAYLIST_TRACKS_SCRIPT.prepare_invoke();
+        invocation
             .key(REDIS_KEY_PLAYLISTS)
             .key(playlist_key(playlist_id))
-            .arg(playlist_id)
-            .arg(track_id)
-            .invoke_async::<i64>(&mut conn)
-            .await
-        {
+            .arg(playlist_id);
+        for track_id in track_ids {
+            invocation.arg(*track_id);
+        }
+        match invocation.invoke_async::<i64>(&mut conn).await {
             Ok(1) => WriteOutcome::Written,
             Ok(_) => WriteOutcome::Gone,
             Err(e) => {
-                tracing::warn!("Redis error adding track to playlist {playlist_id}: {e}");
+                tracing::warn!("Redis error adding tracks to playlist {playlist_id}: {e}");
                 WriteOutcome::Failed
             }
         }
