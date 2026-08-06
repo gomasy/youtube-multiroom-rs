@@ -2,7 +2,7 @@
 //! [`crate::alexa`]; this is only the HTTP edge that runs them in order.
 
 use super::{AppError, AppResult};
-use crate::alexa::{handle_alexa, verify_request, verify_timestamp};
+use crate::alexa::{handle_alexa, verify_application_id, verify_request, verify_timestamp};
 use crate::state::AppState;
 use axum::body::Bytes;
 use axum::extract::State;
@@ -29,7 +29,9 @@ pub async fn alexa_webhook(
     let body: Value =
         serde_json::from_slice(&body).map_err(|_| AppError::bad_request("Invalid JSON body"))?;
 
-    if let Err(e) = verify_timestamp(&body) {
+    // The two body-level checks report the way the signature check does: the
+    // reason is logged, and the sender is told only that verification failed.
+    if let Err(e) = verify_timestamp(&body).and_then(|()| verify_application_id(&body)) {
         tracing::warn!("Rejected Alexa request: {e}");
         return Err(AppError::bad_request("Request verification failed"));
     }

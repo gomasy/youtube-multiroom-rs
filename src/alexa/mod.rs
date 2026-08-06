@@ -4,8 +4,9 @@
 //! subject into sibling modules, as [`crate::state`] and [`crate::handlers`]
 //! are:
 //!
-//! - [`verify`] — proving the request really came from Amazon, which is what
-//!   stands in for the Bearer auth `/alexa` is exempt from
+//! - [`verify`] — proving the request really came from Amazon, and from this
+//!   deployment's skill, which is what stands in for the Bearer auth `/alexa`
+//!   is exempt from
 //! - [`session`] — opening the skill: starting something, or picking up
 //!   whatever the launch interrupted
 //! - [`intent`] — the spoken commands, and the touch and remote controls that
@@ -19,7 +20,7 @@
 //! they share — the per-request context below — lives here.
 //!
 //! The HTTP edge itself is [`crate::handlers::alexa_webhook`], which is the one
-//! caller of all three re-exports and runs them in that order.
+//! caller of the verification re-exports and runs them before `handle_alexa`.
 
 mod event;
 mod intent;
@@ -28,7 +29,7 @@ mod response;
 mod session;
 mod verify;
 
-pub use verify::{verify_request, verify_timestamp};
+pub use verify::{skill_id, verify_application_id, verify_request, verify_timestamp};
 
 use crate::state::AppState;
 use response::{alexa_response, no_track_response, speech};

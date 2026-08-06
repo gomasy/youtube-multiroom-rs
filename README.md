@@ -93,6 +93,7 @@ cargo build --release                               # Backend
 | `REDIS_URL` | Yes | Redis connection URL (e.g. `redis://127.0.0.1/`) |
 | `API_TOKEN` | No | Bearer token for API authentication |
 | `LISTEN_ADDR` | No | Address and port to listen on (default: `0.0.0.0:8888`) |
+| `ALEXA_SKILL_ID` | No | Skill ID (`amzn1.ask.skill.…`) that `/alexa` requests must name; any skill is accepted when unset |
 
 These can also live in a `.env` file in the working directory, loaded automatically at startup; real environment variables take precedence. See `.env.example`.
 
@@ -113,6 +114,7 @@ Setting `API_TOKEN` protects the API with a Bearer token:
 - API endpoints and the WebSocket require `Authorization: Bearer <token>` (or `?token=` for the WebSocket, which cannot send headers).
 - `/api/audio/{id}/stream` and `/api/audio/{id}/live` accept a signed URL instead, since Echo devices cannot send auth headers: `?exp=<unix>&sig=<hmac>`, HMAC-SHA256 derived from `API_TOKEN` and valid for 24 h. Bearer auth is also accepted.
 - `/alexa` is exempt from Bearer auth — every request to it is instead verified as genuinely coming from Alexa (certificate chain validation, body signature, timestamp freshness), whether or not `API_TOKEN` is set. This means you cannot `curl` it manually.
+- Setting `ALEXA_SKILL_ID` additionally requires each request to name your skill. Signature verification only proves a request came from Amazon, so without this anyone who learns your URL can drive your devices from a skill of their own.
 
 Without `API_TOKEN`, no authentication is required.
 
@@ -186,6 +188,7 @@ WantedBy=multi-user.target
 3. Interfaces > enable **Audio Player**
 4. Endpoint > HTTPS > `https://<your-tunnel-url>/alexa`
 5. Test > set to **Development**
+6. Optional: copy the skill ID (`amzn1.ask.skill.…`, shown under the skill name on the console's skill list) into `ALEXA_SKILL_ID` so the server answers only your skill
 
 A skill can carry several languages: add each under Build > Language settings and paste the matching model into that language's JSON editor. The backend answers in the language the device reports, regardless of which model was built.
 

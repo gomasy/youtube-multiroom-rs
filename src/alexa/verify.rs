@@ -4,7 +4,8 @@
 //! signature verification confirms that requests genuinely originate from
 //! Alexa. Nothing in the rest of [`super`] runs until this has passed.
 //! Steps: validate certificate URL → verify certificate chain (SAN, expiry,
-//! trust chain) → verify request body signature → check timestamp freshness.
+//! trust chain) → verify request body signature → check timestamp freshness →
+//! check the skill the request names, if one is configured.
 //! <https://developer.amazon.com/docs/custom-skills/host-a-custom-skill-as-a-web-service.html>
 
 use axum::http::HeaderMap;
@@ -140,6 +141,58 @@ pub fn verify_timestamp(body: &Value) -> Result<(), String> {
     let diff = (time::OffsetDateTime::now_utc() - t).whole_seconds().abs();
     if diff > TIMESTAMP_TOLERANCE_SECS {
         return Err(format!("timestamp out of tolerance ({diff}s)"));
+    }
+    Ok(())
+}
+
+/// The skill this deployment answers for, from `ALEXA_SKILL_ID`. Read once —
+/// the environment does not change under a running process — and left `None`
+/// when unset or empty, which is what makes the check below optional.
+pub fn skill_id() -> Option<&'static str> {
+    static SKILL_ID: OnceLock<Option<String>> = OnceLock::new();
+    SKILL_ID
+        .get_or_init(|| {
+            std::env::var("ALEXA_SKILL_ID")
+                .ok()
+                .map(|id| id.trim().to_string())
+                .filter(|id| !id.is_empty())
+        })
+        .as_deref()
+}
+
+/// Verify that the request was sent to *our* skill.
+///
+/// Signature verification proves a request came from Amazon, not that it came
+/// from this deployment's skill: anyone can point a skill of their own at a
+/// tunnel URL and drive the devices behind it. Naming the skill ID closes that,
+/// which is why Amazon requires the check for certification.
+///
+/// Optional, since a private deployment that never published its URL has
+/// nothing to gain from it and an operator who has not set `ALEXA_SKILL_ID`
+/// should not find the skill silently broken.
+pub fn verify_application_id(body: &Value) -> Result<(), String> {
+    skill_id().map_or(Ok(()), |expected| check_application_id(body, expected))
+}
+
+fn check_application_id(body: &Value, expected: &str) -> Result<(), String> {
+    // Sessioned requests (LaunchRequest, IntentRequest) carry the ID under
+    // `session.application`; every request carries it under
+    // `context.System.application`. Both are checked wherever present, so
+    // neither placement can smuggle a foreign ID past the other, and a request
+    // naming no skill at all is rejected rather than read as ours.
+    let ids = [
+        body["session"]["application"]["applicationId"].as_str(),
+        body["context"]["System"]["application"]["applicationId"].as_str(),
+    ];
+    let mut found = false;
+    for id in ids.into_iter().flatten() {
+        if id != expected {
+            return Err(format!("applicationId is not this skill: {id}"));
+        }
+        found = true;
+    }
+    if !found {
+        return Err("missing applicationId".to_string());
     }
     Ok(())
 }
@@ -365,6 +418,55 @@ mod tests {
         ] {
             assert!(validate_cert_url(url).is_err(), "should reject {url}");
         }
+    }
+
+    const SKILL: &str = "amzn1.ask.skill.00000000-0000-0000-0000-000000000000";
+
+    fn session_app(id: &str) -> Value {
+        json!({ "session": { "application": { "applicationId": id } } })
+    }
+
+    fn context_app(id: &str) -> Value {
+        json!({ "context": { "System": { "application": { "applicationId": id } } } })
+    }
+
+    #[test]
+    fn matching_application_id_passes() {
+        // Either placement alone, and both together
+        let mut both = session_app(SKILL);
+        both["context"] = context_app(SKILL)["context"].clone();
+        for body in [session_app(SKILL), context_app(SKILL), both] {
+            assert!(check_application_id(&body, SKILL).is_ok(), "{body}");
+        }
+    }
+
+    #[test]
+    fn foreign_or_absent_application_id_fails() {
+        let other = "amzn1.ask.skill.11111111-1111-1111-1111-111111111111";
+        // A mismatch in either placement, including one paired with a match
+        let mut mixed = session_app(SKILL);
+        mixed["context"] = context_app(other)["context"].clone();
+        for body in [
+            session_app(other),
+            context_app(other),
+            mixed,
+            // No skill named at all, and an ID of the wrong JSON type
+            json!({ "request": { "type": "LaunchRequest" } }),
+            json!({ "session": { "application": { "applicationId": 42 } } }),
+        ] {
+            assert!(check_application_id(&body, SKILL).is_err(), "{body}");
+        }
+    }
+
+    #[test]
+    fn skill_id_decides_whether_the_check_applies() {
+        // ALEXA_SKILL_ID is process-wide and skill_id() caches its first read,
+        // so this asserts the relationship instead of setting a value: a body
+        // naming no skill passes exactly when no skill is configured.
+        assert_eq!(
+            verify_application_id(&json!({})).is_ok(),
+            skill_id().is_none()
+        );
     }
 
     #[test]

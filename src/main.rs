@@ -137,6 +137,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Redis    = {}", redact_url(&redis_url));
     println!("  Web UI   → http://localhost:{}", addr.port());
     println!("  Alexa    → POST /alexa");
+    // Also the first read of ALEXA_SKILL_ID. Printing the value rather than
+    // just "is set" is what turns a typo into something visible at startup
+    // instead of into an Echo that has silently stopped being answered.
+    match alexa::skill_id() {
+        Some(id) => println!("  Skill ID = {id}"),
+        None => println!("  Skill ID → any (set ALEXA_SKILL_ID to restrict)"),
+    }
     if auth_enabled {
         println!("  Auth     → API_TOKEN is set");
     } else {
