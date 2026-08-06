@@ -31,6 +31,10 @@ RUN ./configure \
         --disable-avdevice \
         --disable-swscale \
         --enable-small \
+        # FFmpeg 9's MPEG-TS PMT parser uses more than musl's default 128 KiB
+        # thread stack. Record a larger default in PT_GNU_STACK to avoid a
+        # stack-overflow SIGSEGV when relaying HLS.
+        --extra-ldflags=-Wl,-z,stack-size=1048576 \
         --enable-openssl \
         --enable-zlib \
         # udp is not needed on its own, but tls_openssl.c references ff_udp_*
