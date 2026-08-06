@@ -71,6 +71,16 @@ impl AudioTrack {
         Ok(v.to_string())
     }
 
+    /// The latest offset worth starting this track from: a second short of the
+    /// end, so playback does not terminate the moment it begins. `None` when
+    /// the length is unknown and there is nothing to measure against.
+    ///
+    /// Shared by every path that hands an Echo a start position — a seek, a
+    /// sync — so the two cannot disagree about where "too late" is.
+    pub fn max_offset_ms(&self) -> Option<u64> {
+        (self.duration > 0).then(|| self.duration.saturating_mul(1000).saturating_sub(1000))
+    }
+
     pub(crate) fn extract_channel(meta: &Value) -> String {
         meta["channel"]
             .as_str()
@@ -210,10 +220,15 @@ impl DeviceState {
         matches!(self.status.as_str(), "playing" | "paused")
     }
 
-    /// Advance position by elapsed time while playing (clamped to track end).
-    fn advance_position(&mut self, now: f64) {
+    /// Where the device is now: the position it last reported, advanced by the
+    /// time elapsed since while it has been playing (clamped to the track end).
+    /// A device that is not playing has not moved.
+    ///
+    /// The same estimate the web UI's seek bar draws, and what a sync reads to
+    /// line other devices up with this one.
+    pub fn estimated_position_ms(&self, now: f64) -> u64 {
         if self.status != "playing" {
-            return;
+            return self.position_ms;
         }
         let elapsed_ms = ((now - self.last_update).max(0.0) * 1000.0) as u64;
         let max_ms = self
@@ -222,7 +237,12 @@ impl DeviceState {
             .map(|t| t.duration.saturating_mul(1000))
             .filter(|&d| d > 0)
             .unwrap_or(u64::MAX);
-        self.position_ms = self.position_ms.saturating_add(elapsed_ms).min(max_ms);
+        self.position_ms.saturating_add(elapsed_ms).min(max_ms)
+    }
+
+    /// Advance position by elapsed time while playing (clamped to track end).
+    fn advance_position(&mut self, now: f64) {
+        self.position_ms = self.estimated_position_ms(now);
     }
 }
 
@@ -334,6 +354,14 @@ pub struct PlayRequest {
 pub struct SeekRequest {
     /// Seek target in milliseconds (clamped to just before track end).
     pub position_ms: u64,
+}
+
+#[derive(Deserialize)]
+pub struct SyncRequest {
+    /// Devices to line up with the one named in the path. Absent means every
+    /// other registered device, which is what the web UI asks for.
+    #[serde(default)]
+    pub device_ids: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]

@@ -319,6 +319,23 @@ export async function clearQueue(
   );
 }
 
+/**
+ * Line every other device up with this one, starting from where it is now.
+ * The empty body is what asks for "all the others"; the endpoint also accepts
+ * an explicit list.
+ */
+export async function syncDevices(
+  deviceId: string,
+  onUnauthorized?: () => void,
+): Promise<{ message?: string }> {
+  return authJson(
+    `${devicePath(deviceId)}/sync`,
+    "api.syncFailed",
+    { method: "POST", body: "{}" },
+    onUnauthorized,
+  );
+}
+
 export async function checkAuth(
   token?: string,
 ): Promise<{ authorized: boolean; data: TracksPage | null }> {

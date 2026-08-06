@@ -38,7 +38,7 @@ youtube-multiroom-rs/
 │       ├── search.rs           # YouTube search
 │       ├── tracks.rs           # Track listing, reordering, deletion
 │       ├── playlists.rs        # Playlist CRUD & membership
-│       ├── devices.rs          # Device state & playback commands
+│       ├── devices.rs          # Device state, playback commands, device sync
 │       ├── alexa.rs            # Alexa webhook endpoint
 │       └── ws.rs               # WebSocket push channel
 └── front/
@@ -200,6 +200,7 @@ The Web UI ships a web app manifest and icons, so it can be installed to the hom
 11. Click a playlist name to rename it inline — Enter saves, Escape cancels
 12. 「選択」 enters select mode: check tracks or 「全選択」 a page, then bulk-delete, bulk-add to a playlist, or 「メタデータ更新」. In a playlist view, removal only affects that playlist
 13. Set a sleep timer (15 / 30 min, 1 / 3 / 6 h) below the playback mode selector
+14. 「他を同期」 on a device card brings every other device to that device's track and position
 
 ## Architecture
 
@@ -284,6 +285,12 @@ What Alexa hands over is what it heard, not what was typed, so neither side is c
 
 The search covers the whole library rather than the playback scope: naming something is how a listener escapes the scope the web UI is set to.
 
+### Device Sync
+
+Since a custom skill cannot push directives, each Echo starts when it is spoken to, which is what leaves a room that joined late playing the same track minutes behind the others. 「他を同期」 on a device card queues that device's current track on every other device at the position it has reached — the same estimate the seek bar draws, taken at the moment the command is written. Like a seek, each follower applies it the next time it contacts the skill, so the phrase still has to be said on it (or it lands by itself at the next track transition).
+
+A live stream is queued from zero instead: it has no position to match, and the relay hands out whatever is at the live edge regardless. Finite tracks are clamped a second short of the end, as a seek is, so a follower does not start by immediately finishing.
+
 ### Voice Skip & Playback Controls
 
 `AMAZON.NextIntent` (「アレクサ、次の曲」) switches immediately: a pending web command first, then the play-next queue, then the playback-mode selection (shuffle picks at random; loop/off advance in order — an explicit "next" moves on even when the mode is off). `AMAZON.PreviousIntent` goes back one track in scope order, wrapping from first to last. Both reset the playback-failure retry counter, like an explicit resume.
@@ -347,6 +354,7 @@ Broadcast frames:
 | DELETE | `/api/devices/{id}/queue` | Yes | Clear a device's play-next queue |
 | DELETE | `/api/devices/{id}/queue/{entry}` | Yes | Remove one item from a device's queue |
 | POST | `/api/devices/{id}/seek` | Yes | Queue playback of the current track from a position |
+| POST | `/api/devices/{id}/sync` | Yes | Line other devices up with this one (see below) |
 | POST | `/api/devices/{id}/stop` | Yes | Stop a device |
 | POST | `/alexa` | Amazon signature | Alexa skill webhook |
 | WS | `/ws` | Yes | Real-time sync & audio extraction |
@@ -374,6 +382,14 @@ Broadcast frames:
 ```
 
 Since a custom Alexa skill cannot push directives, the seek — like play — takes effect the next time the device contacts the skill: when the user opens it by voice, or automatically at the next track transition. The Web UI shows a per-device seek bar with the position estimated from the last reported offset.
+
+**Sync.** `POST /api/devices/{id}/sync` queues the named device's current track on the others at the position it has reached. An empty body means every other registered device, which is what the Web UI sends; an explicit list narrows it:
+
+```json
+{ "device_ids": ["amzn1.ask.device.…"] }
+```
+
+The reply names the devices reached and the offset they were given. The named device is never one of them, and a device that is no longer registered is skipped rather than failing the request, as it is for `/api/play`.
 
 ## License
 

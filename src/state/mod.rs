@@ -50,7 +50,7 @@ mod ytdlp;
 
 pub use model::{
     AudioTrack, DeviceState, DeviceUpdate, PendingCommand, PlayRequest, ReorderOutcome,
-    ReorderRequest, SeekRequest, WriteOutcome, auto_token, is_auto_token, new_token,
+    ReorderRequest, SeekRequest, SyncRequest, WriteOutcome, auto_token, is_auto_token, new_token,
     token_track_id,
 };
 pub(crate) use url::watch_url;

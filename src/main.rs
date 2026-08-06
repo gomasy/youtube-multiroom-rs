@@ -105,6 +105,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             delete(handlers::remove_queue_item),
         )
         .route("/api/devices/{device_id}/seek", post(handlers::seek_device))
+        .route(
+            "/api/devices/{device_id}/sync",
+            post(handlers::sync_devices),
+        )
         .route("/api/devices/{device_id}/stop", post(handlers::stop_device))
         .route("/alexa", post(handlers::alexa_webhook))
         .route(auth::WS_PATH, get(handlers::ws_upgrade))

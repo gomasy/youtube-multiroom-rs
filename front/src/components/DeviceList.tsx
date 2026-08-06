@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { authOk, playTracks, queueNext, removeQueueItem, clearQueue } from "../api";
+import { authOk, playTracks, queueNext, removeQueueItem, clearQueue, syncDevices } from "../api";
 import { showApiError } from "../errors";
 import { t } from "../i18n";
 import { ScrollingText } from "./ScrollingText";
@@ -91,6 +91,19 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
     }
   }
 
+  /**
+   * Bring every other device to where this one is. Applied as each Echo next
+   * contacts the skill, exactly as a seek is.
+   */
+  async function syncOthers(deviceId: string) {
+    try {
+      const data = await syncDevices(deviceId, onUnauthorized);
+      showToast(data.message || t("devices.syncQueued"));
+    } catch (e) {
+      showApiError(showToast, e);
+    }
+  }
+
   async function sendToSelected(
     call: (
       trackId: string,
@@ -172,6 +185,17 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
                     device={dev}
                     onSeek={(pos) => seekDevice(dev.device_id, pos)}
                   />
+                  {dev.current_track && entries.length > 1 && (
+                    <div className="device-actions" onClick={(e) => e.stopPropagation()}>
+                      <button
+                        className="text-btn"
+                        title={t("devices.syncOthersHint")}
+                        onClick={() => void syncOthers(dev.device_id)}
+                      >
+                        {t("devices.syncOthers")}
+                      </button>
+                    </div>
+                  )}
                   {dev.queue && dev.queue.length > 0 && (
                     <div className="device-queue" onClick={(e) => e.stopPropagation()}>
                       <div className="device-queue-header">

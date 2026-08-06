@@ -3,7 +3,10 @@
 //! applied the next time the device connects (see crate::alexa).
 
 use super::{AppError, AppResult, client_locale, device_or_404, track_or_404, written_or_err};
-use crate::state::{AppState, AudioTrack, DeviceUpdate, PlayRequest, SeekRequest, WriteOutcome};
+use crate::state::{
+    AppState, AudioTrack, DeviceState, DeviceUpdate, PlayRequest, SeekRequest, SyncRequest,
+    WriteOutcome,
+};
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::response::Json;
@@ -35,11 +38,18 @@ pub async fn play_on_all(
 ) -> AppResult<Json<Value>> {
     let track = track_or_404(&state, &req.track_id).await?;
     let locale = client_locale(&headers);
-    let device_ids = state
+    let device_ids = all_device_ids(&state).await?;
+    queue_on_devices(&state, track, device_ids, &locale).await
+}
+
+/// Every registered device. Failing to read them is ours to report, not a
+/// malformed request — the caller asked for "all of them" and we cannot say
+/// which those are.
+async fn all_device_ids(state: &AppState) -> AppResult<Vec<String>> {
+    state
         .device_ids()
         .await
-        .map_err(|e| AppError::internal(format!("Failed to list devices: {e}")))?;
-    queue_on_devices(&state, track, device_ids, &locale).await
+        .map_err(|e| AppError::internal(format!("Failed to list devices: {e}")))
 }
 
 /// Apply a per-device write to every target, returning the devices it reached.
@@ -181,12 +191,9 @@ pub async fn seek_device(
         return Err(AppError::bad_request("Cannot seek a live stream"));
     }
     // Nothing to clamp against; rejected rather than silently seeking to 0
-    if track.duration == 0 {
-        return Err(AppError::bad_request("Track duration is unknown"));
-    }
-
-    // A second short of the end, so playback does not terminate immediately
-    let max_ms = track.duration.saturating_mul(1000).saturating_sub(1000);
+    let max_ms = track
+        .max_offset_ms()
+        .ok_or_else(|| AppError::bad_request("Track duration is unknown"))?;
     let position_ms = req.position_ms.min(max_ms);
     written_or_err(
         state.queue_play(&device_id, track, position_ms).await,
@@ -199,6 +206,71 @@ pub async fn seek_device(
         "status": "queued",
         "position_ms": position_ms,
     })))
+}
+
+/// POST /api/devices/:id/sync
+///
+/// Line the other devices up with this one: queue its current track on each,
+/// starting from where it is now. Like a seek, each device applies it the next
+/// time it contacts the skill, so this is what brings a room that joined late
+/// into the same part of the same track rather than back to its beginning.
+pub async fn sync_devices(
+    State(state): State<Arc<AppState>>,
+    Path(device_id): Path<String>,
+    headers: HeaderMap,
+    Json(req): Json<SyncRequest>,
+) -> AppResult<Json<Value>> {
+    let leader = device_or_404(&state, &device_id).await?;
+    let track = leader
+        .current_track
+        .clone()
+        .ok_or_else(|| AppError::bad_request("Device has no track to sync"))?;
+    let position_ms = sync_offset(&leader, &track);
+
+    let followers = match req.device_ids {
+        Some(ids) => ids,
+        None => all_device_ids(&state).await?,
+    };
+    // The leader is already where it is; queueing its own track back to it
+    // would restart what everything else is being lined up with.
+    let followers: Vec<String> = followers
+        .into_iter()
+        .filter(|id| *id != device_id)
+        .collect();
+    if followers.is_empty() {
+        return Err(AppError::bad_request("No other devices to sync"));
+    }
+
+    let (state, track) = (&state, &track);
+    let synced = reach_devices(followers, "Failed to queue playback", |did| async move {
+        state.queue_play(&did, track.clone(), position_ms).await
+    })
+    .await?;
+    state.broadcast_devices().await;
+
+    Ok(Json(json!({
+        "status": "queued",
+        "devices": synced,
+        "position_ms": position_ms,
+        "message": t!("api_sync_queued", locale = &client_locale(&headers)),
+    })))
+}
+
+/// Where a follower should pick the leader's track up.
+///
+/// A live stream has no position to match — the relay hands out whatever is at
+/// the live edge either way — and a finite track is clamped short of its end,
+/// as a seek is, so a follower does not start by immediately finishing.
+fn sync_offset(leader: &DeviceState, track: &AudioTrack) -> u64 {
+    if track.is_live {
+        return 0;
+    }
+    let position = leader.estimated_position_ms(crate::state::now_f64());
+    // A track of unknown length has nothing to clamp against, and the position
+    // is still the best answer — unlike a seek, it was measured, not asked for.
+    track
+        .max_offset_ms()
+        .map_or(position, |max_ms| position.min(max_ms))
 }
 
 /// POST /api/devices/:id/stop

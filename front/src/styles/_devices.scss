@@ -110,3 +110,10 @@
   @include flexible;
   @include truncate;
 }
+
+// Lining the other rooms up with this one.
+.device-actions {
+  @include row(8px);
+  margin-top: 6px;
+  cursor: default;
+}
