@@ -16,8 +16,14 @@ youtube-multiroom-rs/
 │   ├── main.rs             # Entry point & router
 │   ├── auth.rs             # Bearer auth middleware & signed stream URLs
 │   ├── locale.rs           # Request locale resolution (X-App-Lang / Alexa locale)
-│   ├── alexa.rs            # Alexa skill logic
-│   ├── alexa_verify.rs     # Alexa request signature verification
+│   ├── alexa/              # The Alexa skill, split by subject
+│   │   ├── mod.rs              # Per-request context; the dispatch into the rest
+│   │   ├── verify.rs           # Alexa request signature verification
+│   │   ├── session.rs          # Opening the skill: starting or resuming playback
+│   │   ├── intent.rs           # Spoken intents & the touch/remote controls
+│   │   ├── event.rs            # AudioPlayer events: started, finished, failed
+│   │   ├── next_up.rs          # Choosing what plays next & its token
+│   │   └── response.rs         # Response envelope, speech, AudioPlayer directives
 │   ├── state/              # Shared state (AppState), split by subject
 │   │   ├── mod.rs              # AppState itself; re-exports the module API
 │   │   ├── model.rs            # Wire/storage types and AudioPlayer tokens

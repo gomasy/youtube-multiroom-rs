@@ -1,5 +1,4 @@
 mod alexa;
-mod alexa_verify;
 mod auth;
 mod handlers;
 mod locale;

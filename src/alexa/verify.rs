@@ -1,7 +1,8 @@
 //! Alexa request signature verification.
 //!
-//! /alexa is exempt from Bearer auth; instead, Amazon's signature verification
-//! confirms that requests genuinely originate from Alexa.
+//! /alexa is exempt from the Bearer auth in [`crate::auth`]; instead, Amazon's
+//! signature verification confirms that requests genuinely originate from
+//! Alexa. Nothing in the rest of [`super`] runs until this has passed.
 //! Steps: validate certificate URL → verify certificate chain (SAN, expiry,
 //! trust chain) → verify request body signature → check timestamp freshness.
 //! <https://developer.amazon.com/docs/custom-skills/host-a-custom-skill-as-a-web-service.html>

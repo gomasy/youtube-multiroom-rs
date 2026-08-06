@@ -1,8 +1,8 @@
-//! The Alexa skill webhook. Verification lives in [`crate::alexa_verify`] and
-//! the skill logic in [`crate::alexa`]; this is only the HTTP edge.
+//! The Alexa skill webhook. Both the verification and the skill logic live in
+//! [`crate::alexa`]; this is only the HTTP edge that runs them in order.
 
 use super::{AppError, AppResult};
-use crate::alexa::handle_alexa;
+use crate::alexa::{handle_alexa, verify_request, verify_timestamp};
 use crate::state::AppState;
 use axum::body::Bytes;
 use axum::extract::State;
@@ -21,7 +21,7 @@ pub async fn alexa_webhook(
     headers: HeaderMap,
     body: Bytes,
 ) -> AppResult<Json<Value>> {
-    if let Err(e) = crate::alexa_verify::verify_request(&headers, &body).await {
+    if let Err(e) = verify_request(&headers, &body).await {
         tracing::warn!("Rejected Alexa request: {e}");
         return Err(AppError::bad_request("Request verification failed"));
     }
@@ -29,7 +29,7 @@ pub async fn alexa_webhook(
     let body: Value =
         serde_json::from_slice(&body).map_err(|_| AppError::bad_request("Invalid JSON body"))?;
 
-    if let Err(e) = crate::alexa_verify::verify_timestamp(&body) {
+    if let Err(e) = verify_timestamp(&body) {
         tracing::warn!("Rejected Alexa request: {e}");
         return Err(AppError::bad_request("Request verification failed"));
     }
