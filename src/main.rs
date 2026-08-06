@@ -113,6 +113,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/cache", get(handlers::cache_status))
         .route("/api/cache/cleanup", post(handlers::cleanup_cache))
         .route("/api/cache/repair", post(handlers::repair_cache))
+        .route("/api/library/export", get(handlers::export_library))
+        .route("/api/library/import", post(handlers::import_library))
         .route("/alexa", post(handlers::alexa_webhook))
         .route(auth::WS_PATH, get(handlers::ws_upgrade))
         // route_layer only wraps the routes registered above it, which is what

@@ -27,6 +27,7 @@ youtube-multiroom-rs/
 │   │   ├── playback.rs         # Playback mode & sleep timer
 │   │   ├── playlist.rs         # Named playlists & YouTube playlist import
 │   │   ├── cache.rs            # Reconciling the cache directory with the library
+│   │   ├── library.rs          # Exporting the library structure & importing it back
 │   │   ├── download.rs         # Audio downloading & metadata refresh
 │   │   ├── remux.rs            # Rebuilding a downloaded file's container
 │   │   ├── progress.rs         # Progress reporting & cancellation generation
@@ -41,6 +42,7 @@ youtube-multiroom-rs/
 │       ├── playlists.rs        # Playlist CRUD & membership
 │       ├── devices.rs          # Device state, playback commands, device sync
 │       ├── cache.rs            # Cache status, orphan cleanup, missing-file repair
+│       ├── library.rs          # Library export & import
 │       ├── alexa.rs            # Alexa webhook endpoint
 │       └── ws.rs               # WebSocket push channel
 └── front/
@@ -203,7 +205,7 @@ The Web UI ships a web app manifest and icons, so it can be installed to the hom
 12. 「選択」 enters select mode: check tracks or 「全選択」 a page, then bulk-delete, bulk-add to a playlist, or 「メタデータ更新」. In a playlist view, removal only affects that playlist
 13. Set a sleep timer (15 / 30 min, 1 / 3 / 6 h) below the playback mode selector
 14. 「他を同期」 on a device card brings every other device to that device's track and position
-15. 「メンテナンス」 at the bottom of the left column reports the cache size, removes files no track claims, and re-downloads tracks whose audio is missing
+15. 「メンテナンス」 at the bottom of the left column reports the cache size, removes files no track claims, re-downloads tracks whose audio is missing, and exports or imports the library structure
 
 ## Architecture
 
@@ -251,6 +253,8 @@ What describes the local copy rather than the video is preserved: the cached fil
 ### Track Ordering
 
 Tracks are listed and auto-played in a user-defined order persisted in `youtube:tracks_order`. Rows can be rearranged by dragging the grip handle (mouse and touch, via Pointer Events). Reordering works across pages: hovering a pagination button mid-drag auto-flips pages (one per 650 ms). Newly extracted tracks go to the top; tracks absent from the order list are appended newest-first.
+
+The list may also name ids no track answers to — what an import leaves for videos that have not arrived yet. Listing skips them, so they are invisible until the video is downloaded, at which point it takes the place they were holding.
 
 ### Live Streams
 
@@ -304,6 +308,18 @@ The cache directory and the library drift apart in both directions, and neither 
 A recovery is an ordinary download, which prepends — right for a track being added, wrong for one being repaired. So the order list is snapshotted first and each finished track is put back just after the last id that preceded it there and is still present, which leaves the rest of the order exactly as concurrent edits left it.
 
 The track list itself only stats the page being served, so a library of any size costs the same handful of syscalls; the full scan runs on a blocking thread and only while the maintenance panel is open.
+
+### Library Backup
+
+Redis holds what no audio file records: which videos the library knows, the order they play in, and the playlists they belong to. The audio can always be fetched again — the cache scan rebuilds track metadata from the files alone — but the order and the playlists exist in exactly one place. `GET /api/library/export` is the copy that outlives it, a single JSON document carrying the track list in library order, every playlist with its membership, the playback mode and the selection scope. No file path appears in it: `AudioTrack` skips that field, so a document from one machine says nothing about another's disk.
+
+`POST /api/library/import` applies one back, additively:
+
+- Playlists are matched by **name** and appended to rather than replaced — the rule a YouTube playlist import already follows — so re-importing into a server that already has them does not duplicate anything. The exported selection scope is re-resolved through that matching, since its ID belonged to the exporting server.
+- The restored order leads, and whatever this server has that the document never mentioned follows in the order it already had. Ids naming videos that are not here are kept as placeholders: the listing skips them, and downloading one later drops it straight into the gap it was holding.
+- With 「手元にない曲の音源もダウンロードする」 (`"download": true`), the videos with no track here are then fetched in the background through the same recovery job a cache repair uses — so they land in their exported positions, not at the top. Left off, the import is instant and restores structure only.
+
+A document whose `version` this server does not read is refused rather than applied in part.
 
 ### Voice Skip & Playback Controls
 
@@ -373,6 +389,8 @@ Broadcast frames:
 | GET | `/api/cache` | Yes | Cache size, orphaned files, tracks with missing audio |
 | POST | `/api/cache/cleanup` | Yes | Delete cached files no track claims |
 | POST | `/api/cache/repair` | Yes | Re-download the tracks whose audio is missing |
+| GET | `/api/library/export` | Yes | Export the library structure as one JSON document |
+| POST | `/api/library/import` | Yes | Apply an exported document (`download` to also fetch audio) |
 | POST | `/alexa` | Amazon signature | Alexa skill webhook |
 | WS | `/ws` | Yes | Real-time sync & audio extraction |
 
@@ -407,6 +425,14 @@ Since a custom Alexa skill cannot push directives, the seek — like play — ta
 ```
 
 The reply names the devices reached and the offset they were given. The named device is never one of them, and a device that is no longer registered is skipped rather than failing the request, as it is for `/api/play`.
+
+**Import.** `POST /api/library/import` takes an exported document with one field added:
+
+```json
+{ "version": 1, "tracks": [ ... ], "playlists": [ ... ], "download": true }
+```
+
+The reply reports how many playlists were created or appended to, how many ids the restored order names, how many of them this server has no track for, and how many of those a download was started for.
 
 ## License
 

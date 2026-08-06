@@ -368,6 +368,29 @@ export async function repairCache(
   );
 }
 
+/**
+ * The export document exactly as the server serialized it. Left as text rather
+ * than parsed: it is on its way to a file, and a round trip through JS could
+ * only lose something.
+ */
+export async function exportLibrary(onUnauthorized?: () => void): Promise<string> {
+  return (
+    await authOk("/api/library/export", "api.exportFailed", {}, onUnauthorized)
+  ).text();
+}
+
+export async function importLibrary(
+  doc: unknown,
+  onUnauthorized?: () => void,
+): Promise<{ message?: string }> {
+  return authJson(
+    "/api/library/import",
+    "api.importFailed",
+    { method: "POST", body: JSON.stringify(doc) },
+    onUnauthorized,
+  );
+}
+
 export async function checkAuth(
   token?: string,
 ): Promise<{ authorized: boolean; data: TracksPage | null }> {

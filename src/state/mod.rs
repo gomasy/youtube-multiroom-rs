@@ -13,6 +13,7 @@
 //! - [`playback`] — playback mode and the sleep timer
 //! - [`playlist`] — named playlists and YouTube playlist import
 //! - [`cache`] — reconciling the cache directory with the library
+//! - [`library`] — exporting the library structure and importing it back
 //! - [`download`] — downloading audio and refreshing track metadata
 //! - [`progress`] — what clients are told about that work while it runs
 //! - [`remux`] — rebuilding a downloaded file's container before it is served
@@ -40,6 +41,7 @@ mod cache;
 mod device;
 mod download;
 mod job;
+mod library;
 mod matching;
 mod model;
 mod playback;
@@ -50,8 +52,9 @@ mod track;
 mod url;
 mod ytdlp;
 
+pub use library::LIBRARY_EXPORT_VERSION;
 pub use model::{
-    AudioTrack, CacheReport, DeviceState, DeviceUpdate, PendingCommand, PlayRequest,
+    AudioTrack, CacheReport, DeviceState, DeviceUpdate, LibraryExport, PendingCommand, PlayRequest,
     ReorderOutcome, ReorderRequest, SeekRequest, SyncRequest, WriteOutcome, auto_token,
     is_auto_token, new_token, token_track_id,
 };

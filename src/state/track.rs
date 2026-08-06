@@ -280,6 +280,22 @@ impl AppState {
             .await;
     }
 
+    /// Replace the library order with `edit`'s verdict on what it currently
+    /// holds. The read and the write are one step under `order_lock`, and a
+    /// read that fails aborts rather than writing back a list that every id
+    /// Redis failed to report is missing from.
+    pub(crate) async fn rewrite_track_order(
+        &self,
+        edit: impl FnOnce(Vec<String>) -> Vec<String>,
+    ) -> Option<usize> {
+        let _guard = self.order_lock.lock().await;
+        let current = self.try_track_order().await.ok()?;
+        let ids = edit(current);
+        self.write_order_list(REDIS_KEY_TRACKS_ORDER, &ids)
+            .await
+            .then_some(ids.len())
+    }
+
     /// The raw order list, including ids no registered track answers to. Those
     /// are what an import leaves as placeholders for videos still to arrive, so
     /// a recovery job has to read the list as stored rather than as listed.

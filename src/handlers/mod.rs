@@ -9,6 +9,7 @@
 //! - [`playlists`] — named playlists and their membership
 //! - [`devices`] — device state, playback commands, Up Next queues
 //! - [`cache`] — the state of the audio cache, and repairing it
+//! - [`library`] — exporting and importing the library structure
 //! - [`alexa`] — the Alexa skill webhook
 //! - [`ws`] — the WebSocket push channel
 //!
@@ -21,6 +22,7 @@ mod alexa;
 mod audio;
 mod cache;
 mod devices;
+mod library;
 mod playlists;
 mod search;
 mod tracks;
@@ -33,6 +35,7 @@ pub use devices::{
     clear_queue, delete_device, get_devices, play_on_all, play_on_devices, queue_next,
     remove_queue_item, seek_device, stop_device, sync_devices,
 };
+pub use library::{export_library, import_library};
 pub use playlists::{
     add_playlist_track, bulk_add_playlist_tracks, bulk_remove_playlist_tracks, create_playlist,
     delete_playlist, list_playlists, remove_playlist_track, rename_playlist,

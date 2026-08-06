@@ -186,6 +186,44 @@ pub struct OrphanFile {
     pub bytes: u64,
 }
 
+/// The library structure Redis holds and no audio file records: which tracks
+/// exist, the order they play in, and the playlists they belong to. Exported
+/// and imported as one document (see [`super::library`]).
+#[derive(Serialize, Deserialize)]
+pub struct LibraryExport {
+    /// Document format version, checked on import.
+    pub version: u32,
+    pub exported_at: f64,
+    pub playback_mode: String,
+    /// The selection scope at export time, as a playlist ID of the *exporting*
+    /// server. An import re-resolves it through the playlists it matched.
+    pub active_playlist: Option<String>,
+    /// Every track, in library order. `AudioTrack` skips `file_path` itself, so
+    /// nothing here names a path on the machine it came from.
+    pub tracks: Vec<AudioTrack>,
+    pub playlists: Vec<PlaylistExport>,
+}
+
+/// One playlist and its membership, as an export carries it.
+#[derive(Serialize, Deserialize)]
+pub struct PlaylistExport {
+    #[serde(flatten)]
+    pub playlist: Playlist,
+    pub track_ids: Vec<String>,
+}
+
+/// What an import changed, for the reply that reports it.
+pub struct ImportOutcome {
+    /// Playlists created or appended to.
+    pub playlists: usize,
+    /// Tracks the restored library order names.
+    pub tracks: usize,
+    /// Videos the document lists that this server holds no track for. Their
+    /// place in the order is restored regardless, so downloading one later
+    /// drops it straight back where it belongs.
+    pub missing_ids: Vec<String>,
+}
+
 /// Result of reorder_track. Lets callers distinguish "not in list" (not enrolled
 /// or concurrently deleted) from Redis errors.
 pub enum ReorderOutcome {
