@@ -2,7 +2,7 @@ type Catalog = Record<string, string>;
 
 const DEFAULT_LANG = "en";
 
-let catalogs: Record<string, Catalog> = {};
+const catalogs: Record<string, Catalog> = {};
 export let lang: string = DEFAULT_LANG;
 
 function detectLang(): string {
