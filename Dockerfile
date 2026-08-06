@@ -1,7 +1,7 @@
 # Declared before the first FROM so it is a global ARG usable in the deno stage's
 # FROM below (a stage-local ARG would not be visible to a later FROM).
 # renovate: datasource=docker depName=denoland/deno extractVersion=^alpine-(?<version>.+)$
-ARG DENO_VERSION=2.9.4
+ARG DENO_VERSION=2.9.5
 
 FROM node:24.19.0-alpine AS frontend
 WORKDIR /app/front
