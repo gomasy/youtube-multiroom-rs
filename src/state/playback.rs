@@ -1,8 +1,8 @@
 //! Playback mode (what happens when a track ends) and the sleep timer.
 
 use super::model::DeviceUpdate;
-use super::warn_redis;
 use super::{AppState, REDIS_KEY_PLAYBACK_MODE, REDIS_KEY_SLEEP_TIMER, now_f64};
+use super::{redis_or, warn_redis};
 use redis::AsyncCommands;
 use serde_json::json;
 use std::sync::Arc;
@@ -69,13 +69,11 @@ impl AppState {
     /// Return the sleep timer expiry as UNIX seconds, or None if not set / expired.
     pub async fn sleep_timer(&self) -> Option<f64> {
         let mut conn = self.redis.clone();
-        let expiry: Option<f64> = match conn.get(REDIS_KEY_SLEEP_TIMER).await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!("Redis error reading sleep timer: {e}");
-                return None;
-            }
-        };
+        let expiry: Option<f64> = redis_or!(
+            "reading sleep timer",
+            conn.get(REDIS_KEY_SLEEP_TIMER).await,
+            None
+        );
         expiry.filter(|&t| t > now_f64())
     }
 
@@ -137,10 +135,11 @@ impl AppState {
             );
             state.set_playback_mode("off").await;
             state.broadcast_playback_mode("off");
-            let device_ids = state.device_ids().await.unwrap_or_else(|e| {
-                tracing::warn!("Redis error listing devices for sleep timer: {e}");
+            let device_ids = redis_or!(
+                "listing devices for the sleep timer",
+                state.device_ids().await,
                 Vec::new()
-            });
+            );
             for did in &device_ids {
                 state
                     .update_device(did, DeviceUpdate::new().status("stopped"))

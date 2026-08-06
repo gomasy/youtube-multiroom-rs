@@ -10,7 +10,7 @@ use super::{
     AUDIO_EXT, AppState, PendingCommand, REDIS_KEY_TRACKS, REDIS_KEY_TRACKS_ORDER,
     REDIS_PENDING_PREFIX, now_f64, playlist_key, queue_key, since_epoch, token_track_id,
 };
-use super::warn_redis;
+use super::{redis_or, warn_redis};
 use redis::AsyncCommands;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -202,11 +202,15 @@ impl AppState {
     async fn detach_from_devices(&self, ids: &HashSet<&str>) {
         let mut conn = self.redis.clone();
         for mut dev in self.all_devices().await.into_values() {
-            let key = queue_key(&dev.device_id);
-            let entries: Vec<String> = conn.lrange(&key, 0, -1).await.unwrap_or_else(|e| {
-                tracing::warn!("Redis error reading queue for {}: {e}", dev.device_id);
+            // Bound before the queue work so both log lines can name the device
+            // the way the rest of this module's do.
+            let device_id = &dev.device_id;
+            let key = queue_key(device_id);
+            let entries: Vec<String> = redis_or!(
+                "reading the queue for {device_id}",
+                conn.lrange(&key, 0, -1).await,
                 Vec::new()
-            });
+            );
 
             // Entries are unique, so each is removed by value in one pipeline
             // rather than a round-trip apiece.
@@ -219,10 +223,7 @@ impl AppState {
             if stale > 0
                 && let Err(e) = pipe.query_async::<()>(&mut conn).await
             {
-                tracing::warn!(
-                    "Redis error removing queue entries for {}: {e}",
-                    dev.device_id
-                );
+                tracing::warn!("Redis error removing queue entries for {device_id}: {e}");
             }
 
             if dev
@@ -241,24 +242,22 @@ impl AppState {
     /// (pre-reorder data or freshly restored) are appended newest-first.
     pub async fn list_tracks(&self) -> Vec<AudioTrack> {
         let mut conn = self.redis.clone();
-        let all: HashMap<String, String> =
-            conn.hgetall(REDIS_KEY_TRACKS).await.unwrap_or_else(|e| {
-                tracing::warn!("Redis error reading tracks: {e}");
-                HashMap::new()
-            });
+        let all: HashMap<String, String> = redis_or!(
+            "reading tracks",
+            conn.hgetall(REDIS_KEY_TRACKS).await,
+            HashMap::new()
+        );
         let mut by_id: HashMap<String, AudioTrack> = all
             .values()
             .filter_map(|s| AudioTrack::from_redis_json(s))
             .map(|t| (t.id.clone(), t))
             .collect();
 
-        let order: Vec<String> = conn
-            .lrange(REDIS_KEY_TRACKS_ORDER, 0, -1)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!("Redis error reading track order: {e}");
-                Vec::new()
-            });
+        let order: Vec<String> = redis_or!(
+            "reading track order",
+            conn.lrange(REDIS_KEY_TRACKS_ORDER, 0, -1).await,
+            Vec::new()
+        );
         let mut tracks: Vec<AudioTrack> = order.iter().filter_map(|id| by_id.remove(id)).collect();
 
         let mut rest: Vec<AudioTrack> = by_id.into_values().collect();

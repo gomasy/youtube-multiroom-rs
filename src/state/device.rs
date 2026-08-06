@@ -4,10 +4,10 @@
 use super::model::{
     AudioTrack, DeviceJson, DeviceState, DeviceUpdate, PendingCommand, QueueItem, WriteOutcome,
 };
-use super::warn_redis;
 use super::{
     AppState, REDIS_KEY_DEVICES, new_token, now_f64, pending_key, queue_key, token_track_id,
 };
+use super::{redis_or, warn_redis};
 use redis::AsyncCommands;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -68,26 +68,22 @@ impl AppState {
 
     pub async fn get_device(&self, device_id: &str) -> Option<DeviceState> {
         let mut conn = self.redis.clone();
-        match conn
-            .hget::<_, _, Option<String>>(REDIS_KEY_DEVICES, device_id)
-            .await
-        {
-            Ok(Some(s)) => serde_json::from_str(&s).ok(),
-            Ok(None) => None,
-            Err(e) => {
-                tracing::warn!("Redis error reading device {device_id}: {e}");
-                None
-            }
-        }
+        redis_or!(
+            "reading device {device_id}",
+            conn.hget::<_, _, Option<String>>(REDIS_KEY_DEVICES, device_id)
+                .await,
+            None
+        )
+        .and_then(|s| serde_json::from_str(&s).ok())
     }
 
     pub(crate) async fn all_devices(&self) -> HashMap<String, DeviceState> {
         let mut conn = self.redis.clone();
-        let all: HashMap<String, String> =
-            conn.hgetall(REDIS_KEY_DEVICES).await.unwrap_or_else(|e| {
-                tracing::warn!("Redis error listing devices: {e}");
-                HashMap::new()
-            });
+        let all: HashMap<String, String> = redis_or!(
+            "listing devices",
+            conn.hgetall(REDIS_KEY_DEVICES).await,
+            HashMap::new()
+        );
         all.into_iter()
             .filter_map(|(k, s)| serde_json::from_str(&s).ok().map(|d| (k, d)))
             .collect()
@@ -132,12 +128,11 @@ impl AppState {
     /// Whether a device is registered, without paying to deserialize it.
     pub async fn device_exists(&self, device_id: &str) -> bool {
         let mut conn = self.redis.clone();
-        conn.hexists(REDIS_KEY_DEVICES, device_id)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!("Redis error checking device {device_id}: {e}");
-                false
-            })
+        redis_or!(
+            "checking device {device_id}",
+            conn.hexists(REDIS_KEY_DEVICES, device_id).await,
+            false
+        )
     }
 
     /// Record the reported stop position, moving "playing" to "paused". A
@@ -237,10 +232,11 @@ impl AppState {
             pipe.lrange(queue_key(id), 0, -1);
         }
         let mut conn = self.redis.clone();
-        let queues: Vec<Vec<String>> = pipe.query_async(&mut conn).await.unwrap_or_else(|e| {
-            tracing::warn!("Redis error reading device queues: {e}");
+        let queues: Vec<Vec<String>> = redis_or!(
+            "reading device queues",
+            pipe.query_async(&mut conn).await,
             vec![Vec::new(); ids.len()]
-        });
+        );
         ids.into_iter().cloned().zip(queues).collect()
     }
 

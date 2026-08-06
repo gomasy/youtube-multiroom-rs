@@ -15,7 +15,7 @@
 
 use super::model::{ImportOutcome, LibraryExport, PlaylistExport, WriteOutcome};
 use super::url::is_video_id;
-use super::{AppState, now_f64, playlist_key};
+use super::{AppState, now_f64, playlist_key, redis_or};
 use std::collections::{HashMap, HashSet};
 
 /// Document format version. Bumped only for a change an older server could not
@@ -39,10 +39,11 @@ impl AppState {
             pipe.lrange(playlist_key(&playlist.id), 0, -1);
         }
         let mut conn = self.redis.clone();
-        let memberships: Vec<Vec<String>> = pipe.query_async(&mut conn).await.unwrap_or_else(|e| {
-            tracing::warn!("Redis error reading playlist tracks: {e}");
+        let memberships: Vec<Vec<String>> = redis_or!(
+            "reading playlist tracks",
+            pipe.query_async(&mut conn).await,
             vec![Vec::new(); playlists.len()]
-        });
+        );
         let exported = playlists
             .into_iter()
             .zip(memberships)

@@ -10,7 +10,7 @@ use super::ytdlp::{DownloadError, run_yt_dlp_cancellable};
 use super::{
     AppState, REDIS_KEY_ACTIVE_PLAYLIST, REDIS_KEY_PLAYLISTS, now_f64, playlist_key, since_epoch,
 };
-use super::warn_redis;
+use super::{redis_or, warn_redis};
 use redis::AsyncCommands;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -102,16 +102,13 @@ impl AppState {
 
     pub async fn get_playlist(&self, playlist_id: &str) -> Option<Playlist> {
         let mut conn = self.redis.clone();
-        match conn
-            .hget::<_, _, Option<String>>(REDIS_KEY_PLAYLISTS, playlist_id)
-            .await
-        {
-            Ok(s) => s.and_then(|s| serde_json::from_str(&s).ok()),
-            Err(e) => {
-                tracing::warn!("Redis error reading playlist {playlist_id}: {e}");
-                None
-            }
-        }
+        redis_or!(
+            "reading playlist {playlist_id}",
+            conn.hget::<_, _, Option<String>>(REDIS_KEY_PLAYLISTS, playlist_id)
+                .await,
+            None
+        )
+        .and_then(|s| serde_json::from_str(&s).ok())
     }
 
     /// Whether a playlist is registered, without paying to deserialize it.
@@ -119,22 +116,21 @@ impl AppState {
     /// than acting on a playlist they could not confirm.
     pub async fn playlist_exists(&self, playlist_id: &str) -> bool {
         let mut conn = self.redis.clone();
-        conn.hexists(REDIS_KEY_PLAYLISTS, playlist_id)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!("Redis error checking playlist {playlist_id}: {e}");
-                false
-            })
+        redis_or!(
+            "checking playlist {playlist_id}",
+            conn.hexists(REDIS_KEY_PLAYLISTS, playlist_id).await,
+            false
+        )
     }
 
     /// Return all playlists sorted by creation time.
     pub async fn playlists(&self) -> Vec<Playlist> {
         let mut conn = self.redis.clone();
-        let all: HashMap<String, String> =
-            conn.hgetall(REDIS_KEY_PLAYLISTS).await.unwrap_or_else(|e| {
-                tracing::warn!("Redis error listing playlists: {e}");
-                HashMap::new()
-            });
+        let all: HashMap<String, String> = redis_or!(
+            "listing playlists",
+            conn.hgetall(REDIS_KEY_PLAYLISTS).await,
+            HashMap::new()
+        );
         let mut playlists: Vec<Playlist> = all
             .values()
             .filter_map(|s| serde_json::from_str(s).ok())
@@ -301,12 +297,11 @@ impl AppState {
 
     pub(crate) async fn playlist_track_ids(&self, playlist_id: &str) -> Vec<String> {
         let mut conn = self.redis.clone();
-        conn.lrange(playlist_key(playlist_id), 0, -1)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!("Redis error reading playlist {playlist_id}: {e}");
-                Vec::new()
-            })
+        redis_or!(
+            "reading playlist {playlist_id}",
+            conn.lrange(playlist_key(playlist_id), 0, -1).await,
+            Vec::new()
+        )
     }
 
     /// Return playlist tracks in playlist order (deleted tracks are skipped).
@@ -329,13 +324,11 @@ impl AppState {
             pipe.llen(playlist_key(&playlist.id));
         }
         let mut conn = self.redis.clone();
-        let counts: Vec<usize> = match pipe.query_async(&mut conn).await {
-            Ok(counts) => counts,
-            Err(e) => {
-                tracing::warn!("Redis error reading playlist counts: {e}");
-                vec![0; playlists.len()]
-            }
-        };
+        let counts: Vec<usize> = redis_or!(
+            "reading playlist counts",
+            pipe.query_async(&mut conn).await,
+            vec![0; playlists.len()]
+        );
 
         let list: Vec<PlaylistJson> = playlists
             .into_iter()
@@ -348,16 +341,12 @@ impl AppState {
     /// Return the saved active playlist ID (no existence check).
     async fn raw_active_playlist(&self) -> Option<String> {
         let mut conn = self.redis.clone();
-        match conn
-            .get::<_, Option<String>>(REDIS_KEY_ACTIVE_PLAYLIST)
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!("Redis error reading active playlist: {e}");
-                None
-            }
-        }
+        redis_or!(
+            "reading active playlist",
+            conn.get::<_, Option<String>>(REDIS_KEY_ACTIVE_PLAYLIST)
+                .await,
+            None
+        )
     }
 
     /// Active playlist ID for loop/shuffle scope. Returns None (= full library)

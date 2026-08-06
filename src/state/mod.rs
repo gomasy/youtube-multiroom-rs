@@ -96,6 +96,32 @@ macro_rules! warn_redis {
 }
 pub(crate) use warn_redis;
 
+/// The read counterpart to [`warn_redis`]: the value Redis returned, or
+/// `$fallback` with the error logged.
+///
+/// Only for reads whose caller has an answer that is merely *worse* rather than
+/// wrong — an empty listing, a "no" to an existence check. Where an error must
+/// not read as "not found" (`try_get_track`, `try_playback_mode`) the
+/// `RedisResult` is returned instead and the caller decides.
+///
+/// A macro for the same reason `warn_redis` is one, and it takes the same
+/// `$what` phrase so both halves of a broken Redis report themselves the same
+/// way.
+macro_rules! redis_or {
+    ($what:literal, $result:expr, $fallback:expr) => {
+        // The await in `$result` completes in the scrutinee, so no
+        // `fmt::Arguments` is ever held across it.
+        match $result {
+            Ok(value) => value,
+            Err(e) => {
+                tracing::warn!("Redis error {}: {e}", format_args!($what));
+                $fallback
+            }
+        }
+    };
+}
+pub(crate) use redis_or;
+
 pub(crate) fn pending_key(device_id: &str) -> String {
     format!("{REDIS_PENDING_PREFIX}:{device_id}")
 }
