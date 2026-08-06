@@ -5,6 +5,23 @@ export interface Track {
   duration?: number;
   channel?: string;
   is_live?: boolean;
+  /**
+   * The track is registered but its cached audio is gone, so an Echo asked to
+   * play it would fail. Only the library listing reports this; it is absent
+   * rather than false for the tracks that are fine.
+   */
+  file_missing?: boolean;
+}
+
+/** What the audio cache holds, measured against what the library expects of it */
+export interface CacheStatus {
+  /** Bytes held by every cached file, orphans included */
+  total_bytes: number;
+  file_count: number;
+  /** Cached files no registered track claims, largest first */
+  orphans: { id: string; bytes: number }[];
+  /** Registered tracks whose cached file is gone */
+  missing: Track[];
 }
 
 export interface Device {

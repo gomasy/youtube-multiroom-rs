@@ -13,6 +13,7 @@ import { History } from "./components/History";
 import { AuthModal } from "./components/AuthModal";
 import { ToastContainer, useToast } from "./components/Toast";
 import { SleepTimer } from "./components/SleepTimer";
+import { LibraryTools } from "./components/LibraryTools";
 import type { Device, DownloadProgress, PlaybackMode, Playlist, Track, TracksPage } from "./types";
 
 export function App() {
@@ -212,6 +213,7 @@ export function App() {
               onSet={(minutes) => send({ type: "set_sleep_timer", minutes })}
               onCancel={() => send({ type: "set_sleep_timer", minutes: null })}
             />
+            <LibraryTools onUnauthorized={onUnauthorized} showToast={showToast} />
           </div>
           <div className="main-right">
             <History

@@ -1,5 +1,5 @@
 import { t, lang } from "./i18n";
-import type { Playlist, Track, TracksPage } from "./types";
+import type { CacheStatus, Playlist, Track, TracksPage } from "./types";
 
 export const PER_PAGE = 10;
 
@@ -332,6 +332,38 @@ export async function syncDevices(
     `${devicePath(deviceId)}/sync`,
     "api.syncFailed",
     { method: "POST", body: "{}" },
+    onUnauthorized,
+  );
+}
+
+export async function fetchCacheStatus(
+  onUnauthorized?: () => void,
+): Promise<CacheStatus> {
+  return authJson("/api/cache", "api.cacheStatusFailed", {}, onUnauthorized);
+}
+
+export async function cleanupCache(
+  onUnauthorized?: () => void,
+): Promise<{ message?: string }> {
+  return authJson(
+    "/api/cache/cleanup",
+    "api.cacheCleanupFailed",
+    { method: "POST" },
+    onUnauthorized,
+  );
+}
+
+/**
+ * Start re-downloading the tracks whose cached audio is gone. The files
+ * themselves land later, as tracks_update frames.
+ */
+export async function repairCache(
+  onUnauthorized?: () => void,
+): Promise<{ message?: string }> {
+  return authJson(
+    "/api/cache/repair",
+    "api.cacheRepairFailed",
+    { method: "POST" },
     onUnauthorized,
   );
 }

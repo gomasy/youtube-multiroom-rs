@@ -340,6 +340,47 @@ impl AppState {
         });
     }
 
+    /// Download videos the library has a place for but no file for, one at a
+    /// time in the background, returning each to that place when it lands.
+    ///
+    /// Both callers hand over exactly that kind of list: a cache repair, whose
+    /// tracks lost their files, and a library import, whose tracks were never
+    /// here. A plain download prepends — right for something being added, wrong
+    /// for something being recovered — so the order is snapshotted first and
+    /// each finished track is put back (see `restore_order_position`).
+    ///
+    /// Progress goes over the same downloads_update channel a download uses,
+    /// which is also what makes Stop all end a recovery.
+    pub fn start_track_recovery(
+        self: &Arc<Self>,
+        video_ids: Vec<String>,
+        cancel: CancellationToken,
+    ) {
+        let state = self.clone();
+        tokio::spawn(async move {
+            // Read as stored rather than as listed: an import leaves ids for
+            // videos that have not arrived yet, and those are the ones being
+            // recovered here.
+            let snapshot = state.track_order().await;
+            let job = VideoJob::new(
+                "Track recovery".to_string(),
+                "recovered",
+                "deleted while downloading",
+            );
+            let (state, cancel, snapshot) = (&state, &cancel, &snapshot);
+            job.run(&video_ids, cancel, |video_id| async move {
+                let track = state.extract_audio(&watch_url(&video_id), cancel).await?;
+                state.restore_order_position(&video_id, snapshot).await;
+                // Reflect each recovery as it lands, so a long job is visibly
+                // making progress in the track list.
+                state.broadcast_tracks();
+                tracing::info!("Recovered: {} ({video_id})", track.title);
+                Ok(Visited::Done)
+            })
+            .await;
+        });
+    }
+
     /// Refresh one registered track's metadata, under the same slot a download
     /// of the video would take.
     async fn refresh_video_metadata(

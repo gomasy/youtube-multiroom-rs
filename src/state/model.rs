@@ -130,6 +130,19 @@ impl AudioTrack {
     }
 }
 
+/// A track as the library listing serves it: the stored entry plus the one
+/// thing only the filesystem can answer.
+#[derive(Serialize)]
+pub struct TrackJson {
+    #[serde(flatten)]
+    pub track: AudioTrack,
+    /// The track is registered but its cache file is gone, so an Echo asked to
+    /// play it would fail. Omitted when false, which it is for all but the
+    /// handful of tracks a wiped cache or a stray deletion left behind.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub file_missing: bool,
+}
+
 /// Named playlist. Track IDs are stored in a separate list (youtube:playlist:{id}).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Playlist {
@@ -150,6 +163,27 @@ pub(crate) struct PlaylistJson {
 pub struct PlaylistImportInfo {
     pub name: String,
     pub total: usize,
+}
+
+/// What the cache directory holds, measured against what the library expects
+/// of it (see [`super::cache`]).
+#[derive(Serialize)]
+pub struct CacheReport {
+    /// Bytes held by every `{video_id}.m4a` in the cache, orphans included.
+    pub total_bytes: u64,
+    pub file_count: usize,
+    /// Cache files no registered track claims, largest first.
+    pub orphans: Vec<OrphanFile>,
+    /// Registered tracks whose cache file is gone, in library order.
+    pub missing: Vec<AudioTrack>,
+}
+
+/// A cache file nothing in the library refers to.
+#[derive(Serialize)]
+pub struct OrphanFile {
+    /// The video ID its name spells.
+    pub id: String,
+    pub bytes: u64,
 }
 
 /// Result of reorder_track. Lets callers distinguish "not in list" (not enrolled

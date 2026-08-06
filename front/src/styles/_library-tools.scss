@@ -1,0 +1,77 @@
+@use "tokens" as *;
+@use "mixins" as *;
+
+// Cache upkeep and library backup. Collapsed by default, so the header is the
+// whole section until it is opened.
+.tools-section { margin-bottom: $section-gap; }
+
+.tools-toggle {
+  @include row-between;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+
+  // The label carries its own bottom margin for the sections that are always
+  // open; here the caret has to sit level with it.
+  .section-label { margin-bottom: 0; }
+}
+
+.tools-caret {
+  color: var(--text-dim);
+  font-size: 12px;
+  transition: transform 0.15s;
+
+  &.open { transform: rotate(180deg); }
+
+  @include reduced-motion { transition: none; }
+}
+
+.tools-body {
+  @include stack(10px);
+  margin-top: 12px;
+}
+
+.tools-row {
+  @include row-between(10px);
+}
+
+.tools-stat {
+  @include tabular;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.tools-actions {
+  @include row(8px);
+
+  > * { @include flexible; }
+}
+
+.tools-hint {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+// A file input dressed as a button: the input itself is never shown, the label
+// around it is what gets clicked.
+.tools-file {
+  @include center;
+  cursor: pointer;
+
+  input { display: none; }
+
+  &.disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+}
+
+.tools-check {
+  @include row(8px);
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+}

@@ -12,6 +12,7 @@
 //! - [`device`] — per-device state, pending commands, Up Next queues
 //! - [`playback`] — playback mode and the sleep timer
 //! - [`playlist`] — named playlists and YouTube playlist import
+//! - [`cache`] — reconciling the cache directory with the library
 //! - [`download`] — downloading audio and refreshing track metadata
 //! - [`progress`] — what clients are told about that work while it runs
 //! - [`remux`] — rebuilding a downloaded file's container before it is served
@@ -35,6 +36,7 @@ use tokio::sync::{Mutex, broadcast};
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 
+mod cache;
 mod device;
 mod download;
 mod job;
@@ -49,9 +51,9 @@ mod url;
 mod ytdlp;
 
 pub use model::{
-    AudioTrack, DeviceState, DeviceUpdate, PendingCommand, PlayRequest, ReorderOutcome,
-    ReorderRequest, SeekRequest, SyncRequest, WriteOutcome, auto_token, is_auto_token, new_token,
-    token_track_id,
+    AudioTrack, CacheReport, DeviceState, DeviceUpdate, PendingCommand, PlayRequest,
+    ReorderOutcome, ReorderRequest, SeekRequest, SyncRequest, WriteOutcome, auto_token,
+    is_auto_token, new_token, token_track_id,
 };
 pub(crate) use url::watch_url;
 pub use url::{UrlKind, classify_url};

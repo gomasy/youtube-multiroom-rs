@@ -223,17 +223,80 @@ impl AppState {
         let id = ids.remove(pos);
         ids.insert(new_index.min(ids.len()), id);
 
-        // Rewrite the entire order list (at most a few hundred items, so full replace is fine)
+        if self.write_order_list(&key, &ids).await {
+            ReorderOutcome::Moved
+        } else {
+            ReorderOutcome::Failed
+        }
+    }
+
+    /// Replace an order list — the library's or a playlist's — wholesale. At
+    /// most a few hundred ids, so a full replace is cheaper to reason about
+    /// than a diff, and it is atomic so no reader sees the list half-written.
+    ///
+    /// Callers hold `order_lock`: the read they based `ids` on and this write
+    /// have to be one step, or a concurrent edit lands between them and is then
+    /// overwritten. Returns whether the list was written.
+    async fn write_order_list(&self, key: &str, ids: &[String]) -> bool {
+        // RPUSH with no values is an error, so an empty list is deleted rather
+        // than written. DEL alone also leaves no stale entries behind.
         let mut pipe = redis::pipe();
-        pipe.atomic().del(&key).rpush(&key, &ids);
+        pipe.atomic().del(key);
+        if !ids.is_empty() {
+            pipe.rpush(key, ids);
+        }
         let mut conn = self.redis.clone();
         match pipe.query_async::<()>(&mut conn).await {
-            Ok(()) => ReorderOutcome::Moved,
+            Ok(()) => true,
             Err(e) => {
-                tracing::warn!("Redis error writing track order: {e}");
-                ReorderOutcome::Failed
+                tracing::warn!("Redis error writing the order list {key}: {e}");
+                false
             }
         }
+    }
+
+    /// Put `video_id` back where `snapshot` had it in the order list.
+    ///
+    /// A download prepends, which is right for a track being added and wrong
+    /// for one being recovered: a repair or an import restores files the
+    /// library already has a place for, and moving them all to the top would
+    /// scramble an order nobody asked to change.
+    ///
+    /// The position is taken from the neighbours rather than from an index, so
+    /// what the rest of the list did in the meantime is preserved: the track
+    /// lands just after the last id that precedes it in the snapshot and is
+    /// still there.
+    pub(crate) async fn restore_order_position(&self, video_id: &str, snapshot: &[String]) {
+        let _guard = self.order_lock.lock().await;
+        let Ok(mut current) = self.try_track_order().await else {
+            return;
+        };
+        current.retain(|id| id != video_id);
+        current.insert(
+            anchored_index(&current, snapshot, video_id),
+            video_id.to_string(),
+        );
+        self.write_order_list(REDIS_KEY_TRACKS_ORDER, &current)
+            .await;
+    }
+
+    /// The raw order list, including ids no registered track answers to. Those
+    /// are what an import leaves as placeholders for videos still to arrive, so
+    /// a recovery job has to read the list as stored rather than as listed.
+    ///
+    /// A read that failed reads as empty here, which is what the one caller
+    /// wants: an absent snapshot leaves recovered tracks where the download put
+    /// them rather than moving them somewhere guessed at. Callers that write
+    /// the list back must use `try_track_order` instead.
+    pub(crate) async fn track_order(&self) -> Vec<String> {
+        self.try_track_order().await.unwrap_or_default()
+    }
+
+    async fn try_track_order(&self) -> redis::RedisResult<Vec<String>> {
+        let mut conn = self.redis.clone();
+        conn.lrange(REDIS_KEY_TRACKS_ORDER, 0, -1)
+            .await
+            .inspect_err(|e| tracing::warn!("Redis error reading track order: {e}"))
     }
 
     /// The library track a spoken phrase names, or None if none is close
@@ -468,6 +531,18 @@ fn random_track_from(mut tracks: Vec<AudioTrack>, current_id: &str) -> Option<Au
     Some(tracks.swap_remove(nanos % tracks.len()))
 }
 
+/// Where `video_id` belongs in `current` (which no longer holds it) to keep the
+/// order `snapshot` gives it: just after the last id preceding it there that is
+/// still present. Nothing preceding it survived, so the front.
+fn anchored_index(current: &[String], snapshot: &[String], video_id: &str) -> usize {
+    snapshot
+        .iter()
+        .take_while(|id| *id != video_id)
+        .filter_map(|id| current.iter().position(|c| c == id))
+        .max()
+        .map_or(0, |i| i + 1)
+}
+
 /// How well a track answers a spoken query, already folded by the caller. The
 /// title is scored a whole tier above the channel, so a weak title match still
 /// outranks a perfect channel one rather than being decided by which happens to
@@ -487,7 +562,7 @@ fn track_score(track: &AudioTrack, folded_query: &str) -> Option<u32> {
 const TITLE_TIER: u32 = 1000;
 
 /// List {video_id}.m4a files in audio_cache as (video_id, path) pairs.
-fn cached_video_ids(cache_dir: &Path) -> Vec<(String, PathBuf)> {
+pub(super) fn cached_video_ids(cache_dir: &Path) -> Vec<(String, PathBuf)> {
     let Ok(entries) = std::fs::read_dir(cache_dir) else {
         return Vec::new();
     };
@@ -507,19 +582,31 @@ fn cached_video_ids(cache_dir: &Path) -> Vec<(String, PathBuf)> {
         .collect()
 }
 
-/// Return a file's mtime as UNIX seconds (falls back to current time).
-fn file_mtime_f64(path: &Path) -> f64 {
-    std::fs::metadata(path)
-        .and_then(|m| m.modified())
+/// A file's mtime as UNIX seconds, or None if the filesystem cannot say.
+/// Takes the metadata rather than the path so a caller that has already read it
+/// — for the size, say — does not pay for a second stat.
+pub(super) fn mtime_f64(meta: &std::fs::Metadata) -> Option<f64> {
+    meta.modified()
         .ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_secs_f64())
+}
+
+/// Return a file's mtime as UNIX seconds (falls back to current time).
+fn file_mtime_f64(path: &Path) -> f64 {
+    std::fs::metadata(path)
+        .ok()
+        .and_then(|meta| mtime_f64(&meta))
         .unwrap_or_else(now_f64)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ids(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
 
     /// Minimal track for tests.
     fn track(id: &str) -> AudioTrack {
@@ -641,5 +728,20 @@ mod tests {
             named("aaaaaaaaaa2", "Mix", "B"),
         ];
         assert_eq!(best_match(&tracks, "mix").unwrap().id, "aaaaaaaaaa1");
+    }
+
+    #[test]
+    fn a_restored_track_lands_after_its_surviving_predecessor() {
+        let snapshot = ids(&["a", "b", "c", "d"]);
+        // A download moved "c" to the front; it belongs after "b"
+        assert_eq!(anchored_index(&ids(&["a", "b", "d"]), &snapshot, "c"), 2);
+        // Its predecessors are gone, so the front is where it belongs
+        assert_eq!(anchored_index(&ids(&["d"]), &snapshot, "a"), 0);
+        assert_eq!(anchored_index(&ids(&["d"]), &snapshot, "c"), 0);
+        // Tracks added since are left where they are, ahead or behind
+        assert_eq!(anchored_index(&ids(&["new", "a", "b"]), &snapshot, "c"), 3);
+        // An id the snapshot has no opinion about goes to the end, the only
+        // place that displaces nothing
+        assert_eq!(anchored_index(&ids(&["a", "b"]), &snapshot, "zz"), 2);
     }
 }

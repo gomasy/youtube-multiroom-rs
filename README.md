@@ -26,6 +26,7 @@ youtube-multiroom-rs/
 │   │   ├── device.rs           # Per-device state, pending commands, queues
 │   │   ├── playback.rs         # Playback mode & sleep timer
 │   │   ├── playlist.rs         # Named playlists & YouTube playlist import
+│   │   ├── cache.rs            # Reconciling the cache directory with the library
 │   │   ├── download.rs         # Audio downloading & metadata refresh
 │   │   ├── remux.rs            # Rebuilding a downloaded file's container
 │   │   ├── progress.rs         # Progress reporting & cancellation generation
@@ -39,6 +40,7 @@ youtube-multiroom-rs/
 │       ├── tracks.rs           # Track listing, reordering, deletion
 │       ├── playlists.rs        # Playlist CRUD & membership
 │       ├── devices.rs          # Device state, playback commands, device sync
+│       ├── cache.rs            # Cache status, orphan cleanup, missing-file repair
 │       ├── alexa.rs            # Alexa webhook endpoint
 │       └── ws.rs               # WebSocket push channel
 └── front/
@@ -54,7 +56,7 @@ youtube-multiroom-rs/
         ├── styles/             # SCSS (tokens, mixins, component partials)
         ├── icons/              # SVG sources + generated PNGs
         ├── manifest.webmanifest
-        └── components/         # DeviceList, NowPlaying, SeekBar, Toast, …
+        └── components/         # DeviceList, NowPlaying, SeekBar, LibraryTools, Toast, …
 ```
 
 ## Build & Run
@@ -201,6 +203,7 @@ The Web UI ships a web app manifest and icons, so it can be installed to the hom
 12. 「選択」 enters select mode: check tracks or 「全選択」 a page, then bulk-delete, bulk-add to a playlist, or 「メタデータ更新」. In a playlist view, removal only affects that playlist
 13. Set a sleep timer (15 / 30 min, 1 / 3 / 6 h) below the playback mode selector
 14. 「他を同期」 on a device card brings every other device to that device's track and position
+15. 「メンテナンス」 at the bottom of the left column reports the cache size, removes files no track claims, and re-downloads tracks whose audio is missing
 
 ## Architecture
 
@@ -291,6 +294,17 @@ Since a custom skill cannot push directives, each Echo starts when it is spoken 
 
 A live stream is queued from zero instead: it has no position to match, and the relay hands out whatever is at the live edge regardless. Finite tracks are clamped a second short of the end, as a seek is, so a follower does not start by immediately finishing.
 
+### Cache Health
+
+The cache directory and the library drift apart in both directions, and neither direction is visible from the track list alone. `GET /api/cache` reports both, and the 「メンテナンス」 panel is where they surface:
+
+- **Missing audio** — a track registered with no file behind it (Redis restored from a backup, a file deleted by hand). It fails only when an Echo is asked for it, so the library list marks the row 「音源なし」 and 「欠損を再取得」 re-downloads every such track. Live tracks never had a file and are never counted.
+- **Orphaned files** — a cached file no registered track claims, left by a deletion that could not reach Redis. 「不要を削除」 removes them. Only files older than ten minutes count: a download publishes its file into the cache moments before it registers the track, and a young unclaimed file is far more likely to be a download landing right now.
+
+A recovery is an ordinary download, which prepends — right for a track being added, wrong for one being repaired. So the order list is snapshotted first and each finished track is put back just after the last id that preceded it there and is still present, which leaves the rest of the order exactly as concurrent edits left it.
+
+The track list itself only stats the page being served, so a library of any size costs the same handful of syscalls; the full scan runs on a blocking thread and only while the maintenance panel is open.
+
 ### Voice Skip & Playback Controls
 
 `AMAZON.NextIntent` (「アレクサ、次の曲」) switches immediately: a pending web command first, then the play-next queue, then the playback-mode selection (shuffle picks at random; loop/off advance in order — an explicit "next" moves on even when the mode is off). `AMAZON.PreviousIntent` goes back one track in scope order, wrapping from first to last. Both reset the playback-failure retry counter, like an explicit resume.
@@ -356,6 +370,9 @@ Broadcast frames:
 | POST | `/api/devices/{id}/seek` | Yes | Queue playback of the current track from a position |
 | POST | `/api/devices/{id}/sync` | Yes | Line other devices up with this one (see below) |
 | POST | `/api/devices/{id}/stop` | Yes | Stop a device |
+| GET | `/api/cache` | Yes | Cache size, orphaned files, tracks with missing audio |
+| POST | `/api/cache/cleanup` | Yes | Delete cached files no track claims |
+| POST | `/api/cache/repair` | Yes | Re-download the tracks whose audio is missing |
 | POST | `/alexa` | Amazon signature | Alexa skill webhook |
 | WS | `/ws` | Yes | Real-time sync & audio extraction |
 

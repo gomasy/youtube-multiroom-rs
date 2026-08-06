@@ -56,16 +56,18 @@ body {
 
 // Shared by now playing, history and search results.
 .live-badge {
-  display: inline-block;
+  @include badge;
   background: var(--accent);
   color: #fff;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.5px;
-  padding: 1px 5px;
-  border-radius: 3px;
-  vertical-align: middle;
-  line-height: 1.6;
+}
+
+// A registered track whose cached audio is gone: playable nowhere until it is
+// downloaded again. Sits beside the LIVE badge, so it borrows its geometry.
+.missing-badge {
+  @include badge;
+  background: var(--red-tint);
+  color: var(--red);
+  margin-left: 6px;
 }
 
 .empty-state {

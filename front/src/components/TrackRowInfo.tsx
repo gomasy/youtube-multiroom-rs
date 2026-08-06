@@ -1,5 +1,6 @@
 import { ScrollingText } from "./ScrollingText";
 import { formatDuration } from "../format";
+import { t } from "../i18n";
 import type { Track } from "../types";
 
 export function TrackRowInfo({ track }: { track: Track }) {
@@ -21,6 +22,11 @@ export function TrackRowInfo({ track }: { track: Track }) {
           {track.is_live
             ? <span className="live-badge">LIVE</span>
             : formatDuration(track.duration)}
+          {track.file_missing && (
+            <span className="missing-badge" title={t("history.fileMissingHint")}>
+              {t("history.fileMissing")}
+            </span>
+          )}
         </div>
       </div>
     </>

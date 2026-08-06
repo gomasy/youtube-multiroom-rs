@@ -41,6 +41,7 @@ pub async fn list_tracks(
     let (tracks, total) = state
         .list_tracks_page(query.playlist.as_deref(), page, per_page, filter)
         .await;
+    let tracks = state.with_file_status(tracks).await;
     Ok(Json(json!({
         "tracks": tracks,
         "total": total,
