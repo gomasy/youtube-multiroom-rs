@@ -37,3 +37,6 @@ lto = true
 strip = true
 opt-level = "z"
 codegen-units = 1
+
+[dev-dependencies]
+tower = { version = "0.5.3", features = ["util"] }

@@ -3,6 +3,7 @@ mod auth;
 mod handlers;
 mod locale;
 mod state;
+mod static_files;
 
 rust_i18n::i18n!("locales", fallback = "en");
 
@@ -22,7 +23,6 @@ use axum::routing::{delete, get, patch, post};
 use state::AppState;
 use std::net::SocketAddr;
 use std::process;
-use tower_http::services::ServeDir;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -117,7 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/alexa", post(handlers::alexa_webhook))
         .route(auth::WS_PATH, get(handlers::ws_upgrade))
         // route_layer only wraps the routes registered above it, which is what
-        // makes the two static services below deliberately public: the browser
+        // makes the static files merged below deliberately public: the browser
         // must be able to load the app shell and its message catalogs in order
         // to show the login prompt that obtains a token in the first place.
         // Anything that touches user data must be registered above this layer.
@@ -125,8 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             state.clone(),
             auth::require_token,
         ))
-        .nest_service("/locales", ServeDir::new("front/locales"))
-        .fallback_service(ServeDir::new("front/dist"))
+        .merge(static_files::router())
         .with_state(state);
 
     println!("══════════════════════════════════════════");

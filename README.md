@@ -16,6 +16,7 @@ youtube-multiroom-rs/
 │   ├── main.rs             # Entry point & router
 │   ├── auth.rs             # Bearer auth middleware & signed stream URLs
 │   ├── locale.rs           # Request locale resolution (X-App-Lang / Alexa locale)
+│   ├── static_files.rs     # Static file router & its Cache-Control policy
 │   ├── alexa/              # The Alexa skill, split by subject
 │   │   ├── mod.rs              # Per-request context; the dispatch into the rest
 │   │   ├── verify.rs           # Alexa request signature verification
@@ -348,6 +349,19 @@ A sleep timer can be set from the Web UI (15 min, 30 min, 1 h, 3 h, 6 h). On exp
 ### Browser Preview
 
 The Now Playing card has a small preview player for checking a track before sending it to the Echos. Since `<audio>` cannot send an `Authorization` header, the client first calls `GET /api/audio/{id}/url` (Bearer-authenticated) for a signed stream URL — the same HMAC scheme Echo playback uses — and feeds that to the element. Live tracks are relayed through `/live` and play without seeking.
+
+### Static Assets
+
+`front/dist/` and `front/locales/` are served by their own router, merged in below the auth layer so the app shell loads before a token exists, and wrapped in a layer that sets `Cache-Control` for a CDN in front of the tunnel. The policy is read off the file name, following the split the build already makes:
+
+| Built as | Example | `Cache-Control` |
+|---|---|---|
+| `name.<hash>.ext` — a rebuild always changes the URL | `front.ade1b22c.js`, `logo.e60bc5d3.svg` | `public, max-age=31536000, immutable` |
+| A stable name that survives a deploy | `index.html`, `manifest.webmanifest`, `icon-192.png`, `locales/ja.json` | `public, max-age=0, must-revalidate` |
+
+`ServeDir` answers the second row's revalidation with a 304 from its ETag, so the CDN still absorbs the bytes. Only 2xx and 304 are labelled: a 404 under a hashed-looking path must not outlive the deploy that publishes the file.
+
+Production builds also pass `--no-source-maps` — the maps are 2 MB against a 284 kB `dist/`.
 
 ### WebSocket Protocol
 
