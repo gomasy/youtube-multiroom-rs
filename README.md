@@ -52,6 +52,9 @@ youtube-multiroom-rs/
 │       ├── alexa.rs            # Alexa webhook endpoint
 │       └── ws.rs               # WebSocket push channel
 └── front/
+    ├── .parcelrc               # Registers the build plugins below
+    ├── parcel-plugins/
+    │   └── namer.cjs           # Keeps the PWA icons out of content hashing
     ├── locales/{en,ja}.json    # Frontend message catalogs (fetched at runtime)
     └── src/
         ├── App.tsx, index.tsx, index.html
@@ -197,6 +200,8 @@ When upgrading from an older version, re-paste and rebuild the model — `AMAZON
 ## PWA
 
 The Web UI ships a web app manifest and icons, so it can be installed to the home screen (Android/Chrome 「アプリをインストール」, iOS Safari 「ホーム画面に追加」) and runs standalone in a dark themed window. Installation requires HTTPS — the tunnel URL works. Icon PNGs are generated from the SVG sources in `front/src/icons/` (regenerate with `rsvg-convert`).
+
+An install keeps the manifest and its icons on the device and re-fetches them later, so an icon URL that moved would 404. `front/parcel-plugins/namer.cjs` keeps the icon PNGs out of Parcel's content hashing for that reason; `index.html` and `manifest.webmanifest` already get stable names from Parcel itself.
 
 ## Usage
 
