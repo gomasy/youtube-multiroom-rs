@@ -48,24 +48,30 @@ pub async fn require_token(
         return next.run(request).await;
     }
 
-    let header_ok = request
+    if bearer_token_eq(&request, expected)
+        || verify_query_token(expected, path, request.uri().query())
+    {
+        next.run(request).await
+    } else {
+        unauthorized()
+    }
+}
+
+fn unauthorized() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({ "detail": "Unauthorized" })),
+    )
+        .into_response()
+}
+
+fn bearer_token_eq(request: &Request, expected: &str) -> bool {
+    request
         .headers()
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .is_some_and(|token| constant_time_eq(token, expected));
-
-    let query_ok = verify_query_token(expected, path, request.uri().query());
-
-    if header_ok || query_ok {
-        next.run(request).await
-    } else {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "detail": "Unauthorized" })),
-        )
-            .into_response()
-    }
+        .is_some_and(|token| constant_time_eq(token, expected))
 }
 
 /// Generate a signed query string ("exp=...&sig=...") for stream URLs.
