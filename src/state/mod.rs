@@ -67,6 +67,7 @@ pub(crate) const REDIS_KEY_DEVICES: &str = "youtube:devices";
 pub(crate) const REDIS_KEY_PLAYBACK_MODE: &str = "youtube:playback_mode";
 pub(crate) const REDIS_KEY_PLAYLISTS: &str = "youtube:playlists";
 pub(crate) const REDIS_KEY_SLEEP_TIMER: &str = "youtube:sleep_timer";
+const REDIS_KEY_STREAM_SECRET: &str = "youtube:stream_secret";
 pub(crate) const REDIS_KEY_TRACKS: &str = "youtube:tracks";
 pub(crate) const REDIS_KEY_TRACKS_ORDER: &str = "youtube:tracks_order";
 pub(crate) const REDIS_PENDING_PREFIX: &str = "youtube:pending";
@@ -134,11 +135,47 @@ pub(crate) fn playlist_key(playlist_id: &str) -> String {
     format!("{REDIS_PLAYLIST_PREFIX}:{playlist_id}")
 }
 
+/// The stream URL signing key when API_TOKEN supplies none: whatever Redis
+/// already holds, or `fresh` stored there for later starts to find. Sharing it
+/// is what lets a signed URL outlive the process that issued it — a restart
+/// mid-track would otherwise invalidate the URL the Echo is playing from. A
+/// Redis failure degrades to a key private to this process, which costs
+/// playback a re-issued URL rather than the server its start.
+async fn shared_stream_secret(conn: &mut ConnectionManager, fresh: String) -> String {
+    use redis::AsyncCommands;
+
+    match conn
+        .set_nx::<_, _, bool>(REDIS_KEY_STREAM_SECRET, &fresh)
+        .await
+    {
+        Ok(true) => fresh,
+        Ok(false) => redis_or!(
+            "reading the stream URL signing key",
+            conn.get::<_, Option<String>>(REDIS_KEY_STREAM_SECRET).await,
+            None
+        )
+        .filter(|stored| !stored.is_empty())
+        .unwrap_or(fresh),
+        Err(e) => {
+            tracing::warn!(
+                "Redis error storing the stream URL signing key: {e}; \
+                 signed stream URLs will not survive a restart"
+            );
+            fresh
+        }
+    }
+}
+
 pub struct AppState {
     redis: ConnectionManager,
     pub tx: broadcast::Sender<String>,
     pub cache_dir: PathBuf,
     pub api_token: Option<String>,
+    /// HMAC key for the signed stream URLs handed to Echo devices and the
+    /// browser's audio element. Always present — API_TOKEN when it is set,
+    /// otherwise a generated key shared through Redis — so those URLs are signed
+    /// even with authentication otherwise disabled.
+    pub stream_secret: String,
     /// Whether track restoration from audio_cache is in progress (prevents
     /// concurrent runs).
     restoring: AtomicBool,
@@ -196,7 +233,7 @@ impl AppState {
         // Naming the URL is what makes this error actionable, but it is the one
         // place a password could reach stderr, so it goes out redacted. The
         // Client::open error above carries no URL of its own.
-        let redis = time::timeout(time::Duration::from_secs(5), ConnectionManager::new(client))
+        let mut redis = time::timeout(time::Duration::from_secs(5), ConnectionManager::new(client))
             .await
             .map_err(|_| {
                 format!(
@@ -205,11 +242,23 @@ impl AppState {
                 )
             })??;
 
+        // API_TOKEN doubles as the signing key where it exists, so rotating the
+        // token also invalidates the URLs signed with it.
+        let stream_secret = match &api_token {
+            Some(token) => token.clone(),
+            None => {
+                let fresh = crate::auth::random_secret()
+                    .ok_or("Failed to generate a stream URL signing key")?;
+                shared_stream_secret(&mut redis, fresh).await
+            }
+        };
+
         Ok(Arc::new(Self {
             redis,
             tx,
             cache_dir,
             api_token,
+            stream_secret,
             restoring: AtomicBool::new(false),
             order_lock: Mutex::new(()),
             extract_slots: Mutex::new(HashMap::new()),

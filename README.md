@@ -116,11 +116,13 @@ Setting `API_TOKEN` protects the API with a Bearer token:
 
 - The Web UI prompts for the token on first access (stored in localStorage).
 - API endpoints and the WebSocket require `Authorization: Bearer <token>` (or `?token=` for the WebSocket, which cannot send headers).
-- `/api/audio/{id}/stream` and `/api/audio/{id}/live` accept a signed URL instead, since Echo devices cannot send auth headers: `?exp=<unix>&sig=<hmac>`, HMAC-SHA256 derived from `API_TOKEN` and valid for 24 h. Bearer auth is also accepted.
+- `/api/audio/{id}/stream` and `/api/audio/{id}/live` accept a signed URL instead, since Echo devices cannot send auth headers: `?exp=<unix>&sig=<hmac>`, HMAC-SHA256 and valid for 24 h. Bearer auth is also accepted.
 - `/alexa` is exempt from Bearer auth — every request to it is instead verified as genuinely coming from Alexa (certificate chain validation, body signature, timestamp freshness), whether or not `API_TOKEN` is set. This means you cannot `curl` it manually.
 - Setting `ALEXA_SKILL_ID` additionally requires each request to name your skill. Signature verification only proves a request came from Amazon, so without this anyone who learns your URL can drive your devices from a skill of their own.
 
-Without `API_TOKEN`, no authentication is required.
+Without `API_TOKEN`, no Bearer authentication is required — but the two audio endpoints above still demand a valid signature. Their key is then generated at first start and kept in Redis (`youtube:stream_secret`), so URLs stay valid across restarts and across instances sharing one Redis; delete the key to invalidate every URL already issued. With `API_TOKEN` set, the token itself is the key — changing it invalidates the URLs already issued.
+
+This matters when the server sits behind a reverse proxy that authenticates the Web UI itself: those two endpoints have to be excluded from it for an Echo to reach them, and the signature is what keeps the exclusion from being an open door. It is not a substitute for `API_TOKEN` on an otherwise exposed server — `/api/audio/{id}/url` mints signed URLs, and without a token nothing stops anyone from asking it.
 
 ### Internationalization
 

@@ -183,14 +183,14 @@ pub async fn live_audio(
 
 /// GET /api/audio/:id/url
 ///
-/// A stream URL for the browser preview player, signed when auth is enabled.
-/// This endpoint requires Bearer auth, so third parties cannot mint signed URLs.
+/// A signed stream URL for the browser preview player. This endpoint is subject
+/// to Bearer auth, so with API_TOKEN set third parties cannot mint signed URLs.
 pub async fn audio_url(
     State(state): State<Arc<AppState>>,
     Path(audio_id): Path<String>,
 ) -> AppResult<Json<Value>> {
     let track = track_or_404(&state, &audio_id).await?;
-    let url = crate::auth::stream_path(state.api_token.as_deref(), &track.id, track.is_live);
+    let url = crate::auth::stream_path(&state.stream_secret, &track.id, track.is_live);
     Ok(Json(json!({ "url": url })))
 }
 

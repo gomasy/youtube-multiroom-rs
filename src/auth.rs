@@ -28,10 +28,6 @@ pub async fn require_token(
     request: Request,
     next: Next,
 ) -> Response {
-    let Some(ref expected) = state.api_token else {
-        return next.run(request).await;
-    };
-
     let path = request.uri().path();
 
     // Alexa webhook relies on skill signature verification, not Bearer auth
@@ -40,13 +36,25 @@ pub async fn require_token(
     }
 
     // Echo devices cannot attach Authorization headers, so stream URLs are
-    // authenticated by HMAC-signed query parameters (exp & sig). Without a
-    // valid signature the request falls through to Bearer auth below.
-    if let Some(audio_id) = audio_endpoint_id(path)
-        && verify_stream_query(expected, audio_id, request.uri().query())
-    {
-        return next.run(request).await;
+    // authenticated by HMAC-signed query parameters (exp & sig) instead. The
+    // signature is required whether or not API_TOKEN is set: these two endpoints
+    // stay closed even when the rest of the API is open.
+    if let Some(audio_id) = audio_endpoint_id(path) {
+        let ok = verify_stream_query(&state.stream_secret, audio_id, request.uri().query())
+            || state
+                .api_token
+                .as_deref()
+                .is_some_and(|expected| bearer_token_eq(&request, expected));
+        return if ok {
+            next.run(request).await
+        } else {
+            unauthorized()
+        };
     }
+
+    let Some(ref expected) = state.api_token else {
+        return next.run(request).await;
+    };
 
     if bearer_token_eq(&request, expected)
         || verify_query_token(expected, path, request.uri().query())
@@ -74,8 +82,17 @@ fn bearer_token_eq(request: &Request, expected: &str) -> bool {
         .is_some_and(|token| constant_time_eq(token, expected))
 }
 
+/// A fresh 256-bit signing key, hex-encoded, for when no API_TOKEN supplies one.
+/// `None` if the OS entropy source fails; the caller reports that rather than
+/// fall back to a guessable key.
+pub fn random_secret() -> Option<String> {
+    let mut bytes = [0u8; 32];
+    openssl::rand::rand_bytes(&mut bytes).ok()?;
+    Some(hex(&bytes))
+}
+
 /// Generate a signed query string ("exp=...&sig=...") for stream URLs.
-pub fn stream_query(secret: &str, audio_id: &str) -> String {
+fn stream_query(secret: &str, audio_id: &str) -> String {
     // exp = 0 (unreadable clock) yields an already-expired URL, which is the
     // safe outcome: playback fails rather than the URL never expiring.
     let exp = now_secs().map_or(0, |now| now + STREAM_URL_TTL_SECS);
@@ -83,18 +100,14 @@ pub fn stream_query(secret: &str, audio_id: &str) -> String {
     format!("exp={exp}&sig={sig}")
 }
 
-/// Build a stream path for a track (with signed query when auth is enabled).
-/// Neither Echo nor the browser audio element can attach Authorization headers,
-/// so playback URLs rely on this signature. Live streams use /live (CDN relay)
-/// instead of /stream (local file).
-pub fn stream_path(api_token: Option<&str>, audio_id: &str, is_live: bool) -> String {
+/// Build a signed stream path for a track, `secret` being
+/// [`AppState::stream_secret`]. Neither Echo nor the browser audio element can
+/// attach Authorization headers, so playback URLs rely on this signature. Live
+/// streams use /live (CDN relay) instead of /stream (local file).
+pub fn stream_path(secret: &str, audio_id: &str, is_live: bool) -> String {
     let endpoint = if is_live { "live" } else { "stream" };
-    let mut path = format!("/api/audio/{audio_id}/{endpoint}");
-    if let Some(secret) = api_token {
-        path.push('?');
-        path.push_str(&stream_query(secret, audio_id));
-    }
-    path
+    let query = stream_query(secret, audio_id);
+    format!("/api/audio/{audio_id}/{endpoint}?{query}")
 }
 
 /// Whether `?token=` authenticates this request. Only the WebSocket handshake
@@ -254,19 +267,25 @@ mod tests {
     }
 
     #[test]
-    fn stream_path_matches_endpoint_and_auth() {
-        // Without auth: bare path, /live for a live track
-        assert_eq!(
-            stream_path(None, "abc123", false),
-            "/api/audio/abc123/stream"
-        );
-        assert_eq!(stream_path(None, "abc123", true), "/api/audio/abc123/live");
+    fn stream_path_is_always_signed() {
+        // An API_TOKEN and a generated key alike produce a verifiable signature
+        for secret in ["secret", &random_secret().expect("entropy is available")] {
+            for (is_live, endpoint) in [(false, "stream"), (true, "live")] {
+                let path = stream_path(secret, "abc123", is_live);
+                let (base, query) = path.split_once('?').expect("signed path has a query");
+                assert_eq!(base, format!("/api/audio/abc123/{endpoint}"));
+                assert!(verify_stream_query(secret, "abc123", Some(query)));
+            }
+        }
+    }
 
-        // With auth: a signed query that passes verification
-        let path = stream_path(Some("secret"), "abc123", false);
-        let (base, query) = path.split_once('?').unwrap();
-        assert_eq!(base, "/api/audio/abc123/stream");
-        assert!(verify_stream_query("secret", "abc123", Some(query)));
+    #[test]
+    fn random_secret_is_unpredictable() {
+        let a = random_secret().expect("entropy is available");
+        let b = random_secret().expect("entropy is available");
+        // 256 bits, hex encoded, and never the same twice
+        assert_eq!(a.len(), 64);
+        assert_ne!(a, b);
     }
 
     #[test]

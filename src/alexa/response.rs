@@ -88,7 +88,7 @@ pub(super) fn play_response(ctx: &ReqCtx<'_>, next: &NextUp, enqueue_after: Opti
     let stream_url = format!(
         "{}{}",
         ctx.base_url,
-        crate::auth::stream_path(ctx.state.api_token.as_deref(), &track.id, track.is_live)
+        crate::auth::stream_path(&ctx.state.stream_secret, &track.id, track.is_live)
     );
 
     let mut stream = json!({
