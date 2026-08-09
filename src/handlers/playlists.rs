@@ -18,15 +18,16 @@ pub async fn list_playlists(State(state): State<Arc<AppState>>) -> Json<Value> {
     Json(json!({ "playlists": state.playlists_json().await }))
 }
 
+/// Body of both endpoints that name a playlist: create and rename.
 #[derive(Deserialize)]
-pub struct CreatePlaylistRequest {
+pub struct PlaylistNameRequest {
     name: String,
 }
 
 /// POST /api/playlists
 pub async fn create_playlist(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<CreatePlaylistRequest>,
+    Json(req): Json<PlaylistNameRequest>,
 ) -> AppResult<Json<Value>> {
     let playlist = state
         .create_playlist(&req.name)
@@ -40,16 +41,11 @@ pub async fn create_playlist(
     Ok(Json(json!({ "status": "ok", "playlist": playlist })))
 }
 
-#[derive(Deserialize)]
-pub struct RenamePlaylistRequest {
-    name: String,
-}
-
 /// PATCH /api/playlists/:id
 pub async fn rename_playlist(
     State(state): State<Arc<AppState>>,
     Path(playlist_id): Path<String>,
-    Json(req): Json<RenamePlaylistRequest>,
+    Json(req): Json<PlaylistNameRequest>,
 ) -> AppResult<Json<Value>> {
     if !state.rename_playlist(&playlist_id, &req.name).await {
         return Err(AppError::bad_request("Invalid name or playlist not found"));
