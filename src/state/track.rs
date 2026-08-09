@@ -153,21 +153,35 @@ impl AppState {
 
     /// Discard queued play commands that would resurrect a deleted track.
     async fn clear_pending_referencing(&self, ids: &HashSet<&str>) {
+        let keys = self.pending_keys().await;
+        if keys.is_empty() {
+            return;
+        }
+
         let mut conn = self.redis.clone();
-        for key in self.pending_keys().await {
-            let json_str: Option<String> = match conn.get(&key).await {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!("Redis error reading pending command {key}: {e}");
-                    continue;
-                }
-            };
+        // An empty read deletes nothing: a command that could not be examined
+        // is no basis for clearing it.
+        let commands: Vec<Option<String>> = redis_or!(
+            "reading pending commands",
+            conn.mget(&keys).await,
+            Vec::new()
+        );
+
+        let mut pipe = redis::pipe();
+        let mut cleared = 0;
+        for (key, json_str) in keys.iter().zip(commands) {
             if json_str
                 .and_then(|s| serde_json::from_str::<PendingCommand>(&s).ok())
                 .is_some_and(|cmd| ids.contains(cmd.track.id.as_str()))
             {
-                warn_redis!("clearing pending command {key}", conn.del(&key).await);
+                pipe.del(key).ignore();
+                cleared += 1;
             }
+        }
+        if cleared > 0
+            && let Err(e) = pipe.query_async::<()>(&mut conn).await
+        {
+            tracing::warn!("Redis error clearing {cleared} pending command(s): {e}");
         }
     }
 
@@ -200,32 +214,30 @@ impl AppState {
     /// Remove deleted tracks from every device's Up Next queue, and clear them
     /// from any device that was pointing at one.
     async fn detach_from_devices(&self, ids: &HashSet<&str>) {
-        let mut conn = self.redis.clone();
-        for mut dev in self.all_devices().await.into_values() {
-            // Bound before the queue work so both log lines can name the device
-            // the way the rest of this module's do.
-            let device_id = &dev.device_id;
-            let key = queue_key(device_id);
-            let entries: Vec<String> = redis_or!(
-                "reading the queue for {device_id}",
-                conn.lrange(&key, 0, -1).await,
-                Vec::new()
-            );
+        let devices = self.all_devices().await;
+        if devices.is_empty() {
+            return;
+        }
+        let queues = self.queues_for(devices.keys()).await;
 
-            // Entries are unique, so each is removed by value in one pipeline
-            // rather than a round-trip apiece.
-            let mut pipe = redis::pipe();
-            let mut stale = 0;
+        // Entries are unique, so removing by value cannot hit the wrong one
+        // when a device consumes an entry concurrently.
+        let mut pipe = redis::pipe();
+        let mut stale = 0;
+        for (device_id, entries) in &queues {
             for entry in entries.iter().filter(|e| ids.contains(token_track_id(e))) {
-                pipe.lrem(&key, 0, entry).ignore();
+                pipe.lrem(queue_key(device_id), 0, entry).ignore();
                 stale += 1;
             }
-            if stale > 0
-                && let Err(e) = pipe.query_async::<()>(&mut conn).await
-            {
-                tracing::warn!("Redis error removing queue entries for {device_id}: {e}");
+        }
+        if stale > 0 {
+            let mut conn = self.redis.clone();
+            if let Err(e) = pipe.query_async::<()>(&mut conn).await {
+                tracing::warn!("Redis error removing {stale} stale queue entry/entries: {e}");
             }
+        }
 
+        for mut dev in devices.into_values() {
             if dev
                 .current_track
                 .as_ref()

@@ -222,7 +222,7 @@ impl AppState {
 
     /// Read every device's queue in one pipeline round-trip. On error each
     /// device gets an empty queue, matching the per-device fallback.
-    async fn queues_for(
+    pub(super) async fn queues_for(
         &self,
         device_ids: impl Iterator<Item = &String>,
     ) -> HashMap<String, Vec<String>> {
