@@ -19,7 +19,7 @@ RUN npm run build
 FROM alpine:latest AS ffmpeg
 RUN apk add --no-cache build-base pkgconf nasm curl tar openssl-dev zlib-dev
 # renovate: datasource=github-tags depName=FFmpeg/FFmpeg extractVersion=^n(?<version>\d+\.\d+(\.\d+)?)$
-ARG FFMPEG_VERSION=9.0
+ARG FFMPEG_VERSION=9.0.1
 RUN curl -fsSL "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n${FFMPEG_VERSION}.tar.gz" | tar -xz
 WORKDIR /FFmpeg-n${FFMPEG_VERSION}
 RUN ./configure \
