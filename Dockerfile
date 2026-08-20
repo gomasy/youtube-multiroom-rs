@@ -74,7 +74,7 @@ FROM denoland/deno:alpine-${DENO_VERSION} AS deno
 
 FROM alpine:latest
 # renovate: datasource=pypi depName=yt-dlp
-ARG YT_DLP_VERSION=2026.7.4
+ARG YT_DLP_VERSION=2026.8.19
 RUN apk add --no-cache ca-certificates python3 libssl3 zlib \
     && apk add --no-cache --virtual .build pipx \
     && pipx install yt-dlp==${YT_DLP_VERSION} \
