@@ -5,6 +5,8 @@ export interface Track {
   duration?: number;
   channel?: string;
   is_live?: boolean;
+  /** Scheduled start (Unix secs) while the stream is upcoming */
+  scheduled_start?: number;
   /**
    * The track is registered but its cached audio is gone, so an Echo asked to
    * play it would fail. Only the library listing reports this; it is absent

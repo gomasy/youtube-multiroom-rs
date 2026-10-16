@@ -183,14 +183,15 @@ impl AppState {
         tracing::info!("Fetching metadata: {}", video_id);
         let meta = fetch_metadata(&url, Some(cancel)).await?;
         let title = meta["title"].as_str().unwrap_or(video_id).to_string();
-        let is_live = meta["is_live"].as_bool().unwrap_or(false);
+        let is_live = AudioTrack::extract_is_live(&meta);
         self.set_download_meta(video_id, &title, is_live).await;
         if cancel.is_cancelled() {
             return Err(DownloadError::Cancelled);
         }
 
         // Live streams cannot be saved as files; register metadata only and
-        // resolve the CDN URL at playback time (handlers::live_audio).
+        // resolve the CDN URL at playback time (handlers::live_audio). Upcoming
+        // streams too.
         let mut published_path = None;
         let track = if is_live {
             tracing::info!("Live stream detected, skipping download: {}", video_id);

@@ -150,6 +150,8 @@
   "tools.refresh": "再取得",
   "tools.repair": "欠損を再取得 ({count})",
   "tools.repairStarted": "再ダウンロードを開始しました",
+  "track.upcoming": "配信予定 {when}",
+  "track.upcomingHint": "配信開始前のため、開始時刻までは再生できません",
   "url.close": "閉じる",
   "url.empty": "URL または検索キーワードを入力してください",
   "url.extract": "取得",

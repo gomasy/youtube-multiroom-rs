@@ -1,3 +1,4 @@
+import { LiveBadge } from "./LiveBadge";
 import { ScrollingText } from "./ScrollingText";
 import { PreviewPlayer } from "./PreviewPlayer";
 import { formatDuration } from "../format";
@@ -33,7 +34,7 @@ export function NowPlaying({ track, onUnauthorized, showToast }: Props) {
           <div className="track-meta">
             {track
               ? track.is_live
-                ? <>{track.channel ? `${track.channel} · ` : ""}<span className="live-badge">LIVE</span></>
+                ? <>{track.channel ? `${track.channel} · ` : ""}<LiveBadge track={track} /></>
                 : [track.channel, formatDuration(track.duration)].filter(Boolean).join(" · ")
               : t("nowPlaying.hint")}
           </div>

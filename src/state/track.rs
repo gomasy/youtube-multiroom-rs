@@ -505,12 +505,24 @@ impl AppState {
     }
 
     /// Return the next track to play after the current one ends, based on the
-    /// playback mode ("off" returns None). Selection uses the active playlist scope.
-    pub async fn auto_next_track(&self, current_id: &str) -> Option<AudioTrack> {
-        match self.playback_mode().await.as_str() {
-            "loop" => neighbor_track(&self.active_scope_tracks().await, current_id, 1),
-            "shuffle" => random_track_from(self.active_scope_tracks().await, current_id),
-            _ => None, // "off": no auto-play
+    /// playback mode ("off" returns None). Selection uses the active playlist
+    /// scope, skipping tracks `eligible` rejects.
+    pub async fn auto_next_track(
+        &self,
+        current_id: &str,
+        eligible: impl Fn(&AudioTrack) -> bool,
+    ) -> Option<AudioTrack> {
+        let mode = self.playback_mode().await;
+        if mode != "loop" && mode != "shuffle" {
+            return None; // "off": no auto-play
+        }
+        let mut tracks = self.active_scope_tracks().await;
+        // The current track stays so the loop keeps its position
+        tracks.retain(|t| t.id == current_id || eligible(t));
+        if mode == "loop" {
+            neighbor_track(&tracks, current_id, 1)
+        } else {
+            random_track_from(tracks, current_id)
         }
     }
 
@@ -718,6 +730,7 @@ mod tests {
             duration: 10,
             channel: String::new(),
             is_live: false,
+            scheduled_start: None,
             created_at: 0.0,
             file_path: String::new(),
         }

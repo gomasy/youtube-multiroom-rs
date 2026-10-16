@@ -61,6 +61,14 @@ body {
   color: #fff;
 }
 
+// Upcoming stream: outlined, since it is not live yet.
+.upcoming-badge {
+  @include badge;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  padding: 0 4px;
+}
+
 // A registered track whose cached audio is gone: playable nowhere until it is
 // downloaded again. Sits beside the LIVE badge, so it borrows its geometry.
 .missing-badge {

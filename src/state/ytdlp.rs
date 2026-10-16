@@ -262,8 +262,14 @@ pub(crate) async fn fetch_metadata(
     url: &str,
     cancel: Option<&CancellationToken>,
 ) -> Result<Value, DownloadError> {
+    // Upcoming streams have no formats; keep their metadata instead of erroring.
     let stdout = run_yt_dlp_cancellable(
-        &["--dump-json", "--no-download", url],
+        &[
+            "--dump-json",
+            "--no-download",
+            "--ignore-no-formats-error",
+            url,
+        ],
         time::Duration::from_secs(METADATA_TIMEOUT_SECS),
         cancel,
     )

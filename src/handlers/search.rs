@@ -56,7 +56,8 @@ fn search_entry(v: &Value) -> Option<AudioTrack> {
         thumbnail: format!("https://i.ytimg.com/vi/{id}/mqdefault.jpg"),
         duration: AudioTrack::extract_duration(v),
         channel: AudioTrack::extract_channel(v),
-        is_live: v["live_status"].as_str() == Some("is_live"),
+        is_live: AudioTrack::extract_is_live(v),
+        scheduled_start: AudioTrack::extract_scheduled_start(v),
         created_at: 0.0,
         file_path: String::new(),
     })

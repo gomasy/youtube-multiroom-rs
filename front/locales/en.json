@@ -150,6 +150,8 @@
   "tools.refresh": "Refresh",
   "tools.repair": "Re-download missing ({count})",
   "tools.repairStarted": "Re-download started",
+  "track.upcoming": "UPCOMING {when}",
+  "track.upcomingHint": "Not on air yet; it can be played once the stream starts",
   "url.close": "Close",
   "url.empty": "Please enter a URL or search keywords",
   "url.extract": "Fetch",

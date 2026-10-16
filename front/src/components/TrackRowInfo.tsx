@@ -1,3 +1,4 @@
+import { LiveBadge } from "./LiveBadge";
 import { ScrollingText } from "./ScrollingText";
 import { formatDuration } from "../format";
 import { t } from "../i18n";
@@ -20,7 +21,7 @@ export function TrackRowInfo({ track }: { track: Track }) {
         <div className="history-meta">
           {track.channel ? `${track.channel} · ` : ""}
           {track.is_live
-            ? <span className="live-badge">LIVE</span>
+            ? <LiveBadge track={track} />
             : formatDuration(track.duration)}
           {track.file_missing && (
             <span className="missing-badge" title={t("history.fileMissingHint")}>

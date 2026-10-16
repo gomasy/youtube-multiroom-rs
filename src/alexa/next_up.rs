@@ -7,7 +7,7 @@
 //! an automatic one.
 
 use super::ReqCtx;
-use crate::state::{AudioTrack, auto_token, new_token, token_track_id};
+use crate::state::{AudioTrack, auto_token, new_token, now_f64, token_track_id};
 use serde_json::Value;
 
 /// A track chosen to play next, with everything its directive needs.
@@ -74,8 +74,10 @@ pub(super) async fn queued_or_auto_next(
         Err(()) => return None,
     }
 
+    // An upcoming stream would only fail, which reads as a stream ending
+    let now = now_f64();
     ctx.state
-        .auto_next_track(token_track_id(current_token))
+        .auto_next_track(token_track_id(current_token), |t| !t.is_upcoming(now))
         .await
         .filter(|t| allow_live_auto || !t.is_live)
         .map(NextUp::auto)

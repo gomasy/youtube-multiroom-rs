@@ -53,8 +53,12 @@ pub struct AudioTrack {
     pub duration: u64,
     #[serde(default)]
     pub channel: String,
+    /// On air or upcoming; both play via the live relay.
     #[serde(default)]
     pub is_live: bool,
+    /// Scheduled start (Unix secs) while the stream is upcoming.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_start: Option<f64>,
     #[serde(default)]
     pub created_at: f64,
     /// Excluded from API responses; only included by to_redis_json for Redis.
@@ -108,6 +112,27 @@ impl AudioTrack {
             .unwrap_or(0)
     }
 
+    /// On air or upcoming, per yt-dlp's `live_status` (full or flat metadata).
+    pub(crate) fn extract_is_live(meta: &Value) -> bool {
+        matches!(
+            meta["live_status"].as_str(),
+            Some("is_live" | "is_upcoming")
+        )
+    }
+
+    /// `release_timestamp`, only while upcoming (finished videos carry it too).
+    pub(crate) fn extract_scheduled_start(meta: &Value) -> Option<f64> {
+        (meta["live_status"] == "is_upcoming")
+            .then(|| meta["release_timestamp"].as_f64())
+            .flatten()
+            .filter(|t| *t > 0.0)
+    }
+
+    /// Scheduled start is still ahead of `now`.
+    pub(crate) fn is_upcoming(&self, now: f64) -> bool {
+        self.scheduled_start.is_some_and(|start| start > now)
+    }
+
     pub(crate) fn from_meta(id: &str, meta: &Value, created_at: f64, file_path: String) -> Self {
         Self {
             id: id.to_string(),
@@ -115,7 +140,8 @@ impl AudioTrack {
             thumbnail: meta["thumbnail"].as_str().unwrap_or("").to_string(),
             duration: Self::extract_duration(meta),
             channel: Self::extract_channel(meta),
-            is_live: meta["is_live"].as_bool().unwrap_or(false),
+            is_live: Self::extract_is_live(meta),
+            scheduled_start: Self::extract_scheduled_start(meta),
             created_at,
             file_path,
         }
@@ -486,16 +512,47 @@ mod tests {
             duration: 0,
             channel: "ch".into(),
             is_live: true,
+            scheduled_start: Some(1_800_000_000.0),
             created_at: 1.0,
             file_path: String::new(),
         };
         let restored = AudioTrack::from_redis_json(&track.to_redis_json().unwrap()).unwrap();
         assert!(restored.is_live);
+        assert_eq!(restored.scheduled_start, Some(1_800_000_000.0));
         assert!(restored.file_path.is_empty());
 
         // Entries written before is_live existed must still parse
         let legacy = r#"{"id":"dQw4w9WgXcQ","title":"t","thumbnail":"","duration":10,"channel":"","created_at":1.0,"file_path":"/tmp/a.m4a"}"#;
-        assert!(!AudioTrack::from_redis_json(legacy).unwrap().is_live);
+        let legacy = AudioTrack::from_redis_json(legacy).unwrap();
+        assert!(!legacy.is_live);
+        assert!(legacy.scheduled_start.is_none());
+    }
+
+    #[test]
+    fn upcoming_streams_register_as_live_with_their_schedule() {
+        let upcoming = json!({
+            "title": "Stream",
+            "is_live": false,
+            "live_status": "is_upcoming",
+            "release_timestamp": 1_800_000_000,
+        });
+        let track = AudioTrack::from_meta("dQw4w9WgXcQ", &upcoming, 1.0, String::new());
+        assert!(track.is_live);
+        assert_eq!(track.scheduled_start, Some(1_800_000_000.0));
+
+        // On air: live, with nothing left to wait for
+        let on_air = json!({ "is_live": true, "live_status": "is_live" });
+        assert!(AudioTrack::extract_is_live(&on_air));
+        assert!(AudioTrack::extract_scheduled_start(&on_air).is_none());
+
+        // A finished stream keeps its release_timestamp but is neither
+        let was_live = json!({
+            "is_live": false,
+            "live_status": "was_live",
+            "release_timestamp": 1_700_000_000,
+        });
+        assert!(!AudioTrack::extract_is_live(&was_live));
+        assert!(AudioTrack::extract_scheduled_start(&was_live).is_none());
     }
 
     #[test]
@@ -539,6 +596,7 @@ mod tests {
                 duration: 10,
                 channel: String::new(),
                 is_live: false,
+                scheduled_start: None,
                 created_at: 0.0,
                 file_path: "/tmp/a.m4a".into(),
             },
@@ -571,6 +629,7 @@ mod tests {
                 duration: 10,
                 channel: String::new(),
                 is_live: false,
+                scheduled_start: None,
                 created_at: 0.0,
                 file_path: String::new(),
             }),
