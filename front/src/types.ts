@@ -5,6 +5,8 @@ export interface Track {
   duration?: number;
   channel?: string;
   is_live?: boolean;
+  /** Added without downloading; playback relays from YouTube (never with is_live) */
+  streamed?: boolean;
   /** Scheduled start (Unix secs) while the stream is upcoming */
   scheduled_start?: number;
   /**

@@ -129,6 +129,11 @@ export async function getStreamUrl(
   return data.url;
 }
 
+/** A streamed track's signed relay URL, opened `startSec` into the track */
+export function relayUrl(streamUrl: string, startSec: number): string {
+  return startSec > 0 ? `${streamUrl}&start=${Math.round(startSec * 1000)}` : streamUrl;
+}
+
 export async function createPlaylist(
   name: string,
   onUnauthorized?: () => void,

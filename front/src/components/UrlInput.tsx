@@ -10,12 +10,22 @@ interface Props {
    * Returns whether the request actually went out. A rejected one leaves the
    * text where it is, so it can be sent again once the socket is back.
    */
-  onExtract: (url: string) => boolean;
+  onExtract: (url: string, stream: boolean) => boolean;
   onUnauthorized: () => void;
   showToast: (msg: string) => void;
 }
 
 const SCHEME_RE = /^[a-z][a-z\d+.-]*:\/\//i;
+const STREAM_MODE_KEY = "stream_mode";
+
+/** The streaming toggle as last left in this browser (storage may be unavailable) */
+function loadStreamMode(): boolean {
+  try {
+    return localStorage.getItem(STREAM_MODE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
 /**
  * Only decides the button label and paste auto-submit. The authoritative check
  * is parse_youtube_url() in src/state/url.rs — keep the host list in sync with it.
@@ -44,6 +54,7 @@ export function UrlInput({ onExtract, onUnauthorized, showToast }: Props) {
   const [value, setValue] = useState("");
   const [searching, setSearching] = useState(false);
   const [results, setResults] = useState<Track[] | null>(null);
+  const [stream, setStream] = useState(loadStreamMode);
   const pastedRef = useRef(false);
   const searchRef = useRef<AbortController>(null);
 
@@ -69,7 +80,7 @@ export function UrlInput({ onExtract, onUnauthorized, showToast }: Props) {
       // The box is handed back the moment the request is out: the server
       // displays it in the list below and keeps it there across a reload, so
       // holding the input would only stop the next URL being queued.
-      if (!onExtract(trimmed)) return;
+      if (!onExtract(trimmed, stream)) return;
       cancelSearch();
       setValue("");
       setResults(null);
@@ -128,6 +139,20 @@ export function UrlInput({ onExtract, onUnauthorized, showToast }: Props) {
         </button>
       </div>
 
+      <label className="url-stream-toggle" title={t("url.streamHint")}>
+        <input
+          type="checkbox"
+          checked={stream}
+          onChange={(e) => {
+            setStream(e.target.checked);
+            try {
+              localStorage.setItem(STREAM_MODE_KEY, e.target.checked ? "1" : "0");
+            } catch { /* only the remembered default is lost */ }
+          }}
+        />
+        {t("url.stream")}
+      </label>
+
       {/* The query and the results stay up as tracks are picked: one search
           often yields several worth fetching, and each pick is independent. */}
       {results && (
@@ -145,7 +170,7 @@ export function UrlInput({ onExtract, onUnauthorized, showToast }: Props) {
             <div
               key={result.id}
               className="history-item"
-              onClick={() => onExtract(`https://www.youtube.com/watch?v=${result.id}`)}
+              onClick={() => onExtract(`https://www.youtube.com/watch?v=${result.id}`, stream)}
             >
               <TrackRowInfo track={result} />
             </div>

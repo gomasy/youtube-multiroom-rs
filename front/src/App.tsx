@@ -180,7 +180,7 @@ export function App() {
         <Header connected={connected} version={version} />
         <UrlInput
           onUnauthorized={onUnauthorized}
-          onExtract={(url) => send({ type: "extract_audio", url })}
+          onExtract={(url, stream) => send({ type: "extract_audio", url, stream })}
           showToast={showToast}
         />
         <DownloadList

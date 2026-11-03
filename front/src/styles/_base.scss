@@ -78,6 +78,13 @@ body {
   margin-left: 6px;
 }
 
+.stream-badge {
+  @include badge;
+  background: var(--accent-tint-hover);
+  color: var(--accent);
+  margin-left: 6px;
+}
+
 .empty-state {
   text-align: center;
   padding: 32px 16px;

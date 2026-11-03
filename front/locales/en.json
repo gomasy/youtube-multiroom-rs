@@ -101,6 +101,8 @@
   "history.renamePlaylist": "Click to rename",
   "history.selectAll": "Select all",
   "history.selectMode": "Select",
+  "history.streamed": "STREAM",
+  "history.streamedHint": "Not downloaded: relayed from YouTube on every playback. Add it again with streaming off to download it.",
   "history.trackDeleted": "Track deleted",
   "history.tracks": "Tracks",
   "history.tracksDeleted": "track(s) deleted",
@@ -160,5 +162,7 @@
   "url.placeholder": "YouTube URL or search keywords...",
   "url.results": "Search results",
   "url.search": "Search",
-  "url.searching": "Searching"
+  "url.searching": "Searching",
+  "url.stream": "Stream (don't download)",
+  "url.streamHint": "Videos added with this on are not saved; each playback is relayed from YouTube. Uses no disk space and adds instantly."
 }

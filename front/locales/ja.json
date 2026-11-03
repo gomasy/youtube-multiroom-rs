@@ -101,6 +101,8 @@
   "history.renamePlaylist": "クリックしてリネーム",
   "history.selectAll": "全選択",
   "history.selectMode": "選択",
+  "history.streamed": "STREAM",
+  "history.streamedHint": "ダウンロードせず、再生のたびに YouTube から中継します。ストリーミングをオフにして追加し直すとダウンロードされます。",
   "history.trackDeleted": "トラックを削除しました",
   "history.tracks": "取得済みトラック",
   "history.tracksDeleted": "曲を削除しました",
@@ -160,5 +162,7 @@
   "url.placeholder": "YouTube URL または検索キーワード...",
   "url.results": "検索結果",
   "url.search": "検索",
-  "url.searching": "検索中"
+  "url.searching": "検索中",
+  "url.stream": "ストリーミング（ダウンロードしない）",
+  "url.streamHint": "オンにして追加した動画は保存せず、再生のたびに YouTube から中継します。ディスクを使わず、追加もすぐ終わります。"
 }

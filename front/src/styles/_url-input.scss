@@ -21,6 +21,15 @@
   &::placeholder { color: var(--text-dim); }
 }
 
+.url-stream-toggle {
+  @include row(6px);
+  display: inline-flex;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
 // ── Search results ──
 .search-results {
   @include card;

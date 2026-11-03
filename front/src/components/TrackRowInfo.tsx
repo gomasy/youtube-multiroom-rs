@@ -23,6 +23,11 @@ export function TrackRowInfo({ track }: { track: Track }) {
           {track.is_live
             ? <LiveBadge track={track} />
             : formatDuration(track.duration)}
+          {track.streamed && (
+            <span className="stream-badge" title={t("history.streamedHint")}>
+              {t("history.streamed")}
+            </span>
+          )}
           {track.file_missing && (
             <span className="missing-badge" title={t("history.fileMissingHint")}>
               {t("history.fileMissing")}
