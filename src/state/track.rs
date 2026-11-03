@@ -730,6 +730,7 @@ mod tests {
             duration: 10,
             channel: String::new(),
             is_live: false,
+            streamed: false,
             scheduled_start: None,
             created_at: 0.0,
             file_path: String::new(),

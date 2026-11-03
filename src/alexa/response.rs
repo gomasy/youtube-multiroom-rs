@@ -7,7 +7,7 @@
 
 use super::ReqCtx;
 use super::next_up::NextUp;
-use crate::state::DeviceUpdate;
+use crate::state::{DeviceUpdate, with_start_offset};
 use serde_json::{Value, json};
 
 /// Wrap a response body in the standard Alexa response envelope.
@@ -85,16 +85,24 @@ pub(super) fn play_response(ctx: &ReqCtx<'_>, next: &NextUp, enqueue_after: Opti
         offset_ms,
         token,
     } = next;
+    // The Echo cannot seek a relay: the URL starts there instead, and the
+    // token records it (see `with_start_offset`).
+    let (relay_start, echo_offset) = if track.streamed {
+        (*offset_ms, 0)
+    } else {
+        (0, *offset_ms)
+    };
+    let token = with_start_offset(token, relay_start);
     let stream_url = format!(
         "{}{}",
         ctx.base_url,
-        crate::auth::stream_path(&ctx.state.stream_secret, &track.id, track.is_live)
+        crate::auth::stream_path(&ctx.state.stream_secret, track, relay_start)
     );
 
     let mut stream = json!({
         "url": stream_url,
         "token": token,
-        "offsetInMilliseconds": offset_ms
+        "offsetInMilliseconds": echo_offset
     });
     let play_behavior = if let Some(prev) = enqueue_after {
         stream["expectedPreviousToken"] = json!(prev);

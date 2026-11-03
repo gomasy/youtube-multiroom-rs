@@ -57,6 +57,7 @@ fn search_entry(v: &Value) -> Option<AudioTrack> {
         duration: AudioTrack::extract_duration(v),
         channel: AudioTrack::extract_channel(v),
         is_live: AudioTrack::extract_is_live(v),
+        streamed: false,
         scheduled_start: AudioTrack::extract_scheduled_start(v),
         created_at: 0.0,
         file_path: String::new(),

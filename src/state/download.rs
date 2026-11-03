@@ -58,10 +58,25 @@ impl ExtractSlot {
     }
 }
 
+/// How a video being added gets its audio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FetchMode {
+    Download,
+    /// Register metadata only (see [`AudioTrack::streamed`]).
+    Stream,
+}
+
+impl FetchMode {
+    pub fn new(stream: bool) -> Self {
+        if stream { Self::Stream } else { Self::Download }
+    }
+}
+
 impl AppState {
     pub async fn extract_audio(
         self: &Arc<Self>,
         url: &str,
+        mode: FetchMode,
         cancel: &CancellationToken,
     ) -> Result<AudioTrack, DownloadError> {
         let video_id = extract_video_id(url).ok_or("Could not recognize YouTube URL")?;
@@ -71,7 +86,8 @@ impl AppState {
         let stamp = self.begin_progress(&video_id, &video_id).await;
         let result = self
             .under_extract_slot(&video_id, cancel, async |slot| {
-                self.extract_audio_locked(&video_id, slot, cancel).await
+                self.extract_audio_locked(&video_id, mode, slot, cancel)
+                    .await
             })
             .await;
         self.settle_progress(&video_id, stamp, &result).await;
@@ -137,6 +153,7 @@ impl AppState {
     async fn extract_audio_locked(
         self: &Arc<Self>,
         video_id: &str,
+        mode: FetchMode,
         slot: &ExtractSlot,
         cancel: &CancellationToken,
     ) -> Result<AudioTrack, DownloadError> {
@@ -160,6 +177,12 @@ impl AppState {
                 tracing::info!("Cache hit (live): {}", video_id);
                 return Ok(track);
             }
+            // Asked for as a download, a streamed track falls through and is
+            // fetched; a cached file is a hit either way.
+            if track.streamed && mode == FetchMode::Stream {
+                tracing::info!("Cache hit (streamed): {}", video_id);
+                return Ok(track);
+            }
             let path = Path::new(&track.file_path);
             if path.extension().is_some_and(|ext| ext == AUDIO_EXT) && path.exists() {
                 tracing::info!("Cache hit: {}", video_id);
@@ -167,14 +190,15 @@ impl AppState {
             }
         }
 
-        self.fetch_and_register(video_id, slot, cancel).await
+        self.fetch_and_register(video_id, mode, slot, cancel).await
     }
 
-    /// Fetch metadata → download (non-live) → register in Redis.
+    /// Fetch metadata → download (unless live or streamed) → register in Redis.
     /// Progress is reflected in the downloads progress entry.
     async fn fetch_and_register(
         &self,
         video_id: &str,
+        mode: FetchMode,
         slot: &ExtractSlot,
         cancel: &CancellationToken,
     ) -> Result<AudioTrack, DownloadError> {
@@ -184,7 +208,9 @@ impl AppState {
         let meta = fetch_metadata(&url, Some(cancel)).await?;
         let title = meta["title"].as_str().unwrap_or(video_id).to_string();
         let is_live = AudioTrack::extract_is_live(&meta);
-        self.set_download_meta(video_id, &title, is_live).await;
+        let streamed = !is_live && mode == FetchMode::Stream;
+        self.set_download_meta(video_id, &title, is_live || streamed)
+            .await;
         if cancel.is_cancelled() {
             return Err(DownloadError::Cancelled);
         }
@@ -196,6 +222,13 @@ impl AppState {
         let track = if is_live {
             tracing::info!("Live stream detected, skipping download: {}", video_id);
             AudioTrack::from_meta(video_id, &meta, now_f64(), String::new())
+        } else if streamed {
+            // The CDN URL expires within hours, so it is resolved at playback.
+            tracing::info!("Registering for streaming, skipping download: {}", video_id);
+            AudioTrack {
+                streamed: true,
+                ..AudioTrack::from_meta(video_id, &meta, now_f64(), String::new())
+            }
         } else {
             let output_path = self.cache_dir.join(format!("{video_id}.{AUDIO_EXT}"));
             let output_str = output_path.to_string_lossy().to_string();
@@ -237,11 +270,11 @@ impl AppState {
                 )));
             }
         };
-        if is_live {
-            // Live tracks never publish a file, so this check is their commit
-            // point. The guard is dropped before the Redis call: holding it
-            // across Redis I/O would let a stalled Redis delay stopping
-            // unrelated yt-dlp processes.
+        if published_path.is_none() {
+            // With no file to publish, this check is the commit point. The
+            // guard is dropped before the Redis call: holding it across Redis
+            // I/O would let a stalled Redis delay stopping unrelated yt-dlp
+            // processes.
             let _commit_guard = self.download_cancel.lock().await;
             if cancel.is_cancelled() {
                 return Err(DownloadError::Cancelled);
@@ -355,6 +388,7 @@ impl AppState {
     pub fn start_track_recovery(
         self: &Arc<Self>,
         video_ids: Vec<String>,
+        streamed: std::collections::HashSet<String>,
         cancel: CancellationToken,
     ) {
         let state = self.clone();
@@ -368,9 +402,12 @@ impl AppState {
                 "recovered",
                 "deleted while downloading",
             );
-            let (state, cancel, snapshot) = (&state, &cancel, &snapshot);
+            let (state, cancel, snapshot, streamed) = (&state, &cancel, &snapshot, &streamed);
             job.run(&video_ids, cancel, |video_id| async move {
-                let track = state.extract_audio(&watch_url(&video_id), cancel).await?;
+                let mode = FetchMode::new(streamed.contains(&video_id));
+                let track = state
+                    .extract_audio(&watch_url(&video_id), mode, cancel)
+                    .await?;
                 state.restore_order_position(&video_id, snapshot).await;
                 // Reflect each recovery as it lands, so a long job is visibly
                 // making progress in the track list.
@@ -436,9 +473,12 @@ impl AppState {
         // What YouTube reports about the video is replaced; what describes the
         // local copy is carried over. `is_live` especially: a stream that has
         // since ended reports itself as a normal video, and adopting that would
-        // leave an entry claiming a cached file it never had.
+        // leave an entry claiming a cached file it never had. `streamed` is
+        // the same kind of fact: how the library keeps the audio, not what the
+        // video is.
         let track = AudioTrack {
             is_live: existing.is_live,
+            streamed: existing.streamed,
             ..AudioTrack::from_meta(
                 video_id,
                 &meta,

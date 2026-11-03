@@ -41,6 +41,31 @@ pub fn is_auto_token(token: &str) -> bool {
     token.ends_with(AUTO_TOKEN_SUFFIX)
 }
 
+const START_SEGMENT_PREFIX: &str = "from";
+
+/// Append `#from<start_ms>` (ahead of the auto suffix). An Echo playing a relay
+/// that starts mid-track reports positions relative to that start, and the
+/// token is what each event carries back.
+pub fn with_start_offset(token: &str, start_ms: u64) -> String {
+    if start_ms == 0 {
+        return token.to_string();
+    }
+    let (head, auto) = match token.strip_suffix(AUTO_TOKEN_SUFFIX) {
+        Some(head) => (head, AUTO_TOKEN_SUFFIX),
+        None => (token, ""),
+    };
+    format!("{head}#{START_SEGMENT_PREFIX}{start_ms}{auto}")
+}
+
+/// The start recorded by [`with_start_offset`], else zero.
+pub fn token_start_offset(token: &str) -> u64 {
+    token
+        .split('#')
+        .skip(1)
+        .find_map(|segment| segment.strip_prefix(START_SEGMENT_PREFIX)?.parse().ok())
+        .unwrap_or(0)
+}
+
 // ── Data models ──
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +81,10 @@ pub struct AudioTrack {
     /// On air or upcoming; both play via the live relay.
     #[serde(default)]
     pub is_live: bool,
+    /// Added without downloading: every playback relays from the CDN. Never
+    /// set together with `is_live`.
+    #[serde(default)]
+    pub streamed: bool,
     /// Scheduled start (Unix secs) while the stream is upcoming.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduled_start: Option<f64>,
@@ -83,6 +112,11 @@ impl AudioTrack {
     /// sync — so the two cannot disagree about where "too late" is.
     pub fn max_offset_ms(&self) -> Option<u64> {
         (self.duration > 0).then(|| self.duration.saturating_mul(1000).saturating_sub(1000))
+    }
+
+    /// Whether playback is served from a cached file.
+    pub fn keeps_file(&self) -> bool {
+        !self.is_live && !self.streamed
     }
 
     pub(crate) fn extract_channel(meta: &Value) -> String {
@@ -141,6 +175,7 @@ impl AudioTrack {
             duration: Self::extract_duration(meta),
             channel: Self::extract_channel(meta),
             is_live: Self::extract_is_live(meta),
+            streamed: false,
             scheduled_start: Self::extract_scheduled_start(meta),
             created_at,
             file_path,
@@ -512,6 +547,7 @@ mod tests {
             duration: 0,
             channel: "ch".into(),
             is_live: true,
+            streamed: false,
             scheduled_start: Some(1_800_000_000.0),
             created_at: 1.0,
             file_path: String::new(),
@@ -579,6 +615,26 @@ mod tests {
     }
 
     #[test]
+    fn a_start_offset_survives_in_every_token_form() {
+        let plain = with_start_offset(&new_token("dQw4w9WgXcQ"), 90_000);
+        assert_eq!(token_start_offset(&plain), 90_000);
+        assert_eq!(token_track_id(&plain), "dQw4w9WgXcQ");
+        assert!(!is_auto_token(&plain));
+
+        // The auto-continuation marker stays the suffix it is checked as
+        let auto = with_start_offset(&auto_token("dQw4w9WgXcQ"), 5_000);
+        assert_eq!(token_start_offset(&auto), 5_000);
+        assert_eq!(token_track_id(&auto), "dQw4w9WgXcQ");
+        assert!(is_auto_token(&auto));
+
+        // Starting from the top leaves the token as it was
+        let token = new_token("dQw4w9WgXcQ");
+        assert_eq!(with_start_offset(&token, 0), token);
+        assert_eq!(token_start_offset(&token), 0);
+        assert_eq!(token_start_offset("dQw4w9WgXcQ"), 0);
+    }
+
+    #[test]
     fn only_an_auto_token_reads_as_auto_continued() {
         assert!(is_auto_token(&auto_token("dQw4w9WgXcQ")));
         assert!(!is_auto_token(&new_token("dQw4w9WgXcQ")));
@@ -596,6 +652,7 @@ mod tests {
                 duration: 10,
                 channel: String::new(),
                 is_live: false,
+                streamed: false,
                 scheduled_start: None,
                 created_at: 0.0,
                 file_path: "/tmp/a.m4a".into(),
@@ -629,6 +686,7 @@ mod tests {
                 duration: 10,
                 channel: String::new(),
                 is_live: false,
+                streamed: false,
                 scheduled_start: None,
                 created_at: 0.0,
                 file_path: String::new(),

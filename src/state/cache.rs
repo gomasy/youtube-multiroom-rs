@@ -57,10 +57,11 @@ impl AppState {
         // Largest first: the space a cleanup would reclaim is the reason to look.
         orphans.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.id.cmp(&b.id)));
 
-        // A live track never had a file, so it can never be missing one.
+        // A live or streamed track never had a file, so it can never be
+        // missing one.
         let missing = tracks
             .iter()
-            .filter(|t| !t.is_live && !cached.contains(t.id.as_str()))
+            .filter(|t| t.keeps_file() && !cached.contains(t.id.as_str()))
             .cloned()
             .collect();
 
@@ -123,10 +124,11 @@ impl AppState {
     /// same question from the listing it needs anyway, and the two agree
     /// because that path is always the cache entry for the video.
     async fn missing_files(&self, tracks: &[AudioTrack]) -> HashSet<String> {
-        // A live track never had a file, so it can never be missing one.
+        // A live or streamed track never had a file, so it can never be
+        // missing one.
         let expected: Vec<(String, PathBuf)> = tracks
             .iter()
-            .filter(|t| !t.is_live)
+            .filter(|t| t.keeps_file())
             .map(|t| (t.id.clone(), PathBuf::from(&t.file_path)))
             .collect();
         if expected.is_empty() {

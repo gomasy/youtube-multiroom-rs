@@ -53,6 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/api/audio/{audio_id}/stream", get(handlers::stream_audio))
         .route("/api/audio/{audio_id}/live", get(handlers::live_audio))
+        .route("/api/audio/{audio_id}/relay", get(handlers::relay_audio))
         .route("/api/audio/{audio_id}/url", get(handlers::audio_url))
         .route("/api/search", get(handlers::search_youtube))
         .route("/api/tracks", get(handlers::list_tracks))

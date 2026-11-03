@@ -1,15 +1,18 @@
-//! Serving audio bytes: the cached file, the live CDN relay, and the signed URL
-//! the browser needs to play either of them.
+//! Serving audio bytes: the cached file, the CDN relays for live streams and
+//! streamed tracks, and the signed URL the browser needs to play any of them.
 
 use super::{AppError, AppResult, track_or_404};
-use crate::state::{AUDIO_MIME, AppState, run_yt_dlp, watch_url};
+use crate::state::{AUDIO_MIME, AppState, RelaySource, live_source, spawn_reader, stderr_snippet};
 use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::io::SeekFrom;
+use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
@@ -81,70 +84,107 @@ pub async fn stream_audio(
 
 /// GET /api/audio/:id/live
 ///
-/// A live stream cannot be cached, so its CDN HLS URL is resolved per request
-/// and relayed through ffmpeg as ADTS AAC — an Echo cannot play muxed HLS, so
-/// the audio has to be extracted here. The codec is copied where possible.
+/// A live stream cannot be cached, so its CDN HLS URL is resolved per request.
 pub async fn live_audio(
     State(state): State<Arc<AppState>>,
     Path(audio_id): Path<String>,
 ) -> AppResult<Response> {
     let track = track_or_404(&state, &audio_id).await?;
-
     if !track.is_live {
         return Err(AppError::bad_request("Track is not a live stream"));
     }
+    let source = live_source(&audio_id).await.map_err(AppError::internal)?;
+    relay_as_adts(&source, None, None)
+}
 
-    let url = watch_url(&audio_id);
-    // HLS is what ffmpeg handles best; live streams often lack an audio-only
-    // format, so the fallback is the lowest-bitrate muxed one. acodec comes
-    // along to decide whether re-encoding is needed. The timeout is short
-    // because an Echo cannot wait long.
-    let stdout = run_yt_dlp(
-        &[
-            "--print",
-            "urls",
-            "--print",
-            "acodec",
-            "-f",
-            "bestaudio[protocol^=m3u8]/worst[protocol^=m3u8]/bestaudio/worst",
-            "--no-playlist",
-            &url,
-        ],
-        std::time::Duration::from_secs(15),
-    )
-    .await
-    .map_err(|e| AppError::internal(format!("Failed to get live stream URL: {e}")))?;
+#[derive(Deserialize)]
+pub struct RelayQuery {
+    /// Where in the track to start, in milliseconds.
+    #[serde(default)]
+    start: u64,
+}
 
-    // Output is URL (may be multiple lines for DASH) then acodec. Use only the first URL.
-    let stdout_str = String::from_utf8_lossy(&stdout);
-    let lines: Vec<&str> = stdout_str
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .collect();
-    // At least one URL line plus the acodec line; extra URL lines are ignored
-    let [cdn_url, .., acodec] = lines.as_slice() else {
-        return Err(AppError::internal(
-            "yt-dlp returned no usable stream URL and codec",
-        ));
+/// GET /api/audio/:id/relay
+///
+/// A streamed track's audio, relayed from the CDN. The client cannot seek the
+/// relay, so `start` is applied here as an ffmpeg input seek.
+pub async fn relay_audio(
+    State(state): State<Arc<AppState>>,
+    Path(audio_id): Path<String>,
+    Query(query): Query<RelayQuery>,
+) -> AppResult<Response> {
+    let track = track_or_404(&state, &audio_id).await?;
+    if !track.streamed {
+        return Err(AppError::bad_request("Track is not a streamed track"));
+    }
+
+    let start_ms = track
+        .max_offset_ms()
+        .map_or(query.start, |max| query.start.min(max));
+    let remaining =
+        Duration::from_millis(track.duration.saturating_mul(1000).saturating_sub(start_ms));
+    let source = state
+        .relay_source(&audio_id, remaining)
+        .await
+        .map_err(AppError::internal)?;
+
+    let forget = ForgetOnFailure {
+        state: state.clone(),
+        video_id: audio_id,
+        url: source.url.clone(),
     };
+    relay_as_adts(&source, Some(start_ms), Some(forget))
+}
 
+/// The kept relay source to drop if ffmpeg fails, so the retry resolves afresh.
+struct ForgetOnFailure {
+    state: Arc<AppState>,
+    video_id: String,
+    url: String,
+}
+
+/// Stream `source` out through ffmpeg as ADTS AAC, which an Echo can play
+/// where it cannot play muxed HLS or a remote DASH container.
+///
+/// `start_ms` is set for a finite (seekable) source: it reconnects, since
+/// ffmpeg reads only as fast as the Echo drains and the CDN may drop the idle
+/// connection, and seeks to the start when non-zero.
+fn relay_as_adts(
+    source: &RelaySource,
+    start_ms: Option<u64>,
+    forget_on_failure: Option<ForgetOnFailure>,
+) -> AppResult<Response> {
+    let mut cmd = tokio::process::Command::new("ffmpeg");
+    cmd.args(["-loglevel", "error"]);
+    if let Some(start_ms) = start_ms {
+        cmd.args(["-reconnect", "1", "-reconnect_on_network_error", "1"])
+            .args(["-reconnect_delay_max", "5"]);
+        if start_ms > 0 {
+            cmd.arg("-ss").arg(format!("{start_ms}ms"));
+        }
+    }
+    if !source.headers.is_empty() {
+        cmd.arg("-headers").arg(&source.headers);
+    }
     // ADTS carries only AAC, so anything else (Opus, or the "unknown" common in
-    // muxed HLS) is transcoded rather than copied.
+    // muxed HLS) is transcoded.
+    let acodec = &source.acodec;
     let codec_args: &[&str] = if acodec.starts_with("mp4a") || acodec.starts_with("aac") {
         &["-c:a", "copy"]
     } else {
-        tracing::info!("Live audio codec '{acodec}' is not AAC, transcoding");
+        tracing::info!("Relayed audio codec '{acodec}' is not AAC, transcoding");
         &["-c:a", "aac", "-b:a", "128k"]
     };
-
-    let mut child = tokio::process::Command::new("ffmpeg")
-        .args(["-loglevel", "error", "-i", cdn_url, "-vn"])
+    let mut child = cmd
+        .arg("-i")
+        .arg(&source.url)
+        .arg("-vn")
         .args(codec_args)
         .args(["-f", "adts", "pipe:1"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| AppError::internal(format!("Failed to run ffmpeg: {e}")))?;
 
@@ -152,21 +192,24 @@ pub async fn live_audio(
         .stdout
         .take()
         .ok_or_else(|| AppError::internal("Failed to capture ffmpeg stdout"))?;
-    let stderr = child.stderr.take();
+    let stderr = child.stderr.take().map(spawn_reader);
 
-    // An Echo disconnecting closes the response body and the stdout pipe, so
-    // ffmpeg exits on its own via EPIPE. Reaped here to avoid a zombie, with
-    // whatever it said on stderr logged.
+    // The client leaving closes the pipe and ffmpeg exits via EPIPE; reaped
+    // here, with its stderr logged.
     tokio::spawn(async move {
-        let mut err_buf = String::new();
-        if let Some(mut stderr) = stderr {
-            let _ = stderr.read_to_string(&mut err_buf).await;
-        }
-        let err = err_buf.trim();
-        match child.wait().await {
+        let status = child.wait().await;
+        let err = stderr_snippet(stderr).await;
+        match status {
             Ok(status) if err.is_empty() => tracing::info!("ffmpeg exited: {status}"),
             Ok(status) => tracing::warn!("ffmpeg exited: {status}: {err}"),
             Err(e) => tracing::warn!("ffmpeg wait error: {e}"),
+        }
+        // A broken pipe is the client leaving; anything else may be the source.
+        if !err.is_empty()
+            && !err.contains("Broken pipe")
+            && let Some(f) = forget_on_failure
+        {
+            f.state.forget_relay_source(&f.video_id, &f.url).await;
         }
     });
 
@@ -190,7 +233,7 @@ pub async fn audio_url(
     Path(audio_id): Path<String>,
 ) -> AppResult<Json<Value>> {
     let track = track_or_404(&state, &audio_id).await?;
-    let url = crate::auth::stream_path(&state.stream_secret, &track.id, track.is_live);
+    let url = crate::auth::stream_path(&state.stream_secret, &track, 0);
     Ok(Json(json!({ "url": url })))
 }
 

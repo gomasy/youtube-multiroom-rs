@@ -16,6 +16,7 @@
 //! - [`library`] — exporting the library structure and importing it back
 //! - [`download`] — downloading audio and refreshing track metadata
 //! - [`progress`] — what clients are told about that work while it runs
+//! - [`relay`] — where a streamed track's audio comes from at playback time
 //! - [`remux`] — rebuilding a downloaded file's container before it is served
 //! - [`job`] — the stopping rules shared by the background per-video jobs
 //! - [`ytdlp`] — running yt-dlp and reaping its process group
@@ -47,20 +48,24 @@ mod model;
 mod playback;
 mod playlist;
 mod progress;
+mod relay;
 mod remux;
 mod track;
 mod url;
 mod ytdlp;
 
+pub use download::FetchMode;
 pub use library::LIBRARY_EXPORT_VERSION;
 pub use model::{
     AudioTrack, CacheReport, DeviceState, DeviceUpdate, LibraryExport, PendingCommand, PlayRequest,
     ReorderOutcome, ReorderRequest, SeekRequest, SyncRequest, WriteOutcome, auto_token,
-    is_auto_token, new_token, token_track_id,
+    is_auto_token, new_token, token_start_offset, token_track_id, with_start_offset,
 };
+pub use relay::{RelaySource, live_source};
 pub(crate) use url::watch_url;
 pub use url::{UrlKind, classify_url};
 pub use ytdlp::{DownloadError, run_yt_dlp};
+pub(crate) use ytdlp::{spawn_reader, stderr_snippet};
 
 pub(crate) const REDIS_KEY_ACTIVE_PLAYLIST: &str = "youtube:active_playlist";
 pub(crate) const REDIS_KEY_DEVICES: &str = "youtube:devices";
@@ -196,6 +201,9 @@ pub struct AppState {
     /// record_playback_failure). Tracked per-track so interleaved failures from
     /// the current and ENQUEUE'd next track don't reset each other's count.
     playback_failures: Mutex<HashMap<String, HashMap<String, FailureRecord>>>,
+    /// Resolved CDN sources of streamed tracks (video ID → source), kept until
+    /// shortly before they expire (see [`relay`]). In-process only.
+    relay_sources: Mutex<HashMap<String, relay::SourceSlot>>,
     /// Bumped when the sleep timer is set/cancelled; the spawned timer task
     /// checks this to know if it's been superseded.
     sleep_timer_gen: AtomicU64,
@@ -265,6 +273,7 @@ impl AppState {
             downloads: Mutex::new(HashMap::new()),
             download_cancel: Mutex::new(CancellationToken::new()),
             playback_failures: Mutex::new(HashMap::new()),
+            relay_sources: Mutex::new(HashMap::new()),
             sleep_timer_gen: AtomicU64::new(0),
             tracks_rev: AtomicU64::new(0),
         }))

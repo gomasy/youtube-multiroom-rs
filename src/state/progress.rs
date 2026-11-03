@@ -97,12 +97,18 @@ impl AppState {
         }
     }
 
-    /// Set the title after the metadata fetch. Live streams are never
-    /// downloaded, so only a non-live job advances past the metadata stage.
-    pub(super) async fn set_download_meta(&self, video_id: &str, title: &str, is_live: bool) {
+    /// Set the title after the metadata fetch. Live and streamed tracks are
+    /// never downloaded, so only a job that downloads advances past the
+    /// metadata stage.
+    pub(super) async fn set_download_meta(
+        &self,
+        video_id: &str,
+        title: &str,
+        skips_download: bool,
+    ) {
         self.update_download(video_id, |d| {
             d.title = title.to_string();
-            if !is_live {
+            if !skips_download {
                 d.status = DownloadStatus::Downloading;
             }
             true

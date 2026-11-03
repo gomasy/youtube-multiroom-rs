@@ -9,7 +9,8 @@ use super::ReqCtx;
 use super::next_up::{NextUp, queued_or_auto_next};
 use super::response::{end_session, play_directive, play_response, stop_directive};
 use crate::state::{
-    AudioTrack, DeviceUpdate, auto_token, is_auto_token, new_token, token_track_id,
+    AudioTrack, DeviceUpdate, auto_token, is_auto_token, new_token, token_start_offset,
+    token_track_id,
 };
 use serde_json::Value;
 
@@ -25,8 +26,15 @@ struct AudioEvent<'a> {
     token: &'a str,
     /// The track the token names, whether or not it is still registered.
     track_id: &'a str,
-    /// Playback position the event reports, in milliseconds.
+    /// Playback position in the track, in milliseconds.
     offset: u64,
+}
+
+/// The position `state` reports, put on the track's timeline (see
+/// `with_start_offset`).
+fn track_offset(token: &str, state: &Value) -> u64 {
+    let reported = state["offsetInMilliseconds"].as_u64().unwrap_or(0);
+    token_start_offset(token).saturating_add(reported)
 }
 
 pub(super) async fn on_audio_event(ctx: &ReqCtx<'_>, event_type: &str, body: &Value) -> Value {
@@ -34,9 +42,7 @@ pub(super) async fn on_audio_event(ctx: &ReqCtx<'_>, event_type: &str, body: &Va
     let event = AudioEvent {
         token,
         track_id: token_track_id(token),
-        offset: body["request"]["offsetInMilliseconds"]
-            .as_u64()
-            .unwrap_or(0),
+        offset: track_offset(token, &body["request"]),
     };
 
     match event_type {
@@ -228,7 +234,7 @@ async fn retry_playback(
     // started, the pending command's offset, so a web seek is preserved and
     // PlaybackStarted still recognizes the pending it satisfies.
     let offset_ms = if failed_current {
-        cps["offsetInMilliseconds"].as_u64().unwrap_or(0)
+        track_offset(token, cps)
     } else {
         ctx.state
             .peek_pending(&ctx.device_id)

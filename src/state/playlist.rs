@@ -1,6 +1,7 @@
 //! Named playlists, the active playback scope, and importing a YouTube
 //! playlist into a local one.
 
+use super::download::FetchMode;
 use super::job::{VideoJob, Visited};
 use super::matching::{best_scored, fold, match_score};
 use super::model::{AudioTrack, Playlist, PlaylistImportInfo, PlaylistJson, WriteOutcome};
@@ -386,11 +387,12 @@ impl AppState {
     pub async fn import_playlist(
         self: &Arc<Self>,
         list_id: &str,
+        mode: FetchMode,
         cancel: &CancellationToken,
     ) -> Result<PlaylistImportInfo, DownloadError> {
         let key = playlist_progress_key(list_id);
         let stamp = self.begin_progress(&key, list_id).await;
-        let result = self.expand_and_start_import(list_id, cancel).await;
+        let result = self.expand_and_start_import(list_id, mode, cancel).await;
         self.settle_progress(&key, stamp, &result).await;
         result
     }
@@ -398,6 +400,7 @@ impl AppState {
     async fn expand_and_start_import(
         self: &Arc<Self>,
         list_id: &str,
+        mode: FetchMode,
         cancel: &CancellationToken,
     ) -> Result<PlaylistImportInfo, DownloadError> {
         let url = format!("https://www.youtube.com/playlist?list={list_id}");
@@ -482,7 +485,9 @@ impl AppState {
             );
             let (state, cancel, playlist) = (&state, &cancel, &playlist);
             job.run(&video_ids, cancel, |video_id| async move {
-                let track = state.extract_audio(&watch_url(&video_id), cancel).await?;
+                let track = state
+                    .extract_audio(&watch_url(&video_id), mode, cancel)
+                    .await?;
                 match state.add_playlist_track(&playlist.id, &track.id).await {
                     WriteOutcome::Written => {
                         // Reflect each successfully imported track in the lists

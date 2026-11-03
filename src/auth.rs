@@ -1,4 +1,4 @@
-use crate::state::AppState;
+use crate::state::{AppState, AudioTrack};
 use axum::{
     extract::{Request, State},
     http::StatusCode,
@@ -102,12 +102,24 @@ fn stream_query(secret: &str, audio_id: &str) -> String {
 
 /// Build a signed stream path for a track, `secret` being
 /// [`AppState::stream_secret`]. Neither Echo nor the browser audio element can
-/// attach Authorization headers, so playback URLs rely on this signature. Live
-/// streams use /live (CDN relay) instead of /stream (local file).
-pub fn stream_path(secret: &str, audio_id: &str, is_live: bool) -> String {
-    let endpoint = if is_live { "live" } else { "stream" };
+/// attach Authorization headers, so playback URLs rely on this signature.
+/// `start_ms` (read by /relay only) is unsigned: it grants nothing extra.
+pub fn stream_path(secret: &str, track: &AudioTrack, start_ms: u64) -> String {
+    let audio_id = &track.id;
+    let endpoint = if track.is_live {
+        "live"
+    } else if track.streamed {
+        "relay"
+    } else {
+        "stream"
+    };
     let query = stream_query(secret, audio_id);
-    format!("/api/audio/{audio_id}/{endpoint}?{query}")
+    let start = if start_ms > 0 {
+        format!("&start={start_ms}")
+    } else {
+        String::new()
+    };
+    format!("/api/audio/{audio_id}/{endpoint}?{query}{start}")
 }
 
 /// Whether `?token=` authenticates this request. Only the WebSocket handshake
@@ -160,12 +172,13 @@ fn hex(bytes: &[u8]) -> String {
     out
 }
 
-/// Extract the track ID from "/api/audio/{id}/stream" or "/api/audio/{id}/live".
+/// Extract the track ID from "/api/audio/{id}/stream", ".../live" or ".../relay".
 /// The paths must match the route definitions in main.rs and URL generation in alexa.rs.
 fn audio_endpoint_id(path: &str) -> Option<&str> {
     let rest = path.strip_prefix("/api/audio/")?;
     rest.strip_suffix("/stream")
         .or_else(|| rest.strip_suffix("/live"))
+        .or_else(|| rest.strip_suffix("/relay"))
 }
 
 /// Extract a value from a query string. Percent-decodes %XX sequences so that
@@ -270,8 +283,17 @@ mod tests {
     fn stream_path_is_always_signed() {
         // An API_TOKEN and a generated key alike produce a verifiable signature
         for secret in ["secret", &random_secret().expect("entropy is available")] {
-            for (is_live, endpoint) in [(false, "stream"), (true, "live")] {
-                let path = stream_path(secret, "abc123", is_live);
+            for (is_live, streamed, endpoint) in [
+                (false, false, "stream"),
+                (true, false, "live"),
+                (false, true, "relay"),
+            ] {
+                let track = AudioTrack {
+                    is_live,
+                    streamed,
+                    ..AudioTrack::from_meta("abc123", &serde_json::Value::Null, 0.0, String::new())
+                };
+                let path = stream_path(secret, &track, 0);
                 let (base, query) = path.split_once('?').expect("signed path has a query");
                 assert_eq!(base, format!("/api/audio/abc123/{endpoint}"));
                 assert!(verify_stream_query(secret, "abc123", Some(query)));
@@ -295,6 +317,7 @@ mod tests {
             Some("abc123")
         );
         assert_eq!(audio_endpoint_id("/api/audio/abc123/live"), Some("abc123"));
+        assert_eq!(audio_endpoint_id("/api/audio/abc123/relay"), Some("abc123"));
         assert_eq!(audio_endpoint_id("/api/audio/abc123/other"), None);
         assert_eq!(audio_endpoint_id("/api/tracks"), None);
     }

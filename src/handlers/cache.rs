@@ -55,7 +55,7 @@ pub async fn repair_cache(
         // Captured before spawning, so a Stop all received immediately
         // afterwards still cancels this job.
         let cancel = state.download_token().await;
-        state.start_track_recovery(track_ids, cancel);
+        state.start_track_recovery(track_ids, Default::default(), cancel);
     }
     let locale = client_locale(&headers);
     Ok(Json(json!({

@@ -1,7 +1,9 @@
 //! The WebSocket push channel: a state snapshot on connect, broadcasts after,
 //! and the handful of commands a client can send back.
 
-use crate::state::{AppState, DownloadError, UrlKind, classify_url, tracks_update_message};
+use crate::state::{
+    AppState, DownloadError, FetchMode, UrlKind, classify_url, tracks_update_message,
+};
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
 use axum::response::Response;
@@ -134,7 +136,11 @@ async fn handle_ws_message(
         "ping" => {
             let _ = client_tx.send(json!({ "type": "pong" }).to_string());
         }
-        "extract_audio" => start_extract(state, client_tx, data["url"].as_str()).await,
+        "extract_audio" => {
+            // Absent (an older client) means a download.
+            let mode = FetchMode::new(data["stream"].as_bool().unwrap_or(false));
+            start_extract(state, client_tx, data["url"].as_str(), mode).await;
+        }
         "set_playback_mode" => {
             if let Some(mode) = data["mode"].as_str()
                 && state.set_playback_mode(mode).await
@@ -191,6 +197,7 @@ async fn start_extract(
     state: &Arc<AppState>,
     client_tx: &UnboundedSender<String>,
     url: Option<&str>,
+    mode: FetchMode,
 ) {
     let Some(url) = url else {
         let msg = json!({
@@ -208,22 +215,24 @@ async fn start_extract(
     let url = url.to_string();
     tokio::spawn(async move {
         // Playlist URLs are expanded and trigger a batch import.
-        let outcome: Result<Value, DownloadError> = match classify_url(&url) {
-            UrlKind::Video => state.extract_audio(&url, &cancel).await.map(|track| {
-                state.broadcast_tracks();
-                json!({ "type": "extract_audio_result", "track": track })
-            }),
-            UrlKind::Playlist(list_id) => {
-                state.import_playlist(&list_id, &cancel).await.map(|info| {
-                    json!({
-                        "type": "playlist_import_result",
-                        "name": info.name,
-                        "total": info.total,
-                    })
-                })
-            }
-            UrlKind::Unknown => Err("Could not recognize YouTube URL".into()),
-        };
+        let outcome: Result<Value, DownloadError> =
+            match classify_url(&url) {
+                UrlKind::Video => state.extract_audio(&url, mode, &cancel).await.map(|track| {
+                    state.broadcast_tracks();
+                    json!({ "type": "extract_audio_result", "track": track })
+                }),
+                UrlKind::Playlist(list_id) => state
+                    .import_playlist(&list_id, mode, &cancel)
+                    .await
+                    .map(|info| {
+                        json!({
+                            "type": "playlist_import_result",
+                            "name": info.name,
+                            "total": info.total,
+                        })
+                    }),
+                UrlKind::Unknown => Err("Could not recognize YouTube URL".into()),
+            };
         let result = match outcome {
             Ok(result) => result,
             Err(DownloadError::Cancelled) => json!({ "type": "extract_audio_cancelled" }),
