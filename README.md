@@ -38,12 +38,13 @@ youtube-multiroom-rs/
 │   │   ├── download.rs         # Audio downloading & metadata refresh
 │   │   ├── remux.rs            # Rebuilding a downloaded file's container
 │   │   ├── progress.rs         # Progress reporting & cancellation generation
+│   │   ├── relay.rs            # Resolving & keeping a streamed track's CDN URL
 │   │   ├── job.rs              # Stopping rules for background per-video jobs
 │   │   ├── ytdlp.rs            # yt-dlp invocation & process group reaping
 │   │   └── url.rs              # YouTube URL / video ID validation
 │   └── handlers/           # HTTP / WebSocket handlers, mirroring the split above
 │       ├── mod.rs              # Error type, shared 404 lookups, response locale
-│       ├── audio.rs            # Audio streaming, live relay, signed stream URLs
+│       ├── audio.rs            # Audio streaming, live & streamed relays, signed stream URLs
 │       ├── search.rs           # YouTube search
 │       ├── tracks.rs           # Track listing, reordering, deletion
 │       ├── playlists.rs        # Playlist CRUD & membership
@@ -116,13 +117,13 @@ Setting `API_TOKEN` protects the API with a Bearer token:
 
 - The Web UI prompts for the token on first access (stored in localStorage).
 - API endpoints and the WebSocket require `Authorization: Bearer <token>` (or `?token=` for the WebSocket, which cannot send headers).
-- `/api/audio/{id}/stream` and `/api/audio/{id}/live` accept a signed URL instead, since Echo devices cannot send auth headers: `?exp=<unix>&sig=<hmac>`, HMAC-SHA256 and valid for 24 h. Bearer auth is also accepted.
+- `/api/audio/{id}/stream`, `/api/audio/{id}/live` and `/api/audio/{id}/relay` accept a signed URL instead, since Echo devices cannot send auth headers: `?exp=<unix>&sig=<hmac>`, HMAC-SHA256 and valid for 24 h. Bearer auth is also accepted.
 - `/alexa` is exempt from Bearer auth — every request to it is instead verified as genuinely coming from Alexa (certificate chain validation, body signature, timestamp freshness), whether or not `API_TOKEN` is set. This means you cannot `curl` it manually.
 - Setting `ALEXA_SKILL_ID` additionally requires each request to name your skill. Signature verification only proves a request came from Amazon, so without this anyone who learns your URL can drive your devices from a skill of their own.
 
-Without `API_TOKEN`, no Bearer authentication is required — but the two audio endpoints above still demand a valid signature. Their key is then generated at first start and kept in Redis (`youtube:stream_secret`), so URLs stay valid across restarts and across instances sharing one Redis; delete the key to invalidate every URL already issued. With `API_TOKEN` set, the token itself is the key — changing it invalidates the URLs already issued.
+Without `API_TOKEN`, no Bearer authentication is required — but the audio endpoints above still demand a valid signature. Their key is then generated at first start and kept in Redis (`youtube:stream_secret`), so URLs stay valid across restarts and across instances sharing one Redis; delete the key to invalidate every URL already issued. With `API_TOKEN` set, the token itself is the key — changing it invalidates the URLs already issued.
 
-This matters when the server sits behind a reverse proxy that authenticates the Web UI itself: those two endpoints have to be excluded from it for an Echo to reach them, and the signature is what keeps the exclusion from being an open door. It is not a substitute for `API_TOKEN` on an otherwise exposed server — `/api/audio/{id}/url` mints signed URLs, and without a token nothing stops anyone from asking it.
+This matters when the server sits behind a reverse proxy that authenticates the Web UI itself: those endpoints have to be excluded from it for an Echo to reach them, and the signature is what keeps the exclusion from being an open door. It is not a substitute for `API_TOKEN` on an otherwise exposed server — `/api/audio/{id}/url` mints signed URLs, and without a token nothing stops anyone from asking it.
 
 ### Internationalization
 
@@ -209,7 +210,7 @@ An install keeps the manifest and its icons on the device and re-fetches them la
 ## Usage
 
 1. Open `http://localhost:8888`
-2. Paste a YouTube URL (auto-extracted on paste), or type keywords and press 検索 to search and pick a result. A playlist URL (`playlist?list=...`) bulk-imports its videos. The box clears as soon as the request is sent, so URLs can be queued back to back — every accepted request appears in the progress list, which lives on the server and survives a reload
+2. Paste a YouTube URL (auto-extracted on paste), or type keywords and press 検索 to search and pick a result. A playlist URL (`playlist?list=...`) bulk-imports its videos. The box clears as soon as the request is sent, so URLs can be queued back to back — every accepted request appears in the progress list, which lives on the server and survives a reload. Tick 「ストリーミング（ダウンロードしない）」 below the box to add videos without downloading them (see [Streaming Mode](#streaming-mode))
 3. Say **「アレクサ、YouTube プレーヤーを開いて」** to each Echo
 4. Select devices in the Web UI and click play, then say the phrase again on each Echo to start playback
 5. Optionally pick a playback mode (off / loop / shuffle) to auto-play the next track, and narrow the scope to a playlist with 再生範囲
@@ -285,6 +286,20 @@ Caveats:
 - A track added while live keeps its `is_live` flag after the broadcast ends; delete and re-add it to cache the archived video
 - Playback starts a few segments behind the live edge (typical HLS latency)
 
+### Streaming Mode
+
+A regular video can also be added without downloading it: tick 「ストリーミング（ダウンロードしない）」 below the URL box (the choice is remembered per browser) and every video, search result or playlist added while it is on is registered with metadata only and a `streamed` flag. Nothing is written to `audio_cache/`, so adding is instant and takes no disk space; the library marks such rows with a **STREAM** badge.
+
+At playback time, `GET /api/audio/{id}/relay` resolves the audio-only CDN URL via yt-dlp (AAC preferred) and relays it through ffmpeg as ADTS AAC, as a live stream is. Resolving takes a few seconds, so the URL is kept in memory until 30 minutes before the `expire` it carries (at most 5 h), and dropped early if ffmpeg reports an error, so the retry after a `PlaybackFailed` resolves afresh.
+
+The relay cannot be seeked by the Echo, so seeking happens on the server: `?start=<ms>` is applied as an ffmpeg input seek, which reads the container index and fetches from that point rather than everything before it. A play directive for a streamed track puts the start position in the URL, tells the Echo to play from `offsetInMilliseconds: 0`, and appends `#from<ms>` to the AudioPlayer token; every position an event reports is put back on the track's timeline by adding that start. Web UI seek, device sync, resume after a pause and retry-from-position therefore all work as they do for a cached track. The browser preview seeks the same way, by reopening the relay from the new position.
+
+Caveats:
+
+- Every playback depends on YouTube being reachable, and a seek takes a few seconds to start
+- Streamed tracks are not recoverable by the `audio_cache/` scan — if Redis is wiped, re-add them. A library export records the flag, and an import with audio fetching re-registers them as streamed
+- Adding a streamed video again with streaming off downloads it and turns it into a cached track; adding an already downloaded video with streaming on keeps the download
+
 ### Playback Modes
 
 What happens when a track ends is set by a global playback mode, persisted in Redis and defaulting to `off`:
@@ -319,7 +334,7 @@ A live stream is queued from zero instead: it has no position to match, and the 
 
 The cache directory and the library drift apart in both directions, and neither direction is visible from the track list alone. `GET /api/cache` reports both, and the 「メンテナンス」 panel is where they surface:
 
-- **Missing audio** — a track registered with no file behind it (Redis restored from a backup, a file deleted by hand). It fails only when an Echo is asked for it, so the library list marks the row 「音源なし」 and 「欠損を再取得」 re-downloads every such track. Live tracks never had a file and are never counted.
+- **Missing audio** — a track registered with no file behind it (Redis restored from a backup, a file deleted by hand). It fails only when an Echo is asked for it, so the library list marks the row 「音源なし」 and 「欠損を再取得」 re-downloads every such track. Live and streamed tracks never had a file and are never counted.
 - **Orphaned files** — a cached file no registered track claims, left by a deletion that could not reach Redis. 「不要を削除」 removes them. Only files older than ten minutes count: a download publishes its file into the cache moments before it registers the track, and a young unclaimed file is far more likely to be a download landing right now.
 
 A recovery is an ordinary download, which prepends — right for a track being added, wrong for one being repaired. So the order list is snapshotted first and each finished track is put back just after the last id that preceded it there and is still present, which leaves the rest of the order exactly as concurrent edits left it.
@@ -350,7 +365,7 @@ A sleep timer can be set from the Web UI (15 min, 30 min, 1 h, 3 h, 6 h). On exp
 
 ### Browser Preview
 
-The Now Playing card has a small preview player for checking a track before sending it to the Echos. Since `<audio>` cannot send an `Authorization` header, the client first calls `GET /api/audio/{id}/url` (Bearer-authenticated) for a signed stream URL — the same HMAC scheme Echo playback uses — and feeds that to the element. Live tracks are relayed through `/live` and play without seeking.
+The Now Playing card has a small preview player for checking a track before sending it to the Echos. Since `<audio>` cannot send an `Authorization` header, the client first calls `GET /api/audio/{id}/url` (Bearer-authenticated) for a signed stream URL — the same HMAC scheme Echo playback uses — and feeds that to the element. Live tracks are relayed through `/live` and play without seeking; streamed tracks are relayed through `/relay`, and a seek reopens it with `&start=<ms>`.
 
 ### Static Assets
 
@@ -367,7 +382,7 @@ Production builds also pass `--no-source-maps` — the maps are 2 MB against a 2
 
 ### WebSocket Protocol
 
-Audio extraction runs over the WebSocket to avoid reverse proxy read timeouts. The client sends `{ "type": "extract_audio", "url": "..." }` and receives `extract_audio_result`, `extract_audio_error` or `extract_audio_cancelled`; a playlist URL instead answers with `playlist_import_result` (`name`, `total`) once the background import has started. Each request runs on its own task and is answered exactly once, so several can be in flight on one socket — two requests for the same video are serialized server-side, and the second gets the first's result from the cache.
+Audio extraction runs over the WebSocket to avoid reverse proxy read timeouts. The client sends `{ "type": "extract_audio", "url": "...", "stream": false }` (`stream: true` registers without downloading; absent means `false`) and receives `extract_audio_result`, `extract_audio_error` or `extract_audio_cancelled`; a playlist URL instead answers with `playlist_import_result` (`name`, `total`) once the background import has started. Each request runs on its own task and is answered exactly once, so several can be in flight on one socket — two requests for the same video are serialized server-side, and the second gets the first's result from the cache.
 
 The client can also send `cancel_downloads`, `set_playback_mode` (`"off" | "loop" | "shuffle"`), `set_active_playlist` (playlist id or null), `set_sleep_timer` (`minutes`, null or 0 to cancel), and `ping` (answered with `pong`).
 
@@ -391,6 +406,7 @@ Broadcast frames:
 |---|---|---|---|
 | GET | `/api/audio/{id}/stream` | Signed URL | Stream m4a audio (Range supported; see below) |
 | GET | `/api/audio/{id}/live` | Signed URL | Relay live stream audio as ADTS AAC via ffmpeg |
+| GET | `/api/audio/{id}/relay` | Signed URL | Relay a streamed track's audio as ADTS AAC via ffmpeg (`?start=<ms>` seeks) |
 | GET | `/api/audio/{id}/url` | Yes | Get a signed stream URL for browser preview |
 | GET | `/api/search` | Yes | Search YouTube (`q`, optional `limit`) |
 | GET | `/api/tracks` | Yes | List tracks in order (paginated, optional `playlist` and `q`) |
