@@ -295,18 +295,30 @@ impl AppState {
     ) -> ReorderOutcome {
         // Serialize to prevent interleaving changes between read and full replace
         let _guard = self.order_lock.lock().await;
-        let (key, mut ids) = match playlist_id {
-            Some(pid) => (playlist_key(pid), self.playlist_track_ids(pid).await),
-            None => (
-                REDIS_KEY_TRACKS_ORDER.to_string(),
-                self.list_tracks().await.into_iter().map(|t| t.id).collect(),
-            ),
+        let (key, ids) = match playlist_id {
+            Some(pid) => {
+                let mut ids = self.playlist_track_ids(pid).await;
+                let Some(pos) = ids.iter().position(|id| id == track_id) else {
+                    return ReorderOutcome::NotInList;
+                };
+                let id = ids.remove(pos);
+                ids.insert(new_index.min(ids.len()), id);
+                (playlist_key(pid), ids)
+            }
+            None => {
+                // Edited as stored, not rebuilt from list_tracks, so import
+                // placeholders survive.
+                let Ok(stored) = self.try_track_order().await else {
+                    return ReorderOutcome::Failed;
+                };
+                let listed: Vec<String> =
+                    self.list_tracks().await.into_iter().map(|t| t.id).collect();
+                let Some(ids) = move_in_library_order(stored, &listed, track_id, new_index) else {
+                    return ReorderOutcome::NotInList;
+                };
+                (REDIS_KEY_TRACKS_ORDER.to_string(), ids)
+            }
         };
-        let Some(pos) = ids.iter().position(|id| id == track_id) else {
-            return ReorderOutcome::NotInList;
-        };
-        let id = ids.remove(pos);
-        ids.insert(new_index.min(ids.len()), id);
 
         if self.write_order_list(&key, &ids).await {
             ReorderOutcome::Moved
@@ -644,6 +656,40 @@ fn random_track_from(mut tracks: Vec<AudioTrack>, current_id: &str) -> Option<Au
     Some(tracks.swap_remove(nanos % tracks.len()))
 }
 
+/// The stored library order after moving `track_id` to `new_index` of
+/// `listed` (what the client sees). `stored` may hold placeholders, so the
+/// index is resolved via the neighbouring listed track.
+fn move_in_library_order(
+    mut stored: Vec<String>,
+    listed: &[String],
+    track_id: &str,
+    new_index: usize,
+) -> Option<Vec<String>> {
+    if !listed.iter().any(|id| id == track_id) {
+        return None;
+    }
+    let known: HashSet<&str> = stored.iter().map(String::as_str).collect();
+    let unordered: Vec<String> = listed
+        .iter()
+        .filter(|id| !known.contains(id.as_str()))
+        .cloned()
+        .collect();
+    stored.extend(unordered);
+    stored.retain(|id| id != track_id);
+
+    let others: Vec<&String> = listed.iter().filter(|id| *id != track_id).collect();
+    let at = match others.get(new_index) {
+        Some(next) => stored.iter().position(|id| id == *next),
+        None => others
+            .last()
+            .and_then(|last| stored.iter().position(|id| id == *last))
+            .map(|i| i + 1),
+    }
+    .unwrap_or(stored.len());
+    stored.insert(at, track_id.to_string());
+    Some(stored)
+}
+
 /// Where `video_id` belongs in `current` (which no longer holds it) to keep the
 /// order `snapshot` gives it: just after the last id preceding it there that is
 /// still present. Nothing preceding it survived, so the front.
@@ -858,5 +904,26 @@ mod tests {
         // An id the snapshot has no opinion about goes to the end, the only
         // place that displaces nothing
         assert_eq!(anchored_index(&ids(&["a", "b"]), &snapshot, "zz"), 2);
+    }
+
+    #[test]
+    fn a_moved_track_lands_by_its_listed_neighbours() {
+        // "p1" and "p2" are import placeholders: stored, never listed
+        let stored = ids(&["p1", "p2", "a", "b", "c"]);
+        let listed = ids(&["a", "b", "c"]);
+        let moved = |id, to| move_in_library_order(stored.clone(), &listed, id, to);
+        assert_eq!(moved("a", 2), Some(ids(&["p1", "p2", "b", "c", "a"])));
+        assert_eq!(moved("c", 0), Some(ids(&["p1", "p2", "c", "a", "b"])));
+        assert_eq!(moved("zz", 0), None);
+    }
+
+    #[test]
+    fn a_move_writes_out_tracks_missing_from_the_stored_order() {
+        let stored = ids(&["a", "p", "b"]);
+        let listed = ids(&["a", "b", "new"]);
+        assert_eq!(
+            move_in_library_order(stored, &listed, "a", 1),
+            Some(ids(&["p", "b", "a", "new"]))
+        );
     }
 }
