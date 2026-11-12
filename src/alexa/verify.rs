@@ -106,10 +106,14 @@ fn cert_http_client() -> Result<&'static reqwest::Client, String> {
 /// Verify request body authenticity using signature headers and the certificate chain.
 pub async fn verify_request(headers: &HeaderMap, body: &[u8]) -> Result<(), String> {
     let cert_url = header_str(headers, "signaturecertchainurl")?;
-    // Prefer SHA-256 signature (Signature-256) if available; fall back to legacy SHA-1
-    let (sig_b64, digest) = match header_str(headers, "signature-256") {
-        Ok(s) => (s, MessageDigest::sha256()),
-        Err(_) => (header_str(headers, "signature")?, MessageDigest::sha1()),
+    // Prefer SHA-256; fall back to legacy SHA-1 only when Signature-256 is absent
+    let (sig_b64, digest) = if headers.contains_key("signature-256") {
+        (
+            header_str(headers, "signature-256")?,
+            MessageDigest::sha256(),
+        )
+    } else {
+        (header_str(headers, "signature")?, MessageDigest::sha1())
     };
 
     let cert_url = validate_cert_url(cert_url)?;
