@@ -312,7 +312,7 @@ On `AudioPlayer.PlaybackNearlyFinished` the server picks the next track and enqu
 
 ### Playlists
 
-Tracks can be organized into named playlists, created from the Web UI or by an import. A playlist stores an ordered list of track ids in `youtube:playlist:{id}` and shares the library's files, so adding or removing entries never touches the cache. Playlist rows reorder by dragging, as the library does. Deleting a track from the library removes it from every playlist.
+Tracks can be organized into named playlists, created from the Web UI or by an import. Names are unique: creating or renaming to a name another playlist already has is rejected with `409 Conflict`. A playlist stores an ordered list of track ids in `youtube:playlist:{id}` and shares the library's files, so adding or removing entries never touches the cache. Playlist rows reorder by dragging, as the library does. Deleting a track from the library removes it from every playlist.
 
 Pasting a YouTube playlist URL (or any YouTube URL with `list=` but no `v=`) bulk-imports it: the playlist is expanded with `yt-dlp --flat-playlist` (capped at 100 entries), a local playlist of the same name is created or appended to, and each video is downloaded sequentially in the background with the usual progress display. Videos that fail are skipped. A watch URL carrying both `v=` and `list=` is treated as a single video.
 

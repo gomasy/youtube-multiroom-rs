@@ -70,6 +70,19 @@ export async function deleteTrack(trackId: string, onUnauthorized?: () => void):
   await authOk(trackPath(trackId), "history.deleteFailed", { method: "DELETE" }, onUnauthorized);
 }
 
+/** authOk for the endpoints that name a playlist, where a 409 means the name is taken. */
+async function playlistNameOk(
+  url: string,
+  errorKey: string,
+  options: RequestInit,
+  onUnauthorized?: () => void,
+): Promise<Response> {
+  const res = await authFetch(url, options, onUnauthorized);
+  if (res.status === 409) throw new Error(t("api.playlistNameTaken"));
+  if (!res.ok) throw new Error(t(errorKey));
+  return res;
+}
+
 /** authOk that parses the response body as JSON. */
 async function authJson<T>(
   url: string,
@@ -143,12 +156,13 @@ export async function createPlaylist(
   name: string,
   onUnauthorized?: () => void,
 ): Promise<Playlist> {
-  const data = await authJson<{ playlist: Playlist }>(
+  const res = await playlistNameOk(
     "/api/playlists",
     "api.createPlaylistFailed",
     { method: "POST", body: JSON.stringify({ name }) },
     onUnauthorized,
   );
+  const data: { playlist: Playlist } = await res.json();
   return data.playlist;
 }
 
@@ -157,7 +171,7 @@ export async function renamePlaylist(
   name: string,
   onUnauthorized?: () => void,
 ): Promise<void> {
-  await authOk(
+  await playlistNameOk(
     playlistPath(playlistId),
     "api.renamePlaylistFailed",
     { method: "PATCH", body: JSON.stringify({ name }) },

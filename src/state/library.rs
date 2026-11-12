@@ -115,28 +115,15 @@ impl AppState {
     /// Returns the mapping from exported playlist ID to local one, which is
     /// what resolves the exported selection scope.
     async fn restore_playlists(&self, exported: &[PlaylistExport]) -> HashMap<String, String> {
-        let mut by_name: HashMap<String, String> = self
-            .playlists()
-            .await
-            .into_iter()
-            .map(|p| (p.name, p.id))
-            .collect();
-
         let mut mapping = HashMap::new();
         for entry in exported {
             let name = &entry.playlist.name;
-            let local_id = match by_name.get(name) {
-                Some(id) => id.clone(),
-                None => {
-                    let Some(created) = self.create_playlist(name).await else {
-                        // A name this server rejects (empty, too long) is the
-                        // one playlist that cannot be restored; the rest still
-                        // can, so the import goes on without it.
-                        tracing::warn!("Library import: cannot create the playlist '{name}'");
-                        continue;
-                    };
-                    by_name.insert(created.name, created.id.clone());
-                    created.id
+            let local_id = match self.find_or_create_playlist(name).await {
+                Ok((playlist, _)) => playlist.id,
+                Err(e) => {
+                    // Skip it; the other playlists can still be restored.
+                    tracing::warn!("Library import: cannot create the playlist '{name}': {e:?}");
+                    continue;
                 }
             };
 

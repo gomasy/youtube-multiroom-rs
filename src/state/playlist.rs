@@ -4,7 +4,9 @@
 use super::download::FetchMode;
 use super::job::{VideoJob, Visited};
 use super::matching::{best_scored, fold, match_score};
-use super::model::{AudioTrack, Playlist, PlaylistImportInfo, PlaylistJson, WriteOutcome};
+use super::model::{
+    AudioTrack, Playlist, PlaylistImportInfo, PlaylistJson, PlaylistNameError, WriteOutcome,
+};
 use super::progress::playlist_progress_key;
 use super::url::{is_video_id, watch_url};
 use super::ytdlp::{DownloadError, run_yt_dlp_cancellable};
@@ -52,53 +54,80 @@ static ADD_PLAYLIST_TRACKS_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
 });
 
 impl AppState {
-    /// Create a playlist. Name is trimmed and must be 1–PLAYLIST_NAME_MAX_CHARS
-    /// chars. Returns None for invalid names or Redis errors.
-    pub async fn create_playlist(&self, name: &str) -> Option<Playlist> {
-        let name = valid_playlist_name(name)?;
+    /// Create a playlist. The name is trimmed, must be 1–PLAYLIST_NAME_MAX_CHARS
+    /// chars, and must not belong to another playlist.
+    pub async fn create_playlist(&self, name: &str) -> Result<Playlist, PlaylistNameError> {
+        let name = valid_playlist_name(name).ok_or(PlaylistNameError::Invalid)?;
+        let _guard = self.playlist_name_lock.lock().await;
+        if self.playlist_named(name).await.is_some() {
+            return Err(PlaylistNameError::Taken);
+        }
+        self.insert_playlist(name).await
+    }
+
+    /// The playlist with this name, created if there is none. Returns whether
+    /// it was created. Used by the imports, which add to a same-named playlist
+    /// rather than fail.
+    pub(crate) async fn find_or_create_playlist(
+        &self,
+        name: &str,
+    ) -> Result<(Playlist, bool), PlaylistNameError> {
+        let name = valid_playlist_name(name).ok_or(PlaylistNameError::Invalid)?;
+        let _guard = self.playlist_name_lock.lock().await;
+        if let Some(existing) = self.playlist_named(name).await {
+            return Ok((existing, false));
+        }
+        Ok((self.insert_playlist(name).await?, true))
+    }
+
+    /// Rename a playlist. Keeping its own name is not a conflict.
+    pub async fn rename_playlist(
+        &self,
+        playlist_id: &str,
+        name: &str,
+    ) -> Result<(), PlaylistNameError> {
+        let name = valid_playlist_name(name).ok_or(PlaylistNameError::Invalid)?;
+        let _guard = self.playlist_name_lock.lock().await;
+        let mut playlist = self
+            .get_playlist(playlist_id)
+            .await
+            .ok_or(PlaylistNameError::NotFound)?;
+        if self
+            .playlist_named(name)
+            .await
+            .is_some_and(|other| other.id != playlist_id)
+        {
+            return Err(PlaylistNameError::Taken);
+        }
+        playlist.name = name.to_string();
+        self.write_playlist(&playlist).await
+    }
+
+    /// The oldest playlist with this name. Older data may hold duplicates.
+    async fn playlist_named(&self, name: &str) -> Option<Playlist> {
+        self.playlists().await.into_iter().find(|p| p.name == name)
+    }
+
+    /// Callers hold `playlist_name_lock` and have checked the name is free.
+    async fn insert_playlist(&self, name: &str) -> Result<Playlist, PlaylistNameError> {
         let playlist = Playlist {
             id: new_playlist_id(),
             name: name.to_string(),
             created_at: now_f64(),
         };
-        let json_str = serialize_playlist(&playlist)?;
-        let mut conn = self.redis.clone();
-        match conn
-            .hset::<_, _, _, ()>(REDIS_KEY_PLAYLISTS, &playlist.id, json_str)
-            .await
-        {
-            Ok(()) => Some(playlist),
-            Err(e) => {
-                tracing::warn!("Redis error creating playlist: {e}");
-                None
-            }
-        }
+        self.write_playlist(&playlist).await?;
+        Ok(playlist)
     }
 
-    /// Rename a playlist. Returns false if the name is invalid, the playlist
-    /// doesn't exist, or Redis errors occur.
-    pub async fn rename_playlist(&self, playlist_id: &str, name: &str) -> bool {
-        let Some(name) = valid_playlist_name(name) else {
-            return false;
-        };
-        let Some(mut playlist) = self.get_playlist(playlist_id).await else {
-            return false;
-        };
-        playlist.name = name.to_string();
-        let Some(json_str) = serialize_playlist(&playlist) else {
-            return false;
-        };
+    async fn write_playlist(&self, playlist: &Playlist) -> Result<(), PlaylistNameError> {
+        let json_str = serialize_playlist(playlist).ok_or(PlaylistNameError::Failed)?;
         let mut conn = self.redis.clone();
-        match conn
-            .hset::<_, _, _, ()>(REDIS_KEY_PLAYLISTS, playlist_id, json_str)
+        conn.hset::<_, _, _, ()>(REDIS_KEY_PLAYLISTS, &playlist.id, json_str)
             .await
-        {
-            Ok(()) => true,
-            Err(e) => {
-                tracing::warn!("Redis error renaming playlist {playlist_id}: {e}");
-                false
-            }
-        }
+            .map_err(|e| {
+                tracing::warn!("Redis error writing playlist {}: {e}", playlist.id);
+                PlaylistNameError::Failed
+            })
     }
 
     pub async fn get_playlist(&self, playlist_id: &str) -> Option<Playlist> {
@@ -448,22 +477,17 @@ impl AppState {
             .take(PLAYLIST_NAME_MAX_CHARS)
             .collect();
 
-        // Append to an existing playlist with the same name (avoid duplicates on re-import)
-        let playlists = self.playlists().await;
         if cancel.is_cancelled() {
             return Err(DownloadError::Cancelled);
         }
-        let playlist = match playlists.into_iter().find(|p| p.name == name) {
-            Some(p) => p,
-            None => {
-                let p = self
-                    .create_playlist(&name)
-                    .await
-                    .ok_or("Failed to create playlist")?;
-                self.broadcast_playlists().await;
-                p
-            }
-        };
+        // Append to an existing playlist with the same name (avoid duplicates on re-import)
+        let (playlist, created) = self
+            .find_or_create_playlist(&name)
+            .await
+            .map_err(|_| "Failed to create playlist")?;
+        if created {
+            self.broadcast_playlists().await;
+        }
 
         // Spawning the worker is the commit point. The slow Redis work above
         // stays outside the lock so Stop all is never blocked from terminating

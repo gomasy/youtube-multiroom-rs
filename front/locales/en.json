@@ -13,6 +13,7 @@
   "api.fetchTracksFailed": "Failed to fetch track list",
   "api.importFailed": "Import failed",
   "api.playFailed": "Failed to queue playback",
+  "api.playlistNameTaken": "A playlist with this name already exists",
   "api.queueFailed": "Failed to add to queue",
   "api.refreshMetadataFailed": "Failed to start the metadata refresh",
   "api.removeFromPlaylistFailed": "Failed to remove from playlist",

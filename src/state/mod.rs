@@ -58,8 +58,8 @@ pub use download::FetchMode;
 pub use library::LIBRARY_EXPORT_VERSION;
 pub use model::{
     AudioTrack, CacheReport, DeviceState, DeviceUpdate, LibraryExport, PendingCommand, PlayRequest,
-    ReorderOutcome, ReorderRequest, SeekRequest, SyncRequest, WriteOutcome, auto_token,
-    is_auto_token, new_token, token_start_offset, token_track_id, with_start_offset,
+    PlaylistNameError, ReorderOutcome, ReorderRequest, SeekRequest, SyncRequest, WriteOutcome,
+    auto_token, is_auto_token, new_token, token_start_offset, token_track_id, with_start_offset,
 };
 pub use relay::{RelaySource, live_source};
 pub(crate) use url::watch_url;
@@ -187,6 +187,9 @@ pub struct AppState {
     /// Serializes modifications to youtube:tracks_order so reorder's
     /// read-then-replace and extract/remove's LPUSH/LREM don't interleave.
     order_lock: Mutex<()>,
+    /// Serializes playlist name checks with their writes, so two playlists
+    /// cannot end up sharing a name.
+    playlist_name_lock: Mutex<()>,
     /// Per-video coordination between downloads, metadata refreshes and a
     /// deletion of the track they register (see [`ExtractSlot`]). An entry
     /// lives only while one of those is in flight.
@@ -269,6 +272,7 @@ impl AppState {
             stream_secret,
             restoring: AtomicBool::new(false),
             order_lock: Mutex::new(()),
+            playlist_name_lock: Mutex::new(()),
             extract_slots: Mutex::new(HashMap::new()),
             downloads: Mutex::new(HashMap::new()),
             download_cancel: Mutex::new(CancellationToken::new()),

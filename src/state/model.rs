@@ -293,6 +293,17 @@ pub enum ReorderOutcome {
     Failed,
 }
 
+/// Why a playlist could not be created or renamed.
+#[derive(Debug)]
+pub enum PlaylistNameError {
+    /// Empty or too long once trimmed.
+    Invalid,
+    /// Another playlist already has the name.
+    Taken,
+    NotFound,
+    Failed,
+}
+
 /// The outcome of a write that appends to something the client named: a
 /// device's pending slot, its Up Next queue, a playlist's track list. Each is
 /// guarded by a Redis script checking the target still exists, and each caller

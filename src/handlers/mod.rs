@@ -76,6 +76,12 @@ impl AppError {
             message: msg.into(),
         }
     }
+    pub(crate) fn conflict(msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            message: msg.into(),
+        }
+    }
     pub(crate) fn internal(msg: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,

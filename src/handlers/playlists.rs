@@ -4,7 +4,7 @@ use super::{
     AppError, AppResult, TrackIdsRequest, client_locale, playlist_or_404, track_or_404,
     written_or_err,
 };
-use crate::state::AppState;
+use crate::state::{AppState, PlaylistNameError};
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::response::Json;
@@ -29,10 +29,7 @@ pub async fn create_playlist(
     State(state): State<Arc<AppState>>,
     Json(req): Json<PlaylistNameRequest>,
 ) -> AppResult<Json<Value>> {
-    let playlist = state
-        .create_playlist(&req.name)
-        .await
-        .ok_or_else(|| AppError::bad_request("Invalid playlist name"))?;
+    let playlist = state.create_playlist(&req.name).await.map_err(name_error)?;
     state.broadcast_playlists().await;
     // Return in the same shape as the client's Playlist type (count required)
     let mut playlist = serde_json::to_value(&playlist)
@@ -47,11 +44,21 @@ pub async fn rename_playlist(
     Path(playlist_id): Path<String>,
     Json(req): Json<PlaylistNameRequest>,
 ) -> AppResult<Json<Value>> {
-    if !state.rename_playlist(&playlist_id, &req.name).await {
-        return Err(AppError::bad_request("Invalid name or playlist not found"));
-    }
+    state
+        .rename_playlist(&playlist_id, &req.name)
+        .await
+        .map_err(name_error)?;
     state.broadcast_playlists().await;
     Ok(Json(json!({ "status": "ok" })))
+}
+
+fn name_error(e: PlaylistNameError) -> AppError {
+    match e {
+        PlaylistNameError::Invalid => AppError::bad_request("Invalid playlist name"),
+        PlaylistNameError::Taken => AppError::conflict("A playlist with this name already exists"),
+        PlaylistNameError::NotFound => AppError::not_found("Playlist not found"),
+        PlaylistNameError::Failed => AppError::internal("Failed to save playlist"),
+    }
 }
 
 /// DELETE /api/playlists/:id
