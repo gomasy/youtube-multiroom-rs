@@ -84,6 +84,8 @@ impl AppState {
     /// order position and playlist memberships it just earned. The caller
     /// releases it once that sweep is done.
     async fn unregister_track(&self, id: &str) -> Option<(AudioTrack, Arc<ExtractSlot>)> {
+        // Not just a fast path: marking the slot deleted would cancel an
+        // in-flight first download of this video.
         self.get_track(id).await?;
 
         // Claim the video's extract slot for the deletion. A download that
@@ -103,17 +105,20 @@ impl AppState {
     /// The half of a deletion that runs under the video's extract slot.
     async fn unregister_track_locked(&self, id: &str) -> Option<AudioTrack> {
         let track = self.get_track(id).await?;
+        let file = (!track.file_path.is_empty()).then(|| Path::new(&track.file_path));
+        self.delete_track_registration(id, file).await;
+        Some(track)
+    }
 
-        // File first: removing the last track makes the tracks key vanish, and
-        // restore_tracks_if_missing would then rebuild this track from a
-        // surviving file.
-        if !track.file_path.is_empty() {
-            let _ = tokio::fs::remove_file(&track.file_path).await;
+    /// Remove a track's file and registration. File first: if the HDEL empties
+    /// the tracks key, restore_tracks_if_missing would rebuild the track from a
+    /// surviving file.
+    pub(super) async fn delete_track_registration(&self, id: &str, file: Option<&Path>) {
+        if let Some(path) = file {
+            let _ = tokio::fs::remove_file(path).await;
         }
-
         let mut conn = self.redis.clone();
         warn_redis!("deleting track {id}", conn.hdel(REDIS_KEY_TRACKS, id).await);
-        Some(track)
     }
 
     /// Drop every reference to a set of deleted tracks, so nothing left behind

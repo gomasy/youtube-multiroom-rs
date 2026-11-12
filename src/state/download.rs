@@ -321,17 +321,9 @@ impl AppState {
     /// Undo this attempt's registration after a concurrent deletion, leaving
     /// nothing the deletion itself would no longer know to clean up.
     async fn discard_registration(&self, video_id: &str, published_path: Option<&Path>) {
-        // File first, for the reason remove_track deletes it first: if the HDEL
-        // empties the tracks key, restore_tracks_if_missing would rebuild the
-        // track from a surviving file.
-        if let Some(path) = published_path {
-            let _ = tokio::fs::remove_file(path).await;
-        }
+        self.delete_track_registration(video_id, published_path)
+            .await;
         let mut conn = self.redis.clone();
-        warn_redis!(
-            "discarding track {video_id}",
-            conn.hdel(REDIS_KEY_TRACKS, video_id).await
-        );
         let _guard = self.order_lock.lock().await;
         warn_redis!(
             "removing {video_id} from track order",
