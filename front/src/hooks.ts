@@ -167,6 +167,31 @@ const PAGE_FLIP_MS = 650;
 const EDGE_SCROLL_MARGIN = 70;
 const EDGE_SCROLL_STEP = 14;
 
+/**
+ * The loaded page after `moved` is dropped into slot `to`. `from` is its row on
+ * this page, or -1 when it came from another page.
+ */
+function previewMove(
+  tracks: Track[],
+  from: number,
+  to: number,
+  moved: Track,
+  fromEarlierPage: boolean,
+): Track[] {
+  if (from !== -1) {
+    const next = tracks.filter((_, i) => i !== from);
+    next.splice(from < to ? to - 1 : to, 0, tracks[from]);
+    return next;
+  }
+  if (fromEarlierPage) {
+    // The first row is pushed back; slot 0 lands on the previous page.
+    if (to === 0) return tracks;
+    return [...tracks.slice(1, to), moved, ...tracks.slice(to)];
+  }
+  // From a later page the last row is pushed on.
+  return [...tracks.slice(0, to), moved, ...tracks.slice(to)].slice(0, tracks.length);
+}
+
 interface ReorderOptions {
   /**
    * The page on screen, and the page the loaded tracks were fetched for. These
@@ -302,19 +327,17 @@ export function useTrackReorder(opts: ReorderOptions) {
     const origin = dragOrigin.current;
     reset();
     if (id === null || to === null || origin === null) return;
+    const pageStart = (loadedPage - 1) * PER_PAGE;
     const from = tracks.findIndex((t) => t.id === id);
-    const origGlobal = from !== -1 ? (loadedPage - 1) * PER_PAGE + from : origin.globalIndex;
-    const targetGlobal = (loadedPage - 1) * PER_PAGE + to;
+    const origGlobal = from !== -1 ? pageStart + from : origin.globalIndex;
+    const targetGlobal = pageStart + to;
     // Dropping onto either side of where the row already sits is not a move.
     if (targetGlobal === origGlobal || targetGlobal === origGlobal + 1) return;
     // The drop slot is counted with the row still in place, so a move downwards
     // shifts by one once it has been lifted out.
     const newIndex = targetGlobal > origGlobal ? targetGlobal - 1 : targetGlobal;
 
-    const moved = from !== -1 ? tracks[from] : origin.track;
-    const next = tracks.filter((t) => t.id !== id);
-    next.splice(from !== -1 && from < to ? to - 1 : to, 0, moved);
-    setTracks(next.slice(0, PER_PAGE));
+    setTracks(previewMove(tracks, from, to, origin.track, origGlobal < pageStart));
 
     try {
       await reorderTrack(id, newIndex, opts.onUnauthorized, opts.playlistId);
