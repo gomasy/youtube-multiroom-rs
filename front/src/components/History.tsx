@@ -60,6 +60,7 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
 
   const totalPages = lastPage(total);
   const viewingPlaylist = playlists.find((p) => p.id === viewPlaylist) ?? null;
+  const reorderEnabled = total > 1 && !filter;
   const reorder = useTrackReorder({
     page,
     loadedPage,
@@ -69,7 +70,7 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
     setTracks,
     // A filtered view is not showing the stored order, so a drop position in it
     // would name the wrong slot.
-    enabled: total > 1 && !filter,
+    enabled: reorderEnabled,
     playlistId: viewPlaylist,
     onUnauthorized,
     onError: (e) => showApiError(showToast, e),
@@ -518,7 +519,7 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
                     {isSelected && <span className="select-check-mark" />}
                   </span>
                 </span>
-              ) : total > 1 && !filter && (
+              ) : reorderEnabled && (
                 <span
                   className="drag-handle"
                   title={t("history.dragToReorder")}

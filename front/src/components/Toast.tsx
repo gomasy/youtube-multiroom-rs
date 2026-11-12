@@ -7,6 +7,9 @@ interface ToastItem {
 
 let nextId = 0;
 
+const TOAST_MS = 4000;
+const FADE_MS = 300;
+
 export function useToast() {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   /**
@@ -23,7 +26,7 @@ export function useToast() {
     [],
   );
 
-  const showToast = useCallback((message: string, duration = 4000) => {
+  const showToast = useCallback((message: string, duration = TOAST_MS) => {
     const id = nextId++;
     setToasts((prev) => [...prev, { id, message }]);
     const timer = setTimeout(() => {
@@ -58,8 +61,8 @@ function FadingToast({ message }: { message: string }) {
     if (!el) return;
     const timeout = setTimeout(() => {
       el.style.opacity = "0";
-      el.style.transition = "opacity 0.3s";
-    }, 3700);
+      el.style.transition = `opacity ${FADE_MS / 1000}s`;
+    }, TOAST_MS - FADE_MS);
     return () => clearTimeout(timeout);
   }, []);
 
