@@ -1,5 +1,13 @@
 import { useEffect, useState } from "react";
-import { authOk, playTracks, queueNext, removeQueueItem, clearQueue, syncDevices } from "../api";
+import {
+  clearQueue,
+  deleteDevice as apiDeleteDevice,
+  playTracks,
+  queueNext,
+  removeQueueItem,
+  seekDevice as apiSeekDevice,
+  syncDevices,
+} from "../api";
 import { showApiError } from "../errors";
 import { t } from "../i18n";
 import { ScrollingText } from "./ScrollingText";
@@ -56,12 +64,7 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
 
   async function deleteDevice(deviceId: string) {
     try {
-      await authOk(
-        `/api/devices/${encodeURIComponent(deviceId)}`,
-        "devices.deleteFailed",
-        { method: "DELETE" },
-        onUnauthorized,
-      );
+      await apiDeleteDevice(deviceId, onUnauthorized);
       setSelectedDevices((prev) => {
         const next = new Set(prev);
         next.delete(deviceId);
@@ -76,15 +79,7 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
 
   async function seekDevice(deviceId: string, positionMs: number) {
     try {
-      await authOk(
-        `/api/devices/${encodeURIComponent(deviceId)}/seek`,
-        "devices.seekFailed",
-        {
-          method: "POST",
-          body: JSON.stringify({ position_ms: positionMs }),
-        },
-        onUnauthorized,
-      );
+      await apiSeekDevice(deviceId, positionMs, onUnauthorized);
       showToast(t("devices.seekQueued"));
     } catch (e) {
       showApiError(showToast, e);

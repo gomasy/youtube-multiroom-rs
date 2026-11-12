@@ -63,7 +63,12 @@ export async function authOk(
 // call site can forget to escape an ID into the URL.
 const playlistPath = (playlistId: string) =>
   `/api/playlists/${encodeURIComponent(playlistId)}`;
+const trackPath = (trackId: string) => `/api/tracks/${encodeURIComponent(trackId)}`;
 const devicePath = (deviceId: string) => `/api/devices/${encodeURIComponent(deviceId)}`;
+
+export async function deleteTrack(trackId: string, onUnauthorized?: () => void): Promise<void> {
+  await authOk(trackPath(trackId), "history.deleteFailed", { method: "DELETE" }, onUnauthorized);
+}
 
 /** authOk that parses the response body as JSON. */
 async function authJson<T>(
@@ -308,6 +313,23 @@ export async function removeQueueItem(
     `${devicePath(deviceId)}/queue/${encodeURIComponent(entry)}`,
     "api.removeQueueFailed",
     { method: "DELETE" },
+    onUnauthorized,
+  );
+}
+
+export async function deleteDevice(deviceId: string, onUnauthorized?: () => void): Promise<void> {
+  await authOk(devicePath(deviceId), "devices.deleteFailed", { method: "DELETE" }, onUnauthorized);
+}
+
+export async function seekDevice(
+  deviceId: string,
+  positionMs: number,
+  onUnauthorized?: () => void,
+): Promise<void> {
+  await authOk(
+    `${devicePath(deviceId)}/seek`,
+    "devices.seekFailed",
+    { method: "POST", body: JSON.stringify({ position_ms: positionMs }) },
     onUnauthorized,
   );
 }

@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import {
   addToPlaylist,
-  authOk,
   bulkAddToPlaylist,
   bulkDeleteTracks,
   bulkRemoveFromPlaylist,
   createPlaylist,
   deletePlaylist,
+  deleteTrack as apiDeleteTrack,
   fetchTracks,
   refreshTracksMetadata,
   removeFromPlaylist,
@@ -182,12 +182,7 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
   async function deleteTrack(track: Track) {
     if (!window.confirm(tFmt("history.confirmDeleteTrack", { title: track.title }))) return;
     try {
-      await authOk(
-        `/api/tracks/${encodeURIComponent(track.id)}`,
-        "history.deleteFailed",
-        { method: "DELETE" },
-        onUnauthorized,
-      );
+      await apiDeleteTrack(track.id, onUnauthorized);
       onTrackDeleted(track.id);
       setLocalVersion((v) => v + 1);
       showToast(t("history.trackDeleted"));
