@@ -1,12 +1,10 @@
 use crate::state::{AppState, AudioTrack};
 use axum::{
     extract::{Request, State},
-    http::StatusCode,
     middleware::Next,
-    response::{IntoResponse, Json, Response},
+    response::{IntoResponse, Response},
 };
 use hmac::{Hmac, KeyInit, Mac};
-use serde_json::json;
 use sha2::Sha256;
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -66,11 +64,7 @@ pub async fn require_token(
 }
 
 fn unauthorized() -> Response {
-    (
-        StatusCode::UNAUTHORIZED,
-        Json(json!({ "detail": "Unauthorized" })),
-    )
-        .into_response()
+    crate::handlers::AppError::unauthorized().into_response()
 }
 
 fn bearer_token_eq(request: &Request, expected: &str) -> bool {

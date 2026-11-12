@@ -82,6 +82,12 @@ impl AppError {
             message: msg.into(),
         }
     }
+    pub(crate) fn unauthorized() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            message: "Unauthorized".to_string(),
+        }
+    }
 }
 
 impl IntoResponse for AppError {
