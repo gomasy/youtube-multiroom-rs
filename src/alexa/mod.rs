@@ -32,7 +32,7 @@ mod verify;
 pub use verify::{skill_id, verify_application_id, verify_request, verify_timestamp};
 
 use crate::state::AppState;
-use response::{alexa_response, no_track_response, speech};
+use response::{alexa_response, no_track_response};
 use rust_i18n::t;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -104,7 +104,10 @@ pub async fn handle_alexa(state: &Arc<AppState>, body: Value, base_url: &str) ->
         t if t.starts_with("PlaybackController.") => {
             intent::on_playback_controller(&ctx, t, &body).await
         }
-        _ => speech(&t!("alexa_not_understood", locale = &ctx.locale), true),
+        _ => no_track_response(
+            ctx.can_speak,
+            &t!("alexa_not_understood", locale = &ctx.locale),
+        ),
     };
 
     state.broadcast_devices().await;
