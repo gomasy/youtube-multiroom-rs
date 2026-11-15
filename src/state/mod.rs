@@ -261,7 +261,16 @@ impl AppState {
         let _ = self.tx.send(msg.to_string());
     }
 
+    /// Whether a broadcast would reach anyone; lets the async `broadcast_*`
+    /// skip their Redis reads otherwise.
+    fn has_clients(&self) -> bool {
+        self.tx.receiver_count() > 0
+    }
+
     pub async fn broadcast_devices(&self) {
+        if !self.has_clients() {
+            return;
+        }
         self.broadcast(json!({
             "type": "device_update",
             "devices": self.devices_json().await,
@@ -285,6 +294,9 @@ impl AppState {
     }
 
     pub async fn broadcast_playlists(&self) {
+        if !self.has_clients() {
+            return;
+        }
         self.broadcast(json!({
             "type": "playlists_update",
             "playlists": self.playlists_json().await,
@@ -292,6 +304,9 @@ impl AppState {
     }
 
     pub async fn broadcast_active_playlist(&self) {
+        if !self.has_clients() {
+            return;
+        }
         self.broadcast(json!({
             "type": "active_playlist_update",
             "playlist": self.active_playlist().await,

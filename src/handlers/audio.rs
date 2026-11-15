@@ -17,6 +17,10 @@ use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 
+/// Read size for a served file. Each read is a blocking-pool hop, which
+/// ReaderStream's 4 KiB default makes far too many of.
+const STREAM_CHUNK_BYTES: usize = 64 * 1024;
+
 /// GET /api/audio/:id/stream
 ///
 /// Streams the file with Range support (no full in-memory read). Echo devices
@@ -72,10 +76,13 @@ pub async fn stream_audio(
                 format!("bytes {start}-{end}/{total}"),
             )
             .header(header::CONTENT_LENGTH, len);
-        Body::from_stream(ReaderStream::new(file.take(len as u64)))
+        Body::from_stream(ReaderStream::with_capacity(
+            file.take(len as u64),
+            STREAM_CHUNK_BYTES,
+        ))
     } else {
         resp = resp.header(header::CONTENT_LENGTH, total);
-        Body::from_stream(ReaderStream::new(file))
+        Body::from_stream(ReaderStream::with_capacity(file, STREAM_CHUNK_BYTES))
     };
 
     resp.body(body)
