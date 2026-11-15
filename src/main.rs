@@ -123,11 +123,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/library/import", post(handlers::import_library))
         .route("/alexa", post(handlers::alexa_webhook))
         .route(auth::WS_PATH, get(handlers::ws_upgrade))
-        // route_layer only wraps the routes registered above it, which is what
-        // makes the static files merged below deliberately public: the browser
-        // must be able to load the app shell and its message catalogs in order
-        // to show the login prompt that obtains a token in the first place.
-        // Anything that touches user data must be registered above this layer.
+        // route_layer only wraps the routes above it: the static files merged
+        // below stay public so the login prompt can load. Anything touching
+        // user data must be registered above this layer.
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_token,
@@ -143,9 +141,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Redis    = {}", redact_url(&redis_url));
     println!("  Web UI   → http://localhost:{}", addr.port());
     println!("  Alexa    → POST /alexa");
-    // Also the first read of ALEXA_SKILL_ID. Printing the value rather than
-    // just "is set" is what turns a typo into something visible at startup
-    // instead of into an Echo that has silently stopped being answered.
+    // Printing the value makes a typo visible at startup.
     match alexa::skill_id() {
         Some(id) => println!("  Skill ID = {id}"),
         None => println!("  Skill ID → any (set ALEXA_SKILL_ID to restrict)"),
@@ -167,8 +163,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn shutdown_signal() {
-    // Registration failure degrades to Ctrl-C rather than taking the process down.
-    // `None` then leaves the pattern below unmatched, which disables that branch.
+    // Registration failure degrades to Ctrl-C only: `None` leaves the branch
+    // below disabled.
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .inspect_err(|e| tracing::warn!("Cannot listen for SIGTERM: {e}; Ctrl-C only"))
         .ok();
@@ -184,10 +180,7 @@ pub(crate) fn die(msg: impl std::fmt::Display) -> ! {
     process::exit(1);
 }
 
-/// Redact user credentials from a URL for log output. Every path that shows a
-/// connection URL to a human goes through here — the startup banner and
-/// AppState::new's connection error alike — since a Redis URL routinely
-/// carries a password.
+/// Redact user credentials from a URL for log output.
 pub(crate) fn redact_url(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
         return url.to_string();

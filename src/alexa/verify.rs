@@ -25,13 +25,9 @@ use tokio::sync::{Mutex, Semaphore};
 
 /// Allowed timestamp skew (Amazon specifies max 150 seconds).
 const TIMESTAMP_TOLERANCE_SECS: i64 = 150;
-/// Timeout for fetching the certificate chain.
 const CERT_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
-/// Cap on cert fetches in flight. /alexa is unauthenticated, so anyone can make
-/// this endpoint issue an outbound request by naming an uncached cert URL.
-/// Steady-state traffic reuses the cache and never fetches at all, so a small
-/// cap is generous for real requests while a flood of forged URLs cannot tie up
-/// connections and sockets.
+/// Cap on cert fetches in flight: /alexa is unauthenticated, so anyone can
+/// trigger an outbound fetch by naming an uncached cert URL.
 const CERT_FETCH_MAX_INFLIGHT: usize = 4;
 /// Bound query-variant and certificate-rotation entries. Alexa normally uses a
 /// single URL, so this leaves ample overlap while preventing unbounded growth.
@@ -58,7 +54,6 @@ fn prune_expired(cache: &mut HashMap<String, CachedKey>) {
     cache.retain(|_, cached| now < cached.not_after);
 }
 
-/// Look up a still-valid cached key for this certificate URL.
 async fn cached_key(cert_url: &str) -> Option<PKey<Public>> {
     let mut cache = cert_cache().lock().await;
     prune_expired(&mut cache);
@@ -149,9 +144,8 @@ pub fn verify_timestamp(body: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// The skill this deployment answers for, from `ALEXA_SKILL_ID`. Read once —
-/// the environment does not change under a running process — and left `None`
-/// when unset or empty, which is what makes the check below optional.
+/// The skill this deployment answers for, from `ALEXA_SKILL_ID`; `None` when
+/// unset or empty.
 pub fn skill_id() -> Option<&'static str> {
     static SKILL_ID: OnceLock<Option<String>> = OnceLock::new();
     SKILL_ID
@@ -164,26 +158,17 @@ pub fn skill_id() -> Option<&'static str> {
         .as_deref()
 }
 
-/// Verify that the request was sent to *our* skill.
-///
-/// Signature verification proves a request came from Amazon, not that it came
-/// from this deployment's skill: anyone can point a skill of their own at a
-/// tunnel URL and drive the devices behind it. Naming the skill ID closes that,
-/// which is why Amazon requires the check for certification.
-///
-/// Optional, since a private deployment that never published its URL has
-/// nothing to gain from it and an operator who has not set `ALEXA_SKILL_ID`
-/// should not find the skill silently broken.
+/// Verify that the request was sent to *our* skill: the signature only proves
+/// it came from Amazon. Optional, so a deployment without `ALEXA_SKILL_ID`
+/// keeps working.
 pub fn verify_application_id(body: &Value) -> Result<(), String> {
     skill_id().map_or(Ok(()), |expected| check_application_id(body, expected))
 }
 
 fn check_application_id(body: &Value, expected: &str) -> Result<(), String> {
-    // Sessioned requests (LaunchRequest, IntentRequest) carry the ID under
-    // `session.application`; every request carries it under
-    // `context.System.application`. Both are checked wherever present, so
-    // neither placement can smuggle a foreign ID past the other, and a request
-    // naming no skill at all is rejected rather than read as ours.
+    // Sessioned requests also carry the ID under `session.application`. Every
+    // placement present must match, and a request naming no skill at all is
+    // rejected.
     let ids = [
         body["session"]["application"]["applicationId"].as_str(),
         body["context"]["System"]["application"]["applicationId"].as_str(),

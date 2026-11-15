@@ -1,8 +1,7 @@
 //! Resolving a client-advertised language code to a locale we ship.
 //!
-//! Single home for that policy: the HTTP layer feeds it the X-App-Lang header,
-//! the Alexa layer request.locale. The `rust_i18n::i18n!` invocation itself has
-//! to stay at the crate root, so only the resolution rules live here.
+//! The HTTP layer feeds it the X-App-Lang header, the Alexa layer
+//! request.locale.
 
 /// Locale used when a request advertises no language, or one we don't ship.
 /// Read from the i18n! macro's constant rather than hardcoded, so the two
@@ -21,7 +20,6 @@ pub fn or_default(code: Option<&str>) -> String {
         .unwrap_or_else(|| fallback().to_string())
 }
 
-/// Resolve a language code to the best available locale, or `None` if unknown.
 fn resolve(code: &str) -> Option<String> {
     let code = code.trim().to_ascii_lowercase();
     if code.is_empty() {

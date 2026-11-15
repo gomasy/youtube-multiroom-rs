@@ -137,10 +137,6 @@ fn verify_stream_query(secret: &str, audio_id: &str, query: Option<&str>) -> boo
 }
 
 fn sign(secret: &str, audio_id: &str, exp: u64) -> String {
-    // Modelled as a Result but cannot fail: HMAC hashes a key longer than the
-    // block size and pads a shorter one, so every length is accepted. Nor would
-    // there be a safe fallback — signing with anything but the configured
-    // secret hands out URLs that verify against nothing.
     #[expect(
         clippy::expect_used,
         reason = "Hmac::new_from_slice accepts a key of any length"
@@ -166,8 +162,8 @@ fn hex(bytes: &[u8]) -> String {
     out
 }
 
-/// Extract the track ID from "/api/audio/{id}/stream", ".../live" or ".../relay".
-/// The paths must match the route definitions in main.rs and URL generation in alexa.rs.
+/// The track ID from "/api/audio/{id}/{stream,live,relay}". Must match the
+/// routes in main.rs and [`stream_path`].
 fn audio_endpoint_id(path: &str) -> Option<&str> {
     let rest = path.strip_prefix("/api/audio/")?;
     rest.strip_suffix("/stream")
@@ -234,9 +230,8 @@ mod tests {
 
     #[test]
     fn hex_pads_every_byte_to_two_digits() {
-        // Signing and verifying both go through hex(), so a byte that lost its
-        // leading zero would still compare equal to itself while quietly
-        // shortening the signature — invisible to the round-trip tests.
+        // A dropped leading zero would shorten the signature without failing
+        // the round-trip tests.
         assert_eq!(hex(&[0x00, 0x0f, 0xa5, 0xff]), "000fa5ff");
         assert_eq!(hex(&[]), "");
         // SHA-256 is 32 bytes, so every signature is 64 characters wide
