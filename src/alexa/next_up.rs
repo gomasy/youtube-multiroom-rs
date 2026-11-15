@@ -1,10 +1,7 @@
 //! Choosing what plays next, and the token that identifies it.
 //!
-//! Three sources answer that question, in order: a play command the web UI
-//! parked in Redis, the device's own Up Next queue, and — only when neither
-//! does — whatever the playback mode selects. Every caller that needs a next
-//! track walks the same order, which is what keeps an explicit choice ahead of
-//! an automatic one.
+//! Three sources answer in order: a play command the web UI parked in Redis,
+//! the device's Up Next queue, and only then whatever the playback mode selects.
 
 use super::ReqCtx;
 use crate::state::{AudioTrack, auto_token, new_token, now_f64, token_track_id};

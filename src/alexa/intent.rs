@@ -5,7 +5,8 @@
 use super::ReqCtx;
 use super::next_up::{NextUp, pending_or_queue_next, playing_context_token};
 use super::response::{
-    alexa_response, no_track_response, play_directive, speech, stop_directive, with_speech,
+    alexa_response, no_track_response, play_directive, play_explicit, speech, stop_directive,
+    with_speech,
 };
 use super::session::{resume_playback, start_or_resume};
 use crate::state::token_track_id;
@@ -57,11 +58,7 @@ pub(super) async fn on_intent(ctx: &ReqCtx<'_>, body: &Value) -> Value {
 }
 
 /// Play the library track a spoken phrase names, on the device that heard it.
-///
-/// Searched over the whole library rather than the playback scope: naming
-/// something is how a listener escapes whatever scope the web UI was left on.
-/// Nothing close enough plays nothing at all — an arbitrary track is a worse
-/// answer than saying so.
+/// Nothing close enough plays nothing at all.
 async fn play_named_track(ctx: &ReqCtx<'_>, query: &str) -> Value {
     let locale = &ctx.locale;
     if query.is_empty() {
@@ -74,20 +71,13 @@ async fn play_named_track(ctx: &ReqCtx<'_>, query: &str) -> Value {
         );
     };
 
-    // A track the user just asked for by name gets a clean slate, the way an
-    // explicit resume does.
-    ctx.state.clear_playback_failures(&ctx.device_id).await;
     let title = track.title.clone();
-    let resp = play_directive(ctx, &NextUp::fresh(track)).await;
+    let resp = play_explicit(ctx, track, 0).await;
     with_speech(resp, &t!("alexa_playing", locale = locale, title = title))
 }
 
 /// Switch the selection scope to the playlist a spoken phrase names and start
-/// it from the top.
-///
-/// The scope moves with it: having asked for a playlist by name, what follows
-/// the first track should come from that playlist and not from whatever the web
-/// UI was last set to.
+/// it from the top, so what follows the first track comes from that playlist.
 async fn play_named_playlist(ctx: &ReqCtx<'_>, name: &str) -> Value {
     let locale = &ctx.locale;
     if name.is_empty() {
@@ -113,8 +103,7 @@ async fn play_named_playlist(ctx: &ReqCtx<'_>, name: &str) -> Value {
     if ctx.state.set_active_playlist(Some(&playlist.id)).await {
         ctx.state.broadcast_active_playlist().await;
     }
-    ctx.state.clear_playback_failures(&ctx.device_id).await;
-    let resp = play_directive(ctx, &NextUp::fresh(track)).await;
+    let resp = play_explicit(ctx, track, 0).await;
     with_speech(
         resp,
         &t!(
@@ -155,18 +144,15 @@ async fn leave_mode(ctx: &ReqCtx<'_>, leaving: &[&str], fallback: &str) -> Value
     set_mode(ctx, mode).await
 }
 
-/// Play the current track again from the top.
 async fn start_over(ctx: &ReqCtx<'_>, body: &Value) -> Value {
     let current_token = playing_context_token(ctx, body).await;
     let Some(track) = ctx.state.get_track(token_track_id(&current_token)).await else {
         return no_track_response(ctx.can_speak, &t!("alexa_no_track", locale = &ctx.locale));
     };
-    ctx.state.clear_playback_failures(&ctx.device_id).await;
-    play_directive(ctx, &NextUp::fresh(track)).await
+    play_explicit(ctx, track, 0).await
 }
 
-/// What Alexa filled a slot with, trimmed. Empty when it heard nothing usable,
-/// which is a case every caller has to answer for itself.
+/// What Alexa filled a slot with, trimmed; empty when it heard nothing usable.
 fn slot_value<'a>(body: &'a Value, name: &str) -> &'a str {
     body["request"]["intent"]["slots"][name]["value"]
         .as_str()

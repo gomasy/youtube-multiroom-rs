@@ -1,13 +1,9 @@
 //! Opening the skill, and picking playback back up.
-//!
-//! A launch and an explicit Resume come down to the same question — is there
-//! anything to start? — so they share the answer to it. What differs is only
-//! what is said when there is nothing.
 
 use super::ReqCtx;
 use super::next_up::NextUp;
-use super::response::{no_track_response, play_directive, speech};
-use crate::state::{AudioTrack, DeviceUpdate};
+use super::response::{no_track_response, play_directive, play_explicit, speech};
+use crate::state::DeviceUpdate;
 use rust_i18n::t;
 use serde_json::Value;
 
@@ -43,17 +39,13 @@ pub(super) async fn start_or_resume(ctx: &ReqCtx<'_>) -> Option<Value> {
     if !dev.playback_in_progress() {
         return None;
     }
-    Some(resume_at(ctx, dev.current_track?, dev.position_ms).await)
+    Some(play_explicit(ctx, dev.current_track?, dev.position_ms).await)
 }
 
 /// Start playback from a pending command or the front of the "next up" queue,
-/// or None if neither is available.
-///
-/// The counterpart to [`super::next_up::pending_or_queue_next`], which only
-/// *chooses* the next track for a skip or an auto-continuation. This one starts
-/// playback as the response to a launch or resume, so it consumes pending
-/// rather than peeking at it and leaves the queue alone while a track is in
-/// progress (a seek reload would otherwise discard one).
+/// if any. Unlike [`super::next_up::pending_or_queue_next`], this consumes
+/// pending and leaves the queue alone while a track is in progress (a seek
+/// reload would otherwise discard one).
 async fn start_pending_or_queue(ctx: &ReqCtx<'_>) -> Option<Value> {
     if let Some(cmd) = ctx.state.take_pending(&ctx.device_id).await
         && cmd.action == "play"
@@ -85,16 +77,7 @@ pub(super) async fn resume_playback(ctx: &ReqCtx<'_>) -> Value {
     if let Some(dev) = ctx.state.get_device(&ctx.device_id).await
         && let Some(track) = dev.current_track
     {
-        return resume_at(ctx, track, dev.position_ms).await;
+        return play_explicit(ctx, track, dev.position_ms).await;
     }
     no_track_response(ctx.can_speak, &t!("alexa_no_track", locale = &ctx.locale))
-}
-
-/// Pick `track` up again from `offset_ms`: what an explicit Resume and a launch
-/// that interrupted playback both come down to.
-async fn resume_at(ctx: &ReqCtx<'_>, track: AudioTrack, offset_ms: u64) -> Value {
-    // Carrying on is a fresh chance for the track, so the failure counter is
-    // cleared — otherwise one left in the error state errors again at once.
-    ctx.state.clear_playback_failures(&ctx.device_id).await;
-    play_directive(ctx, &NextUp::at(track, offset_ms)).await
 }

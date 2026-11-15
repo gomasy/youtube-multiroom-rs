@@ -15,10 +15,6 @@
 //! - [`next_up`] — choosing what plays next, and the token identifying it
 //! - [`response`] — the envelope, the speech, and the AudioPlayer directives
 //!
-//! The modules are private: everything the rest of the crate uses is
-//! re-exported here, so `crate::alexa::X` stays the single import path. What
-//! they share — the per-request context below — lives here.
-//!
 //! The HTTP edge itself is [`crate::handlers::alexa_webhook`], which is the one
 //! caller of the verification re-exports and runs them before `handle_alexa`.
 
@@ -38,15 +34,11 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 /// Everything derived once from a request and needed throughout the response.
-/// Built in handle_alexa, which is where req_type — what both `locale` and
-/// `can_speak` come from — lives, so neither is re-derived downstream.
 struct ReqCtx<'a> {
     state: &'a Arc<AppState>,
     device_id: String,
     base_url: &'a str,
-    /// Language for spoken responses (Alexa sends the user's locale per request,
-    /// so an Echo set to Japanese gets Japanese replies). Falls back to the
-    /// built-in default locale.
+    /// Language for spoken responses, from the request's locale.
     locale: String,
     /// Whether this response may carry speech. Only spoken or launched sessions
     /// may; AudioPlayer and PlaybackController responses are directives only.
@@ -60,7 +52,6 @@ impl ReqCtx<'_> {
     }
 }
 
-/// Process an Alexa skill request and return a response JSON.
 pub async fn handle_alexa(state: &Arc<AppState>, body: Value, base_url: &str) -> Value {
     let req_type = body["request"]["type"].as_str().unwrap_or("");
 

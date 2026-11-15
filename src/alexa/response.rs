@@ -1,22 +1,16 @@
 //! Building what goes back to Alexa: the response envelope, the speech it may
 //! carry, and the AudioPlayer directives that actually move playback.
-//!
-//! Nothing here decides *what* to play — that is [`super::next_up`]'s job. This
-//! is only how a decision is worded once it has been made, which is what keeps
-//! the directive shape to one definition across every path that sends one.
 
 use super::ReqCtx;
 use super::next_up::NextUp;
-use crate::state::{DeviceUpdate, with_start_offset};
+use crate::state::{AudioTrack, DeviceUpdate, with_start_offset};
 use serde_json::{Value, json};
 
-/// Wrap a response body in the standard Alexa response envelope.
 pub(super) fn alexa_response(response: Value) -> Value {
     json!({ "version": "1.0", "response": response })
 }
 
-/// The bare acknowledgement an event handler returns when it has no directive
-/// to send.
+/// The bare acknowledgement for an event that needs no directive.
 pub(super) fn end_session() -> Value {
     alexa_response(json!({ "shouldEndSession": true }))
 }
@@ -74,6 +68,13 @@ pub(super) async fn play_directive(ctx: &ReqCtx<'_>, next: &NextUp) -> Value {
         .await;
 
     play_response(ctx, next, None)
+}
+
+/// Start `track` from `offset_ms` because the user asked for it, which earns
+/// it a fresh retry budget.
+pub(super) async fn play_explicit(ctx: &ReqCtx<'_>, track: AudioTrack, offset_ms: u64) -> Value {
+    ctx.state.clear_playback_failures(&ctx.device_id).await;
+    play_directive(ctx, &NextUp::at(track, offset_ms)).await
 }
 
 /// Build an AudioPlayer.Play response: ENQUEUE after `enqueue_after`, or

@@ -1,9 +1,5 @@
 //! What the AudioPlayer reports back once a directive has gone out: that
 //! playback started, finished, stopped, is nearly done, or failed.
-//!
-//! These are the only requests nobody asked for, and the ones that keep the
-//! device state honest — a play is adopted here, the entry that queued it is
-//! retired here, and a failure is either retried or given up on here.
 
 use super::ReqCtx;
 use super::next_up::{NextUp, queued_or_auto_next};
@@ -17,9 +13,7 @@ use serde_json::Value;
 /// Maximum retries for the same track on PlaybackFailed before marking as error.
 const MAX_PLAYBACK_RETRIES: u32 = 3;
 
-/// Everything an AudioPlayer event reports about the playback it concerns.
-/// Read once in [`on_audio_event`], so no two handlers can read a field
-/// differently.
+/// What an AudioPlayer event reports, read once in [`on_audio_event`].
 struct AudioEvent<'a> {
     /// The AudioPlayer token, which is also the queue entry for a
     /// queue-sourced play (see [`NextUp`]).
@@ -134,15 +128,10 @@ async fn on_playback_failed(ctx: &ReqCtx<'_>, event: &AudioEvent<'_>, body: &Val
     // stream, say) cannot block the tracks behind it.
     state.remove_queue_entry(device_id, event.token).await;
 
-    // A track confirmed gone explains the failure by itself: it was deleted
-    // mid-playback, cache file and all. Nothing is wrong with the device and
-    // nothing is left to retry, so it is parked the way a finished track is
-    // rather than left reporting an error for something the user chose.
-    //
-    // Hence try_get_track: get_track reads a Redis error as "missing" too, and
-    // an unread track is no basis for that explanation. An unreadable one takes
-    // the retry path instead, which declines without a track and marks the
-    // device errored — the honest answer when nothing could be confirmed.
+    // A track confirmed gone was deleted mid-playback: nothing is wrong with
+    // the device, so it is parked idle. try_get_track, because a Redis error
+    // must not read as "deleted" — that case takes the retry path, which marks
+    // the device errored.
     let track = match state.try_get_track(event.track_id).await {
         Ok(Some(track)) => Some(track),
         Ok(None) => {
@@ -163,9 +152,8 @@ async fn on_playback_failed(ctx: &ReqCtx<'_>, event: &AudioEvent<'_>, body: &Val
         }
     };
 
-    // A live stream becomes unresolvable once it ends, which surfaces as
-    // PlaybackFailed. That is normal termination, so it advances like
-    // PlaybackFinished rather than counting as an error.
+    // An ended live stream surfaces as PlaybackFailed; it advances like
+    // PlaybackFinished.
     if let Some(track) = track.as_ref().filter(|t| t.is_live) {
         tracing::info!(
             "Live stream '{}' ended on {} ({:?})",
@@ -199,8 +187,7 @@ async fn on_playback_failed(ctx: &ReqCtx<'_>, event: &AudioEvent<'_>, body: &Val
     end_session()
 }
 
-/// Park the device at the start of nothing: what both a track finishing and a
-/// live stream ending leave behind.
+/// What a finished track and an ended live stream both leave behind.
 async fn mark_idle(ctx: &ReqCtx<'_>) {
     ctx.state
         .update_device(
