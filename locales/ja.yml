@@ -25,3 +25,5 @@ api_metadata_refresh_started: "%{count} 曲のメタデータ更新を開始し�
 api_play_queued: "再生をキューしました。各 Echo で「アレクサ、YouTube プレーヤーを開いて」と言ってください。"
 api_queued_next: "「%{title}」を次に再生に追加しました"
 api_sync_queued: "同期をキューしました。各 Echo で「アレクサ、YouTube プレーヤーを開いて」と言ってください。"
+api_track_download_started: "%{count} 曲のダウンロードを開始しました"
+api_tracks_released: "%{count} 曲をストリーミングに切り替えました"

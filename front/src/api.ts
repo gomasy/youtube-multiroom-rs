@@ -246,6 +246,32 @@ export async function refreshTracksMetadata(
   );
 }
 
+/** Start downloading the streamed tracks among those given; `total` is how many. */
+export async function downloadTracks(
+  trackIds: string[],
+  onUnauthorized?: () => void,
+): Promise<{ total: number; message?: string }> {
+  return authJson(
+    "/api/tracks/download",
+    "api.downloadTracksFailed",
+    { method: "POST", body: JSON.stringify({ track_ids: trackIds }) },
+    onUnauthorized,
+  );
+}
+
+/** Turn the cached tracks among those given into streamed ones, deleting their files. */
+export async function releaseTracks(
+  trackIds: string[],
+  onUnauthorized?: () => void,
+): Promise<{ released: number; message?: string }> {
+  return authJson(
+    "/api/tracks/release",
+    "api.releaseTracksFailed",
+    { method: "POST", body: JSON.stringify({ track_ids: trackIds }) },
+    onUnauthorized,
+  );
+}
+
 export async function bulkAddToPlaylist(
   playlistId: string,
   trackIds: string[],

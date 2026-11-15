@@ -240,6 +240,30 @@ impl AppState {
         ids.into_iter().cloned().zip(queues).collect()
     }
 
+    /// Update the copy of a track that device states hold of their current
+    /// track, which is what a resume plays.
+    pub(crate) async fn refresh_current_tracks(&self, tracks: &[AudioTrack]) {
+        let updated = |dev: &DeviceState| {
+            let current = dev.current_track.as_ref()?;
+            tracks.iter().find(|t| t.id == current.id).cloned()
+        };
+        if tracks.is_empty() {
+            return;
+        }
+        for (device_id, listed) in self.all_devices().await {
+            if updated(&listed).is_none() {
+                continue;
+            }
+            // Re-read just before writing, as update_device does.
+            if let Some(mut dev) = self.get_device(&device_id).await
+                && let Some(track) = updated(&dev)
+            {
+                dev.current_track = Some(track);
+                self.write_device(&dev).await;
+            }
+        }
+    }
+
     // ── Pending command ──
 
     /// Queue playback for a device. [`WriteOutcome::Gone`] means the device is

@@ -7,8 +7,10 @@ import {
   createPlaylist,
   deletePlaylist,
   deleteTrack as apiDeleteTrack,
+  downloadTracks,
   fetchTracks,
   refreshTracksMetadata,
+  releaseTracks,
   removeFromPlaylist,
   renamePlaylist,
   PER_PAGE,
@@ -331,6 +333,39 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
     }
   }
 
+  /** The server acts only on the selected tracks each change applies to. */
+  async function bulkDownload() {
+    if (selected.size === 0) return;
+    try {
+      const data = await downloadTracks(Array.from(selected), onUnauthorized);
+      showToast(
+        data.total === 0
+          ? t("history.nothingToDownload")
+          : data.message || tFmt("history.downloadStarted", { count: data.total }),
+      );
+      exitSelectMode();
+    } catch (e) {
+      showError(e);
+    }
+  }
+
+  async function bulkRelease() {
+    if (selected.size === 0) return;
+    if (!window.confirm(tFmt("history.confirmBulkRelease", { count: selected.size }))) return;
+    try {
+      const data = await releaseTracks(Array.from(selected), onUnauthorized);
+      showToast(
+        data.released === 0
+          ? t("history.nothingToRelease")
+          : data.message || tFmt("history.released", { count: data.released }),
+      );
+      exitSelectMode();
+      if (data.released > 0) setLocalVersion((v) => v + 1);
+    } catch (e) {
+      showError(e);
+    }
+  }
+
   async function bulkAddToPlaylistAction(playlistId: string) {
     if (selected.size === 0) return;
     setBulkMenuOpen(false);
@@ -459,6 +494,22 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
             onClick={bulkRefreshMetadata}
           >
             {t("history.bulkRefreshMetadata")}
+          </button>
+          <button
+            className="btn btn-outline btn-sm"
+            title={t("history.bulkDownloadHint")}
+            disabled={selected.size === 0}
+            onClick={bulkDownload}
+          >
+            {t("history.bulkDownload")}
+          </button>
+          <button
+            className="btn btn-outline btn-sm"
+            title={t("history.bulkReleaseHint")}
+            disabled={selected.size === 0}
+            onClick={bulkRelease}
+          >
+            {t("history.bulkRelease")}
           </button>
           {!viewPlaylist && playlists.length > 0 && (
             <span className="playlist-menu-anchor">

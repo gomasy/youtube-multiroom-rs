@@ -2,7 +2,7 @@
 //! knows about a track, and deleting from it.
 
 use super::{AppError, AppResult, TrackIdsRequest, client_locale, playlist_or_404, track_or_404};
-use crate::state::{AppState, ReorderOutcome, ReorderRequest};
+use crate::state::{AppState, AudioTrack, ReorderOutcome, ReorderRequest};
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::Json;
@@ -123,6 +123,55 @@ pub async fn refresh_tracks_metadata(
         "status": "ok",
         "total": total,
         "message": t!("api_metadata_refresh_started", locale = &locale, count = total),
+    })))
+}
+
+/// POST /api/tracks/download
+///
+/// Starts a background download of the streamed tracks among those given and
+/// says how many that is.
+pub async fn download_tracks(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<TrackIdsRequest>,
+) -> AppResult<Json<Value>> {
+    let track_ids = req.known_ids_where(&state, |t| t.streamed).await;
+    let total = track_ids.len();
+
+    if total > 0 {
+        // Captured before spawning, so a Stop all received immediately
+        // afterwards still cancels this job.
+        let cancel = state.download_token().await;
+        state.start_track_download(track_ids, cancel);
+    }
+    let locale = client_locale(&headers);
+    Ok(Json(json!({
+        "status": "ok",
+        "total": total,
+        "message": t!("api_track_download_started", locale = &locale, count = total),
+    })))
+}
+
+/// POST /api/tracks/release
+///
+/// Turns the cached tracks among those given into streamed ones, deleting
+/// their files.
+pub async fn release_tracks(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<TrackIdsRequest>,
+) -> AppResult<Json<Value>> {
+    let track_ids = req.known_ids_where(&state, AudioTrack::keeps_file).await;
+    let released = state.release_downloads(&track_ids).await.len();
+    if released > 0 {
+        state.broadcast_tracks();
+        state.broadcast_devices().await;
+    }
+    let locale = client_locale(&headers);
+    Ok(Json(json!({
+        "status": "ok",
+        "released": released,
+        "message": t!("api_tracks_released", locale = &locale, count = released),
     })))
 }
 

@@ -42,7 +42,8 @@ pub use playlists::{
 };
 pub use search::search_youtube;
 pub use tracks::{
-    bulk_delete_tracks, delete_track, list_tracks, refresh_tracks_metadata, reorder_track,
+    bulk_delete_tracks, delete_track, download_tracks, list_tracks, refresh_tracks_metadata,
+    release_tracks, reorder_track,
 };
 pub use ws::ws_upgrade;
 
@@ -123,10 +124,19 @@ impl TrackIdsRequest {
     /// each track as it is accepted, so the second occurrence finds none —
     /// without which a caller would do the work twice and count it twice.
     pub(crate) async fn known_ids(&self, state: &AppState) -> Vec<String> {
+        self.known_ids_where(state, |_| true).await
+    }
+
+    /// [`Self::known_ids`], narrowed to the tracks `keep` accepts.
+    pub(crate) async fn known_ids_where(
+        &self,
+        state: &AppState,
+        keep: impl Fn(&AudioTrack) -> bool,
+    ) -> Vec<String> {
         let mut unclaimed = state.fetch_tracks_for(self.track_ids.iter()).await;
         self.track_ids
             .iter()
-            .filter(|id| unclaimed.remove(id.as_str()).is_some())
+            .filter(|id| unclaimed.remove(id.as_str()).is_some_and(|t| keep(&t)))
             .cloned()
             .collect()
     }

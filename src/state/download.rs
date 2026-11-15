@@ -398,17 +398,137 @@ impl AppState {
             job.run(&video_ids, cancel, |video_id| async move {
                 let mode = FetchMode::new(streamed.contains(&video_id));
                 let track = state
-                    .extract_audio(&watch_url(&video_id), mode, cancel)
+                    .fetch_in_place(&video_id, mode, snapshot, cancel)
                     .await?;
-                state.restore_order_position(&video_id, snapshot).await;
-                // Reflect each recovery as it lands, so a long job is visibly
-                // making progress in the track list.
-                state.broadcast_tracks();
                 tracing::info!("Recovered: {} ({video_id})", track.title);
                 Ok(Visited::Done)
             })
             .await;
         });
+    }
+
+    /// Fetch a video and put it back where `snapshot` had it in the order,
+    /// announcing each as it lands so a long job visibly progresses.
+    async fn fetch_in_place(
+        self: &Arc<Self>,
+        video_id: &str,
+        mode: FetchMode,
+        snapshot: &[String],
+        cancel: &CancellationToken,
+    ) -> Result<AudioTrack, DownloadError> {
+        let track = self
+            .extract_audio(&watch_url(video_id), mode, cancel)
+            .await?;
+        self.restore_order_position(video_id, snapshot).await;
+        self.broadcast_tracks();
+        Ok(track)
+    }
+
+    /// Download streamed tracks in the background, each keeping its place in
+    /// the order as a recovery does.
+    pub fn start_track_download(
+        self: &Arc<Self>,
+        video_ids: Vec<String>,
+        cancel: CancellationToken,
+    ) {
+        let state = self.clone();
+        tokio::spawn(async move {
+            let snapshot = state.track_order().await;
+            let job = VideoJob::new(
+                "Track download".to_string(),
+                "downloaded",
+                "deleted while downloading",
+            );
+            let (state, cancel, snapshot) = (&state, &cancel, &snapshot);
+            job.run(&video_ids, cancel, |video_id| async move {
+                // Skip what was deleted or downloaded since the job was queued.
+                if !state.get_track(&video_id).await.is_some_and(|t| t.streamed) {
+                    return Ok(Visited::Skipped);
+                }
+                let track = state
+                    .fetch_in_place(&video_id, FetchMode::Download, snapshot, cancel)
+                    .await?;
+                state
+                    .refresh_current_tracks(std::slice::from_ref(&track))
+                    .await;
+                state.broadcast_devices().await;
+                tracing::info!("Downloaded: {} ({video_id})", track.title);
+                Ok(Visited::Done)
+            })
+            .await;
+        });
+    }
+
+    /// Turn cached tracks into streamed ones, deleting their files, and return
+    /// those that changed. A track whose video is being worked on is skipped
+    /// rather than waited for.
+    pub async fn release_downloads(&self, video_ids: &[String]) -> Vec<AudioTrack> {
+        let mut released = Vec::new();
+        for video_id in video_ids {
+            let slot = self.extract_slot(video_id).await;
+            let track = match slot.lock.try_lock() {
+                Ok(_guard) if !slot.is_deleted() => {
+                    self.release_download_locked(video_id, &slot).await
+                }
+                _ => None,
+            };
+            self.release_extract_slot(video_id, &slot).await;
+            released.extend(track);
+        }
+        self.refresh_current_tracks(&released).await;
+        released
+    }
+
+    async fn release_download_locked(
+        &self,
+        video_id: &str,
+        slot: &ExtractSlot,
+    ) -> Option<AudioTrack> {
+        let existing = self
+            .get_track(video_id)
+            .await
+            .filter(AudioTrack::keeps_file)?;
+        let track = AudioTrack {
+            streamed: true,
+            file_path: String::new(),
+            ..existing.clone()
+        };
+        // Entry first, file after: a failure in between leaves an unclaimed
+        // file for the cache cleanup rather than a track without its file.
+        self.rewrite_track_entry(&track, slot)
+            .await
+            .inspect_err(|e| tracing::warn!("Releasing track {video_id}: {e}"))
+            .ok()?;
+        if !existing.file_path.is_empty()
+            && let Err(e) = tokio::fs::remove_file(&existing.file_path).await
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!("Failed to remove {}: {e}", existing.file_path);
+        }
+        tracing::info!("Released to streaming: {} ({video_id})", track.title);
+        Some(track)
+    }
+
+    /// Write `track` over its stored entry. A deletion that ran since the
+    /// entry was read already removed what this puts back, so it is undone
+    /// and reported as a cancellation. The file is the deletion's to remove.
+    async fn rewrite_track_entry(
+        &self,
+        track: &AudioTrack,
+        slot: &ExtractSlot,
+    ) -> Result<(), DownloadError> {
+        let json_str = track
+            .to_redis_json()
+            .map_err(|e| DownloadError::Failed(format!("Failed to serialize track: {e}")))?;
+        let mut conn = self.redis.clone();
+        conn.hset::<_, _, _, ()>(REDIS_KEY_TRACKS, &track.id, json_str)
+            .await
+            .map_err(|e| DownloadError::Failed(format!("Failed to update track: {e}")))?;
+        if slot.is_deleted() {
+            self.discard_registration(&track.id, None).await;
+            return Err(DownloadError::Cancelled);
+        }
+        Ok(())
     }
 
     /// Refresh one registered track's metadata, under the same slot a download
@@ -478,9 +598,6 @@ impl AppState {
                 existing.file_path.clone(),
             )
         };
-        let json_str = track
-            .to_redis_json()
-            .map_err(|e| DownloadError::Failed(format!("Failed to serialize track: {e}")))?;
 
         // No commit guard, unlike a live registration: this only rewrites an
         // entry that already existed, so a stop racing it leaves nothing
@@ -488,18 +605,7 @@ impl AppState {
         if cancel.is_cancelled() {
             return Err(DownloadError::Cancelled);
         }
-        let mut conn = self.redis.clone();
-        conn.hset::<_, _, _, ()>(REDIS_KEY_TRACKS, video_id, json_str)
-            .await
-            .map_err(|e| DownloadError::Failed(format!("Failed to update track: {e}")))?;
-
-        // As in fetch_and_register: a deletion that ran during the fetch already
-        // removed the entry this write put back. The file is left alone — the
-        // deletion owns it and removed it before Redis could reach it.
-        if slot.is_deleted() {
-            self.discard_registration(video_id, None).await;
-            return Err(DownloadError::Cancelled);
-        }
+        self.rewrite_track_entry(&track, slot).await?;
         Ok(track)
     }
 

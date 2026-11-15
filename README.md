@@ -220,7 +220,7 @@ An install keeps the manifest and its icons on the device and re-fetches them la
 9. The ▶ button under 選択中のトラック previews the selected track in the browser
 10. The filter input above the track list searches title and channel (debounced 300 ms, case-insensitive)
 11. Click a playlist name to rename it inline — Enter saves, Escape cancels
-12. 「選択」 enters select mode: check tracks or 「全選択」 a page, then bulk-delete, bulk-add to a playlist, or 「メタデータ更新」. In a playlist view, removal only affects that playlist
+12. 「選択」 enters select mode: check tracks or 「全選択」 a page, then bulk-delete, bulk-add to a playlist, 「メタデータ更新」, or switch how the tracks keep their audio with 「ダウンロード」 / 「ストリーミング化」. In a playlist view, removal only affects that playlist
 13. Set a sleep timer (15 / 30 min, 1 / 3 / 6 h) below the playback mode selector
 14. 「他を同期」 on a device card brings every other device to that device's track and position
 15. 「メンテナンス」 at the bottom of the left column reports the cache size, removes files no track claims, re-downloads tracks whose audio is missing, and exports or imports the library structure
@@ -299,6 +299,10 @@ Caveats:
 - Every playback depends on YouTube being reachable, and a seek takes a few seconds to start
 - Streamed tracks are not recoverable by the `audio_cache/` scan — if Redis is wiped, re-add them. A library export records the flag, and an import with audio fetching re-registers them as streamed
 - Adding a streamed video again with streaming off downloads it and turns it into a cached track; adding an already downloaded video with streaming on keeps the download
+
+How a track keeps its audio can be changed afterwards, in bulk, from select mode. 「ダウンロード」 (`POST /api/tracks/download`) fetches the streamed tracks among the selection in the background — the usual progress display, and 「すべて停止」 cancels it — and each becomes a cached track where it stands: its place in the order and its playlist memberships are untouched. 「ストリーミング化」 (`POST /api/tracks/release`) is the opposite and immediate: the cached file is deleted and the track is relayed from then on, which is how to get disk space back without losing the library entry. Both act only on the tracks the change applies to, so a mixed selection is fine; live tracks are never affected, and a track whose video is being downloaded or refreshed at that moment is passed over by a release.
+
+A device remembers its current track by value, so its copy is updated along with the library entry — a resume asks for the right endpoint. A play command already queued for a device keeps the old copy; its first attempt fails and the retry, which re-reads the track, succeeds.
 
 ### Playback Modes
 
@@ -416,6 +420,8 @@ Broadcast frames:
 | POST | `/api/tracks/reorder` | Yes | Move a track within the library or a playlist order |
 | POST | `/api/tracks/bulk-delete` | Yes | Bulk-delete tracks by ID list |
 | POST | `/api/tracks/refresh-metadata` | Yes | Start a background metadata refresh (`track_ids`) |
+| POST | `/api/tracks/download` | Yes | Start downloading the streamed tracks among `track_ids` |
+| POST | `/api/tracks/release` | Yes | Turn the cached tracks among `track_ids` into streamed ones |
 | DELETE | `/api/tracks/{id}` | Yes | Delete a track and its cached file |
 | GET | `/api/playlists` | Yes | List playlists with track counts |
 | POST | `/api/playlists` | Yes | Create a playlist (`name`) |

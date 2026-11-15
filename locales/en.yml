@@ -25,3 +25,5 @@ api_metadata_refresh_started: "Started refreshing metadata for %{count} track(s)
 api_play_queued: "Playback queued. Say \"Alexa, open YouTube Player\" on each Echo device."
 api_queued_next: "Added \"%{title}\" to Up Next"
 api_sync_queued: "Sync queued. Say \"Alexa, open YouTube Player\" on each Echo device."
+api_track_download_started: "Started downloading %{count} track(s)"
+api_tracks_released: "Switched %{count} track(s) to streaming"
