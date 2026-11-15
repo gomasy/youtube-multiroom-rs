@@ -358,6 +358,8 @@ A document whose `version` this server does not read is refused rather than appl
 
 `AMAZON.NextIntent` (「アレクサ、次の曲」) switches immediately: a pending web command first, then the play-next queue, then the playback-mode selection (shuffle picks at random; loop/off advance in order — an explicit "next" moves on even when the mode is off). `AMAZON.PreviousIntent` goes back one track in scope order, wrapping from first to last. Both reset the playback-failure retry counter, like an explicit resume.
 
+The playback mode can be switched by voice while a track plays, with Alexa's built-in intents: `AMAZON.ShuffleOnIntent` (「アレクサ、シャッフルして」) selects `shuffle`, `AMAZON.LoopOnIntent` (「ループして」) `loop`, and `AMAZON.RepeatIntent` (「リピートして」) `repeat_one`. `AMAZON.ShuffleOffIntent` falls back from `shuffle` to `loop` — "stop shuffling" is not "stop playing" — and `AMAZON.LoopOffIntent` from `loop` or `repeat_one` to `off`; either leaves any other mode as it is. The mode is the same global one the Web UI sets, so every client sees the change. `AMAZON.StartOverIntent` (「最初から」) restarts the current track. These intents were added to both interaction models, so re-paste the model after upgrading.
+
 `PlaybackController.*` requests (Echo Show touch controls, physical remote buttons) map to the same handlers. Per the Alexa spec their responses carry only `AudioPlayer` directives and no speech.
 
 ### Sleep Timer

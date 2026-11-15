@@ -36,6 +36,20 @@ pub(super) async fn on_intent(ctx: &ReqCtx<'_>, body: &Value) -> Value {
 
         "AMAZON.PreviousIntent" => skip_prev(ctx, body).await,
 
+        "AMAZON.StartOverIntent" => start_over(ctx, body).await,
+
+        "AMAZON.ShuffleOnIntent" => set_mode(ctx, "shuffle").await,
+
+        "AMAZON.LoopOnIntent" => set_mode(ctx, "loop").await,
+
+        "AMAZON.RepeatIntent" => set_mode(ctx, "repeat_one").await,
+
+        // Each "off" only leaves the modes it names; shuffle falls back to
+        // playing in order rather than to silence.
+        "AMAZON.ShuffleOffIntent" => leave_mode(ctx, &["shuffle"], "loop").await,
+
+        "AMAZON.LoopOffIntent" => leave_mode(ctx, &["loop", "repeat_one"], "off").await,
+
         "AMAZON.HelpIntent" => speech(&t!("alexa_help", locale = locale), false),
 
         _ => speech(&t!("alexa_use_web", locale = locale), false),
@@ -109,6 +123,46 @@ async fn play_named_playlist(ctx: &ReqCtx<'_>, name: &str) -> Value {
             name = playlist.name
         ),
     )
+}
+
+/// Set the global playback mode and confirm it by speech alone, so the track
+/// carries on.
+async fn set_mode(ctx: &ReqCtx<'_>, mode: &str) -> Value {
+    let locale = &ctx.locale;
+    let said = match mode {
+        "shuffle" => t!("alexa_mode_shuffle", locale = locale),
+        "loop" => t!("alexa_mode_loop", locale = locale),
+        "repeat_one" => t!("alexa_mode_repeat_one", locale = locale),
+        "off" => t!("alexa_mode_off", locale = locale),
+        _ => return speech(&t!("alexa_mode_failed", locale = locale), true),
+    };
+    if !ctx.state.set_playback_mode(mode).await {
+        return speech(&t!("alexa_mode_failed", locale = locale), true);
+    }
+    ctx.state.broadcast_playback_mode(mode);
+    speech(&said, true)
+}
+
+/// Switch to `fallback` if the current mode is one of `leaving`; otherwise the
+/// mode stands and is only confirmed.
+async fn leave_mode(ctx: &ReqCtx<'_>, leaving: &[&str], fallback: &str) -> Value {
+    let current = ctx.state.playback_mode().await;
+    let mode = if leaving.contains(&current.as_str()) {
+        fallback
+    } else {
+        current.as_str()
+    };
+    set_mode(ctx, mode).await
+}
+
+/// Play the current track again from the top.
+async fn start_over(ctx: &ReqCtx<'_>, body: &Value) -> Value {
+    let current_token = playing_context_token(ctx, body).await;
+    let Some(track) = ctx.state.get_track(token_track_id(&current_token)).await else {
+        return no_track_response(ctx.can_speak, &t!("alexa_no_track", locale = &ctx.locale));
+    };
+    ctx.state.clear_playback_failures(&ctx.device_id).await;
+    play_directive(ctx, &NextUp::fresh(track)).await
 }
 
 /// What Alexa filled a slot with, trimmed. Empty when it heard nothing usable,
