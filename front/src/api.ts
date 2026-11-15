@@ -70,17 +70,28 @@ export async function deleteTrack(trackId: string, onUnauthorized?: () => void):
   await authOk(trackPath(trackId), "history.deleteFailed", { method: "DELETE" }, onUnauthorized);
 }
 
-/** authOk for the endpoints that name a playlist, where a 409 means the name is taken. */
-async function playlistNameOk(
+/** authOk with its own message for a 409. */
+async function conflictOk(
+  url: string,
+  errorKey: string,
+  conflictKey: string,
+  options: RequestInit,
+  onUnauthorized?: () => void,
+): Promise<Response> {
+  const res = await authFetch(url, options, onUnauthorized);
+  if (res.status === 409) throw new Error(t(conflictKey));
+  if (!res.ok) throw new Error(t(errorKey));
+  return res;
+}
+
+/** For the endpoints that name a playlist, where a 409 means the name is taken. */
+function playlistNameOk(
   url: string,
   errorKey: string,
   options: RequestInit,
   onUnauthorized?: () => void,
 ): Promise<Response> {
-  const res = await authFetch(url, options, onUnauthorized);
-  if (res.status === 409) throw new Error(t("api.playlistNameTaken"));
-  if (!res.ok) throw new Error(t(errorKey));
-  return res;
+  return conflictOk(url, errorKey, "api.playlistNameTaken", options, onUnauthorized);
 }
 
 /** authOk that parses the response body as JSON. */
@@ -270,6 +281,26 @@ export async function releaseTracks(
     { method: "POST", body: JSON.stringify({ track_ids: trackIds }) },
     onUnauthorized,
   );
+}
+
+/**
+ * Add the videos a playlist's YouTube source has gained; `total` is how many
+ * (zero: up to date). `stream` registers them without downloading. A 409
+ * means an import into the playlist is still running.
+ */
+export async function syncPlaylist(
+  playlistId: string,
+  stream: boolean,
+  onUnauthorized?: () => void,
+): Promise<{ total: number; message?: string }> {
+  const res = await conflictOk(
+    `${playlistPath(playlistId)}/sync`,
+    "api.syncPlaylistFailed",
+    "api.syncPlaylistBusy",
+    { method: "POST", body: JSON.stringify({ stream }) },
+    onUnauthorized,
+  );
+  return res.json();
 }
 
 export async function bulkAddToPlaylist(

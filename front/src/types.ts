@@ -63,6 +63,8 @@ export interface Playlist {
   /** Creation time (UNIX seconds). List is sorted ascending by this. */
   created_at?: number;
   count: number;
+  /** Source YouTube playlist ID; only present on a syncable playlist */
+  source?: string;
 }
 
 export type PlaybackMode = "loop" | "repeat_one" | "shuffle" | "off";

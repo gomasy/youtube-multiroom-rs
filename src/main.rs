@@ -78,6 +78,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             patch(handlers::rename_playlist).delete(handlers::delete_playlist),
         )
         .route(
+            "/api/playlists/{playlist_id}/sync",
+            post(handlers::sync_playlist),
+        )
+        .route(
             "/api/playlists/{playlist_id}/tracks",
             post(handlers::add_playlist_track),
         )

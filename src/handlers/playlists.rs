@@ -4,7 +4,7 @@ use super::{
     AppError, AppResult, TrackIdsRequest, client_locale, playlist_or_404, track_or_404,
     written_or_err,
 };
-use crate::state::{AppState, PlaylistNameError};
+use crate::state::{AppState, FetchMode, PlaylistNameError};
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::response::Json;
@@ -73,6 +73,57 @@ pub async fn delete_playlist(
     // If this playlist was the active playback scope, notify that it reverted to full library
     state.broadcast_active_playlist().await;
     Ok(Json(json!({ "status": "ok" })))
+}
+
+#[derive(Deserialize)]
+pub struct PlaylistSyncRequest {
+    /// Register the new videos without downloading them.
+    #[serde(default)]
+    stream: bool,
+}
+
+/// POST /api/playlists/:id/sync
+///
+/// Reads the playlist's YouTube source and replies with how many videos are
+/// new; fetching them runs in the background.
+pub async fn sync_playlist(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(playlist_id): Path<String>,
+    Json(req): Json<PlaylistSyncRequest>,
+) -> AppResult<Json<Value>> {
+    let playlist = state
+        .get_playlist(&playlist_id)
+        .await
+        .ok_or_else(|| AppError::not_found("Playlist not found"))?;
+    if playlist.source.is_none() {
+        return Err(AppError::bad_request(
+            "Playlist was not imported from YouTube",
+        ));
+    }
+    if state.playlist_import_running(&playlist_id) {
+        return Err(AppError::conflict("Playlist is already being synced"));
+    }
+    let cancel = state.download_token().await;
+    let info = state
+        .sync_playlist(&playlist, FetchMode::new(req.stream), &cancel)
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?;
+    let locale = client_locale(&headers);
+    let message = if info.total == 0 {
+        t!("api_playlist_sync_up_to_date", locale = &locale)
+    } else {
+        t!(
+            "api_playlist_sync_started",
+            locale = &locale,
+            count = info.total
+        )
+    };
+    Ok(Json(json!({
+        "status": "ok",
+        "total": info.total,
+        "message": message,
+    })))
 }
 
 #[derive(Deserialize)]

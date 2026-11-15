@@ -8,7 +8,7 @@ use super::model::{
     AudioTrack, Playlist, PlaylistImportInfo, PlaylistJson, PlaylistNameError, WriteOutcome,
 };
 use super::progress::playlist_progress_key;
-use super::url::{is_video_id, watch_url};
+use super::url::{is_playlist_id, is_video_id, watch_url};
 use super::ytdlp::{DownloadError, run_yt_dlp_cancellable};
 use super::{
     AppState, REDIS_KEY_ACTIVE_PLAYLIST, REDIS_KEY_PLAYLISTS, now_f64, playlist_key, since_epoch,
@@ -24,6 +24,9 @@ use tokio_util::sync::CancellationToken;
 const PLAYLIST_NAME_MAX_CHARS: usize = 100;
 /// Cap for playlist import to avoid expanding effectively-infinite mix lists.
 const PLAYLIST_IMPORT_MAX: usize = 100;
+/// How many source entries a sync scans; it still fetches at most
+/// `PLAYLIST_IMPORT_MAX` per run.
+const PLAYLIST_SYNC_SCAN_MAX: usize = 500;
 const PLAYLIST_FLAT_TIMEOUT_SECS: u64 = 60;
 /// Track ids appended per script invocation. Each one costs an LREM that scans
 /// the list, so an unbounded batch would hold Redis — which runs a script to
@@ -53,7 +56,39 @@ static ADD_PLAYLIST_TRACKS_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
     )
 });
 
+/// Videos an import or sync already added, so a sync does not fetch a track
+/// removed locally again.
+fn playlist_seen_key(playlist_id: &str) -> String {
+    format!("{}_seen:{playlist_id}", super::REDIS_PLAYLIST_PREFIX)
+}
+
+/// Marks a playlist as being filled for as long as its worker holds this.
+struct ImportingGuard(Arc<AppState>, String);
+
+impl Drop for ImportingGuard {
+    fn drop(&mut self) {
+        self.0.importing().remove(&self.1);
+    }
+}
+
 impl AppState {
+    fn importing(&self) -> std::sync::MutexGuard<'_, HashSet<String>> {
+        self.importing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub fn playlist_import_running(&self, playlist_id: &str) -> bool {
+        self.importing().contains(playlist_id)
+    }
+
+    /// None when a worker is already filling this playlist.
+    fn claim_import(self: &Arc<Self>, playlist_id: &str) -> Option<ImportingGuard> {
+        self.importing()
+            .insert(playlist_id.to_string())
+            .then(|| ImportingGuard(self.clone(), playlist_id.to_string()))
+    }
+
     /// Create a playlist. The name is trimmed, must be 1–PLAYLIST_NAME_MAX_CHARS
     /// chars, and must not belong to another playlist.
     pub async fn create_playlist(&self, name: &str) -> Result<Playlist, PlaylistNameError> {
@@ -114,9 +149,29 @@ impl AppState {
             id: new_playlist_id(),
             name: name.to_string(),
             created_at: now_f64(),
+            source: None,
         };
         self.write_playlist(&playlist).await?;
         Ok(playlist)
+    }
+
+    /// Set a playlist's source unless it has one (the first link wins), and
+    /// return whether it was written. A non-playlist ID is ignored: the value
+    /// ends up in a URL handed to yt-dlp.
+    pub(crate) async fn link_playlist_source(&self, playlist_id: &str, list_id: &str) -> bool {
+        if !is_playlist_id(list_id) {
+            return false;
+        }
+        // Serialized with rename, the other read-modify-write of this entry.
+        let _guard = self.playlist_name_lock.lock().await;
+        let Some(mut playlist) = self.get_playlist(playlist_id).await else {
+            return false;
+        };
+        if playlist.source.is_some() {
+            return false;
+        }
+        playlist.source = Some(list_id.to_string());
+        self.write_playlist(&playlist).await.is_ok()
     }
 
     async fn write_playlist(&self, playlist: &Playlist) -> Result<(), PlaylistNameError> {
@@ -210,7 +265,8 @@ impl AppState {
         }
         warn_redis!(
             "deleting playlist tracks for {playlist_id}",
-            conn.del(playlist_key(playlist_id)).await
+            conn.del(&[playlist_key(playlist_id), playlist_seen_key(playlist_id)])
+                .await
         );
         // If this was the active playlist, revert to the full library
         if self.raw_active_playlist().await.as_deref() == Some(playlist_id) {
@@ -432,46 +488,14 @@ impl AppState {
         mode: FetchMode,
         cancel: &CancellationToken,
     ) -> Result<PlaylistImportInfo, DownloadError> {
-        let url = format!("https://www.youtube.com/playlist?list={list_id}");
-        let items = format!("1:{PLAYLIST_IMPORT_MAX}");
-        let stdout = run_yt_dlp_cancellable(
-            &[
-                "--dump-single-json",
-                "--flat-playlist",
-                "--playlist-items",
-                &items,
-                &url,
-            ],
-            time::Duration::from_secs(PLAYLIST_FLAT_TIMEOUT_SECS),
-            Some(cancel),
-        )
-        .await
-        .map_err(|e| e.context("Failed to expand playlist"))?;
-        let meta: Value = serde_json::from_slice(&stdout)
-            .map_err(|e| format!("Failed to parse playlist metadata: {e}"))?;
-
-        // Exclude non-video entries and duplicates (same video appearing multiple times)
-        let mut video_ids: Vec<String> = Vec::new();
-        for entry in meta["entries"].as_array().map_or(&[][..], |v| v) {
-            if let Some(id) = entry["id"].as_str()
-                && is_video_id(id)
-                && !video_ids.iter().any(|v| v == id)
-            {
-                video_ids.push(id.to_string());
-            }
-        }
+        let (title, video_ids) = expand_playlist(list_id, PLAYLIST_IMPORT_MAX, cancel).await?;
         if video_ids.is_empty() {
             return Err("Playlist has no importable videos".into());
         }
-        if cancel.is_cancelled() {
-            return Err(DownloadError::Cancelled);
-        }
 
         // Truncate playlist name to the creation limit (fall back to list ID if title is unknown)
-        let name: String = meta["title"]
-            .as_str()
-            .map(str::trim)
-            .filter(|t| !t.is_empty())
+        let name: String = title
+            .as_deref()
             .unwrap_or(list_id)
             .chars()
             .take(PLAYLIST_NAME_MAX_CHARS)
@@ -485,23 +509,100 @@ impl AppState {
             .find_or_create_playlist(&name)
             .await
             .map_err(|_| "Failed to create playlist")?;
-        if created {
+        // Also links an existing playlist that has no source yet.
+        let linked = self.link_playlist_source(&playlist.id, list_id).await;
+        if created || linked {
             self.broadcast_playlists().await;
         }
 
-        // Spawning the worker is the commit point. The slow Redis work above
-        // stays outside the lock so Stop all is never blocked from terminating
-        // unrelated processes.
+        let total = self
+            .start_import_worker(playlist, video_ids, mode, cancel)
+            .await?;
+        Ok(PlaylistImportInfo { name, total })
+    }
+
+    /// Append the videos a playlist's source lists that it neither holds nor
+    /// was given before, at most `PLAYLIST_IMPORT_MAX` per run. Additive:
+    /// nothing is removed or reordered. Reports zero when nothing is new.
+    pub async fn sync_playlist(
+        self: &Arc<Self>,
+        playlist: &Playlist,
+        mode: FetchMode,
+        cancel: &CancellationToken,
+    ) -> Result<PlaylistImportInfo, DownloadError> {
+        let list_id = playlist
+            .source
+            .as_deref()
+            .ok_or("Playlist has no YouTube source")?;
+        let key = playlist_progress_key(list_id);
+        let stamp = self.begin_progress(&key, &playlist.name).await;
+        let result = self
+            .expand_and_start_sync(playlist, list_id, mode, cancel)
+            .await;
+        self.settle_progress(&key, stamp, &result).await;
+        result
+    }
+
+    async fn expand_and_start_sync(
+        self: &Arc<Self>,
+        playlist: &Playlist,
+        list_id: &str,
+        mode: FetchMode,
+        cancel: &CancellationToken,
+    ) -> Result<PlaylistImportInfo, DownloadError> {
+        let (_, video_ids) = expand_playlist(list_id, PLAYLIST_SYNC_SCAN_MAX, cancel).await?;
+        let mut held: HashSet<String> = self
+            .playlist_track_ids(&playlist.id)
+            .await
+            .into_iter()
+            .collect();
+        let mut conn = self.redis.clone();
+        let seen: Vec<String> = redis_or!(
+            "reading synced videos",
+            conn.smembers(playlist_seen_key(&playlist.id)).await,
+            Vec::new()
+        );
+        held.extend(seen);
+        let fresh = unheld_ids(video_ids, &held, PLAYLIST_IMPORT_MAX);
+
+        let total = if fresh.is_empty() {
+            0
+        } else {
+            self.start_import_worker(playlist.clone(), fresh, mode, cancel)
+                .await?
+        };
+        Ok(PlaylistImportInfo {
+            name: playlist.name.clone(),
+            total,
+        })
+    }
+
+    /// Spawn the job that fetches `video_ids` one at a time and appends each
+    /// to `playlist`, returning how many it will visit.
+    async fn start_import_worker(
+        self: &Arc<Self>,
+        playlist: Playlist,
+        video_ids: Vec<String>,
+        mode: FetchMode,
+        cancel: &CancellationToken,
+    ) -> Result<usize, DownloadError> {
+        // Spawning the worker is the commit point. The slow Redis work before
+        // it stays outside the lock so Stop all is never blocked from
+        // terminating unrelated processes.
         let _commit_guard = self.download_cancel.lock().await;
         if cancel.is_cancelled() {
             // A newly created playlist may already be visible to another
             // client; left empty rather than risk deleting their changes.
             return Err(DownloadError::Cancelled);
         }
+        let importing = self
+            .claim_import(&playlist.id)
+            .ok_or("This playlist is already being imported into")?;
         let total = video_ids.len();
         let state = self.clone();
         let cancel = cancel.clone();
         tokio::spawn(async move {
+            let _importing = importing;
             let job = VideoJob::new(
                 format!("Playlist import '{}'", playlist.name),
                 "imported",
@@ -514,6 +615,11 @@ impl AppState {
                     .await?;
                 match state.add_playlist_track(&playlist.id, &track.id).await {
                     WriteOutcome::Written => {
+                        let mut conn = state.redis.clone();
+                        warn_redis!(
+                            "recording synced video {video_id}",
+                            conn.sadd(playlist_seen_key(&playlist.id), &video_id).await
+                        );
                         // Reflect each successfully imported track in the lists
                         state.broadcast_tracks();
                         state.broadcast_playlists().await;
@@ -535,8 +641,63 @@ impl AppState {
             .await;
         });
 
-        Ok(PlaylistImportInfo { name, total })
+        Ok(total)
     }
+}
+
+/// Flat-expand a YouTube playlist's first `max_items` entries into its title
+/// and its video ids, in order and without repeats.
+async fn expand_playlist(
+    list_id: &str,
+    max_items: usize,
+    cancel: &CancellationToken,
+) -> Result<(Option<String>, Vec<String>), DownloadError> {
+    let url = format!("https://www.youtube.com/playlist?list={list_id}");
+    let items = format!("1:{max_items}");
+    let stdout = run_yt_dlp_cancellable(
+        &[
+            "--dump-single-json",
+            "--flat-playlist",
+            "--playlist-items",
+            &items,
+            &url,
+        ],
+        time::Duration::from_secs(PLAYLIST_FLAT_TIMEOUT_SECS),
+        Some(cancel),
+    )
+    .await
+    .map_err(|e| e.context("Failed to expand playlist"))?;
+    let meta: Value = serde_json::from_slice(&stdout)
+        .map_err(|e| format!("Failed to parse playlist metadata: {e}"))?;
+    if cancel.is_cancelled() {
+        return Err(DownloadError::Cancelled);
+    }
+
+    // Exclude non-video entries and duplicates (same video appearing multiple times)
+    let mut seen: HashSet<&str> = HashSet::new();
+    let video_ids = meta["entries"]
+        .as_array()
+        .map_or(&[][..], |v| v)
+        .iter()
+        .filter_map(|entry| entry["id"].as_str())
+        .filter(|id| is_video_id(id) && seen.insert(id))
+        .map(str::to_string)
+        .collect();
+    let title = meta["title"]
+        .as_str()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string);
+    Ok((title, video_ids))
+}
+
+/// The first `limit` ids of `listed` not in `held`, in source order.
+fn unheld_ids(listed: Vec<String>, held: &HashSet<String>, limit: usize) -> Vec<String> {
+    listed
+        .into_iter()
+        .filter(|id| !held.contains(id))
+        .take(limit)
+        .collect()
 }
 
 /// Trim a user-supplied playlist name and accept it only if it is non-empty and
@@ -569,6 +730,17 @@ mod tests {
         let a = new_playlist_id();
         assert_ne!(a, new_playlist_id());
         assert!(a.starts_with("pl"));
+    }
+
+    #[test]
+    fn a_sync_takes_only_what_the_playlist_lacks() {
+        let listed: Vec<String> = ["a", "b", "c", "d", "e"].map(String::from).to_vec();
+        let held: HashSet<String> = ["b", "d"].map(String::from).into();
+        // Held ids do not count against the limit
+        assert_eq!(unheld_ids(listed.clone(), &held, 2), ["a", "c"]);
+        assert_eq!(unheld_ids(listed.clone(), &held, 10), ["a", "c", "e"]);
+        let all: HashSet<String> = listed.iter().cloned().collect();
+        assert!(unheld_ids(listed, &all, 10).is_empty());
     }
 
     #[test]

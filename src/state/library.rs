@@ -119,7 +119,13 @@ impl AppState {
         for entry in exported {
             let name = &entry.playlist.name;
             let local_id = match self.find_or_create_playlist(name).await {
-                Ok((playlist, _)) => playlist.id,
+                Ok((playlist, _)) => {
+                    // Keep the playlist syncable here.
+                    if let Some(source) = &entry.playlist.source {
+                        self.link_playlist_source(&playlist.id, source).await;
+                    }
+                    playlist.id
+                }
                 Err(e) => {
                     // Skip it; the other playlists can still be restored.
                     tracing::warn!("Library import: cannot create the playlist '{name}': {e:?}");

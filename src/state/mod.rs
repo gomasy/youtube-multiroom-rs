@@ -29,7 +29,7 @@ use download::ExtractSlot;
 use model::{DownloadProgress, FailureRecord};
 use redis::aio::ConnectionManager;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -190,6 +190,8 @@ pub struct AppState {
     /// Serializes playlist name checks with their writes, so two playlists
     /// cannot end up sharing a name.
     playlist_name_lock: Mutex<()>,
+    /// Playlists an import or sync worker is currently filling.
+    importing: std::sync::Mutex<HashSet<String>>,
     /// Per-video coordination between downloads, metadata refreshes and a
     /// deletion of the track they register (see [`ExtractSlot`]). An entry
     /// lives only while one of those is in flight.
@@ -273,6 +275,7 @@ impl AppState {
             restoring: AtomicBool::new(false),
             order_lock: Mutex::new(()),
             playlist_name_lock: Mutex::new(()),
+            importing: Default::default(),
             extract_slots: Mutex::new(HashMap::new()),
             downloads: Mutex::new(HashMap::new()),
             download_cancel: Mutex::new(CancellationToken::new()),

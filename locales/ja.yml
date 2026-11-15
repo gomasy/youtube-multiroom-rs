@@ -23,6 +23,8 @@ api_cache_repair_started: "%{count} 曲の再ダウンロードを開始しま�
 api_library_imported: "%{tracks} 曲の並び順と %{playlists} プレイリストを復元しました"
 api_metadata_refresh_started: "%{count} 曲のメタデータ更新を開始しました"
 api_play_queued: "再生をキューしました。各 Echo で「アレクサ、YouTube プレーヤーを開いて」と言ってください。"
+api_playlist_sync_started: "新しい %{count} 曲の取り込みを開始しました"
+api_playlist_sync_up_to_date: "プレイリストは最新です"
 api_queued_next: "「%{title}」を次に再生に追加しました"
 api_sync_queued: "同期をキューしました。各 Echo で「アレクサ、YouTube プレーヤーを開いて」と言ってください。"
 api_track_download_started: "%{count} 曲のダウンロードを開始しました"

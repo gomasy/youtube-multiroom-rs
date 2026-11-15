@@ -38,7 +38,7 @@ pub use devices::{
 pub use library::{export_library, import_library};
 pub use playlists::{
     add_playlist_track, bulk_add_playlist_tracks, bulk_remove_playlist_tracks, create_playlist,
-    delete_playlist, list_playlists, remove_playlist_track, rename_playlist,
+    delete_playlist, list_playlists, remove_playlist_track, rename_playlist, sync_playlist,
 };
 pub use search::search_youtube;
 pub use tracks::{

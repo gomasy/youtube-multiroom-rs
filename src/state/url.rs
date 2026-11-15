@@ -99,7 +99,7 @@ pub(crate) fn extract_video_id(url: &str) -> Option<String> {
     }
 }
 
-fn is_playlist_id(value: &str) -> bool {
+pub(crate) fn is_playlist_id(value: &str) -> bool {
     value.len() >= 2 && is_id_chars(value)
 }
 

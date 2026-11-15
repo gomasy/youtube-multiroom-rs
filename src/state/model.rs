@@ -210,6 +210,9 @@ pub struct Playlist {
     pub id: String,
     pub name: String,
     pub created_at: f64,
+    /// The YouTube playlist ID it was imported from, which a sync reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 /// Wire format for playlists_json: metadata with track count.
@@ -220,7 +223,8 @@ pub(crate) struct PlaylistJson {
     pub(crate) count: usize,
 }
 
-/// Info returned when a playlist import starts (import runs in the background).
+/// Returned when a playlist import or sync starts; a sync that found nothing
+/// new reports zero.
 pub struct PlaylistImportInfo {
     pub name: String,
     pub total: usize,

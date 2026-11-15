@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import { searchYouTube } from "../api";
 import { showApiError } from "../errors";
 import { t } from "../i18n";
+import { loadStreamMode, saveStreamMode } from "../prefs";
 import { TrackRowInfo } from "./TrackRowInfo";
 import type { Track } from "../types";
 
@@ -16,16 +17,6 @@ interface Props {
 }
 
 const SCHEME_RE = /^[a-z][a-z\d+.-]*:\/\//i;
-const STREAM_MODE_KEY = "stream_mode";
-
-/** The streaming toggle as last left in this browser (storage may be unavailable) */
-function loadStreamMode(): boolean {
-  try {
-    return localStorage.getItem(STREAM_MODE_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
 /**
  * Only decides the button label and paste auto-submit. The authoritative check
  * is parse_youtube_url() in src/state/url.rs — keep the host list in sync with it.
@@ -145,9 +136,7 @@ export function UrlInput({ onExtract, onUnauthorized, showToast }: Props) {
           checked={stream}
           onChange={(e) => {
             setStream(e.target.checked);
-            try {
-              localStorage.setItem(STREAM_MODE_KEY, e.target.checked ? "1" : "0");
-            } catch { /* only the remembered default is lost */ }
+            saveStreamMode(e.target.checked);
           }}
         />
         {t("url.stream")}

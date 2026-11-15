@@ -223,7 +223,8 @@ An install keeps the manifest and its icons on the device and re-fetches them la
 12. 「選択」 enters select mode: check tracks or 「全選択」 a page, then bulk-delete, bulk-add to a playlist, 「メタデータ更新」, or switch how the tracks keep their audio with 「ダウンロード」 / 「ストリーミング化」. In a playlist view, removal only affects that playlist
 13. Set a sleep timer (15 / 30 min, 1 / 3 / 6 h) below the playback mode selector
 14. 「他を同期」 on a device card brings every other device to that device's track and position
-15. 「メンテナンス」 at the bottom of the left column reports the cache size, removes files no track claims, re-downloads tracks whose audio is missing, and exports or imports the library structure
+15. 「YouTube と同期」 on a playlist imported from YouTube adds the videos its source has gained since
+16. 「メンテナンス」 at the bottom of the left column reports the cache size, removes files no track claims, re-downloads tracks whose audio is missing, and exports or imports the library structure
 
 ## Architecture
 
@@ -236,6 +237,7 @@ An install keeps the manifest and its icons on the device and re-fetches them la
     │    ├── youtube:playback_mode         # auto-play mode ("off" | "loop" | "repeat_one" | "shuffle")
     │    ├── youtube:playlists             # named playlist metadata (hash)
     │    ├── youtube:playlist:{id}         # playlist track ids in order (list)
+    │    ├── youtube:playlist_seen:{id}    # videos an import or sync already added (set)
     │    ├── youtube:active_playlist       # loop/shuffle selection scope (playlist id)
     │    ├── youtube:sleep_timer           # sleep timer expiry (UNIX seconds, with TTL)
     │    ├── youtube:pending:{device_id}   # queued play command (10 min TTL)
@@ -318,6 +320,8 @@ On `AudioPlayer.PlaybackNearlyFinished` the server picks the next track and enqu
 ### Playlists
 
 Tracks can be organized into named playlists, created from the Web UI or by an import. Names are unique: creating or renaming to a name another playlist already has is rejected with `409 Conflict`. A playlist stores an ordered list of track ids in `youtube:playlist:{id}` and shares the library's files, so adding or removing entries never touches the cache. Playlist rows reorder by dragging, as the library does. Deleting a track from the library removes it from every playlist.
+
+A playlist imported from YouTube remembers the list it came from (`source`), and 「YouTube と同期」 in its header (`POST /api/playlists/{id}/sync`) asks that list what it has gained since. Only videos the local playlist neither holds nor was given before are fetched, and they are appended; what is already there stays where it is, and a track removed locally is not fetched again (`youtube:playlist_seen:{id}` records what an import or sync added). A sync is additive, as an import is — a video removed on YouTube stays here, since dropping it would also undo every local removal and reorder. It reads up to 500 entries of the source and takes at most 100 new videos per run, so a source far ahead of its copy catches up over several runs. New videos are downloaded, or only registered when the streaming toggle is on, as a pasted URL would be. While an import or sync is still filling the playlist, another sync is refused with `409 Conflict`. A playlist imported before this existed has no source recorded; pasting its URL once more links it, and a library export carries the link.
 
 Pasting a YouTube playlist URL (or any YouTube URL with `list=` but no `v=`) bulk-imports it: the playlist is expanded with `yt-dlp --flat-playlist` (capped at 100 entries), a local playlist of the same name is created or appended to, and each video is downloaded sequentially in the background with the usual progress display. Videos that fail are skipped. A watch URL carrying both `v=` and `list=` is treated as a single video.
 
@@ -427,6 +431,7 @@ Broadcast frames:
 | POST | `/api/playlists` | Yes | Create a playlist (`name`) |
 | PATCH | `/api/playlists/{id}` | Yes | Rename a playlist (`name`) |
 | DELETE | `/api/playlists/{id}` | Yes | Delete a playlist (tracks are kept) |
+| POST | `/api/playlists/{id}/sync` | Yes | Add what the playlist's YouTube source has gained (`stream` to skip downloading) |
 | POST | `/api/playlists/{id}/tracks` | Yes | Add a track to a playlist (`track_id`) |
 | POST | `/api/playlists/{id}/tracks/bulk` | Yes | Bulk-add tracks (`track_ids`) |
 | POST | `/api/playlists/{id}/tracks/bulk-remove` | Yes | Bulk-remove from one playlist (`track_ids`) |

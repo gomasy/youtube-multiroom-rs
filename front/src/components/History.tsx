@@ -13,11 +13,13 @@ import {
   releaseTracks,
   removeFromPlaylist,
   renamePlaylist,
+  syncPlaylist,
   PER_PAGE,
 } from "../api";
 import { showApiError } from "../errors";
 import { useTrackReorder } from "../hooks";
 import { t, tFmt } from "../i18n";
+import { loadStreamMode } from "../prefs";
 import { TrackRowInfo } from "./TrackRowInfo";
 import { AddToPlaylistMenu } from "./AddToPlaylistMenu";
 import { AddToListIcon, CloseIcon, GripIcon, TrashIcon } from "./icons";
@@ -59,6 +61,7 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [bulkMenuOpen, setBulkMenuOpen] = useState(false);
   const [renameName, setRenameName] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
 
   const totalPages = lastPage(total);
   const viewingPlaylist = playlists.find((p) => p.id === viewPlaylist) ?? null;
@@ -254,6 +257,25 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
     }
   }
 
+  /** New videos follow the streaming toggle, as a pasted URL does. */
+  async function syncViewingPlaylist() {
+    if (!viewingPlaylist || syncing) return;
+    setSyncing(true);
+    try {
+      const data = await syncPlaylist(viewingPlaylist.id, loadStreamMode(), onUnauthorized);
+      showToast(
+        data.message ||
+          (data.total > 0
+            ? tFmt("history.syncStarted", { count: data.total })
+            : t("history.syncUpToDate")),
+      );
+    } catch (e) {
+      showError(e);
+    } finally {
+      setSyncing(false);
+    }
+  }
+
   function toggleSelect(trackId: string) {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -442,6 +464,16 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
                 ? `${viewingPlaylist.name} (${total})`
                 : `${t("history.tracks")} (${total})`}
             </span>
+            {viewingPlaylist?.source && (
+              <button
+                className="text-btn"
+                title={t("history.syncPlaylistHint")}
+                disabled={syncing}
+                onClick={syncViewingPlaylist}
+              >
+                {syncing ? t("history.syncing") : t("history.syncPlaylist")}
+              </button>
+            )}
             {viewingPlaylist && (
               <button
                 className="text-btn text-btn-danger"
