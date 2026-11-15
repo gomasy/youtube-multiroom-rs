@@ -319,7 +319,7 @@ On `AudioPlayer.PlaybackNearlyFinished` the server picks the next track and enqu
 
 ### Playlists
 
-Tracks can be organized into named playlists, created from the Web UI or by an import. Names are unique: creating or renaming to a name another playlist already has is rejected with `409 Conflict`. A playlist stores an ordered list of track ids in `youtube:playlist:{id}` and shares the library's files, so adding or removing entries never touches the cache. Playlist rows reorder by dragging, as the library does. Deleting a track from the library removes it from every playlist.
+Tracks can be organized into named playlists, created from the Web UI or by an import. Putting a track in a playlist moves it there: the library view lists only the tracks no playlist holds, so `GET /api/tracks` without `playlist` leaves the filed ones out. Removing a track from its playlist, or deleting the playlist, puts it back in the library view exactly where it was — its registration and its place in the library order never changed. The 「ライブラリ全体」 playback scope, playing a track by name and the library export still cover every track, filed or not. Names are unique: creating or renaming to a name another playlist already has is rejected with `409 Conflict`. A playlist stores an ordered list of track ids in `youtube:playlist:{id}` and shares the library's files, so adding or removing entries never touches the cache. Playlist rows reorder by dragging, as the library does. Deleting a track from the library removes it from every playlist.
 
 A playlist imported from YouTube remembers the list it came from (`source`), and 「YouTube と同期」 in its header (`POST /api/playlists/{id}/sync`) asks that list what it has gained since. Only videos the local playlist neither holds nor was given before are fetched, and they are appended; what is already there stays where it is, and a track removed locally is not fetched again (`youtube:playlist_seen:{id}` records what an import or sync added). A sync is additive, as an import is — a video removed on YouTube stays here, since dropping it would also undo every local removal and reorder. It reads up to 500 entries of the source and takes at most 100 new videos per run, so a source far ahead of its copy catches up over several runs. New videos are downloaded, or only registered when the streaming toggle is on, as a pasted URL would be. While an import or sync is still filling the playlist, another sync is refused with `409 Conflict`. A playlist imported before this existed has no source recorded; pasting its URL once more links it, and a library export carries the link.
 
@@ -420,7 +420,7 @@ Broadcast frames:
 | GET | `/api/audio/{id}/relay` | Signed URL | Relay a streamed track's audio as ADTS AAC via ffmpeg (`?start=<ms>` seeks) |
 | GET | `/api/audio/{id}/url` | Yes | Get a signed stream URL for browser preview |
 | GET | `/api/search` | Yes | Search YouTube (`q`, optional `limit`) |
-| GET | `/api/tracks` | Yes | List tracks in order (paginated, optional `playlist` and `q`) |
+| GET | `/api/tracks` | Yes | List the tracks no playlist holds, or a playlist's with `playlist` (paginated, optional `q`) |
 | POST | `/api/tracks/reorder` | Yes | Move a track within the library or a playlist order |
 | POST | `/api/tracks/bulk-delete` | Yes | Bulk-delete tracks by ID list |
 | POST | `/api/tracks/refresh-metadata` | Yes | Start a background metadata refresh (`track_ids`) |
@@ -432,7 +432,7 @@ Broadcast frames:
 | PATCH | `/api/playlists/{id}` | Yes | Rename a playlist (`name`) |
 | DELETE | `/api/playlists/{id}` | Yes | Delete a playlist (tracks are kept) |
 | POST | `/api/playlists/{id}/sync` | Yes | Add what the playlist's YouTube source has gained (`stream` to skip downloading) |
-| POST | `/api/playlists/{id}/tracks` | Yes | Add a track to a playlist (`track_id`) |
+| POST | `/api/playlists/{id}/tracks` | Yes | Move a track into a playlist (`track_id`) |
 | POST | `/api/playlists/{id}/tracks/bulk` | Yes | Bulk-add tracks (`track_ids`) |
 | POST | `/api/playlists/{id}/tracks/bulk-remove` | Yes | Bulk-remove from one playlist (`track_ids`) |
 | DELETE | `/api/playlists/{id}/tracks/{track_id}` | Yes | Remove a track from a playlist |

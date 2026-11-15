@@ -70,6 +70,8 @@ pub async fn delete_playlist(
         return Err(AppError::not_found("Playlist not found"));
     }
     state.broadcast_playlists().await;
+    // The tracks it held are back in the library view.
+    state.broadcast_tracks();
     // If this playlist was the active playback scope, notify that it reverted to full library
     state.broadcast_active_playlist().await;
     Ok(Json(json!({ "status": "ok" })))

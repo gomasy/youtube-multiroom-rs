@@ -395,6 +395,8 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
       const data = await bulkAddToPlaylist(playlistId, Array.from(selected), onUnauthorized);
       showToast(data.message || t("history.addedToPlaylist"));
       exitSelectMode();
+      // The moved tracks have left this view.
+      setLocalVersion((v) => v + 1);
     } catch (e) {
       showError(e);
     }
@@ -405,6 +407,7 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
     try {
       const data = await addToPlaylist(playlistId, trackId, onUnauthorized);
       showToast(data.message || t("history.addedToPlaylist"));
+      setLocalVersion((v) => v + 1);
     } catch (e) {
       showError(e);
     }

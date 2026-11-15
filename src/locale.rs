@@ -67,7 +67,7 @@ mod tests {
         );
         assert_eq!(
             t!("api_added_to_playlist", locale = "en", title = "Song"),
-            "Added \"Song\" to playlist"
+            "Moved \"Song\" to the playlist"
         );
     }
 }

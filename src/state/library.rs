@@ -15,7 +15,7 @@
 
 use super::model::{ImportOutcome, LibraryExport, PlaylistExport, WriteOutcome};
 use super::url::is_video_id;
-use super::{AppState, now_f64, playlist_key, redis_or};
+use super::{AppState, now_f64};
 use std::collections::{HashMap, HashSet};
 
 /// Document format version. Bumped only for a change an older server could not
@@ -32,18 +32,7 @@ impl AppState {
             self.active_playlist(),
         );
 
-        // Every playlist's membership in one round-trip, as playlists_json
-        // reads their counts.
-        let mut pipe = redis::pipe();
-        for playlist in &playlists {
-            pipe.lrange(playlist_key(&playlist.id), 0, -1);
-        }
-        let mut conn = self.redis.clone();
-        let memberships: Vec<Vec<String>> = redis_or!(
-            "reading playlist tracks",
-            pipe.query_async(&mut conn).await,
-            vec![Vec::new(); playlists.len()]
-        );
+        let memberships = self.playlist_memberships(&playlists).await;
         let exported = playlists
             .into_iter()
             .zip(memberships)

@@ -397,6 +397,31 @@ impl AppState {
         ids.iter().filter_map(|id| by_id.remove(id)).collect()
     }
 
+    /// Each playlist's track ids, in one pipeline round-trip. A failed read
+    /// reports every playlist as empty.
+    pub(crate) async fn playlist_memberships(&self, playlists: &[Playlist]) -> Vec<Vec<String>> {
+        if playlists.is_empty() {
+            return Vec::new();
+        }
+        let mut pipe = redis::pipe();
+        for playlist in playlists {
+            pipe.lrange(playlist_key(&playlist.id), 0, -1);
+        }
+        let mut conn = self.redis.clone();
+        redis_or!(
+            "reading playlist tracks",
+            pipe.query_async(&mut conn).await,
+            vec![Vec::new(); playlists.len()]
+        )
+    }
+
+    /// Every track id some playlist holds.
+    pub(crate) async fn filed_track_ids(&self) -> HashSet<String> {
+        let playlists = self.playlists().await;
+        let memberships = self.playlist_memberships(&playlists).await;
+        memberships.into_iter().flatten().collect()
+    }
+
     /// Return all playlists with metadata and track counts in creation order (API/WS wire format).
     pub async fn playlists_json(&self) -> Value {
         let playlists = self.playlists().await;

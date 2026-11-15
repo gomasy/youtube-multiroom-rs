@@ -290,6 +290,14 @@ impl AppState {
         tracks
     }
 
+    /// The library view: tracks no playlist holds, in library order. Derived
+    /// rather than stored, so a track leaving its playlist is back in place.
+    pub async fn unfiled_tracks(&self) -> Vec<AudioTrack> {
+        let (mut tracks, filed) = tokio::join!(self.list_tracks(), self.filed_track_ids());
+        tracks.retain(|t| !filed.contains(&t.id));
+        tracks
+    }
+
     /// Move a track to new_index (0-based) and persist. If playlist_id is given,
     /// reorder within that playlist; otherwise reorder the entire library.
     pub async fn reorder_track(
@@ -316,8 +324,13 @@ impl AppState {
                 let Ok(stored) = self.try_track_order().await else {
                     return ReorderOutcome::Failed;
                 };
-                let listed: Vec<String> =
-                    self.list_tracks().await.into_iter().map(|t| t.id).collect();
+                // `new_index` counts within the library view.
+                let listed: Vec<String> = self
+                    .unfiled_tracks()
+                    .await
+                    .into_iter()
+                    .map(|t| t.id)
+                    .collect();
                 let Some(ids) = move_in_library_order(stored, &listed, track_id, new_index) else {
                     return ReorderOutcome::NotInList;
                 };
@@ -506,12 +519,21 @@ impl AppState {
         )
     }
 
-    /// Return tracks for the given scope. If a playlist is specified, return its
-    /// track order; otherwise return the full library order.
+    /// Return tracks for the given playback scope. If a playlist is specified,
+    /// return its track order; otherwise the full library order, filed tracks
+    /// included (unlike [`Self::view_tracks`]).
     pub async fn scoped_tracks(&self, playlist_id: Option<&str>) -> Vec<AudioTrack> {
         match playlist_id {
             Some(pid) => self.list_playlist_tracks(pid).await,
             None => self.list_tracks().await,
+        }
+    }
+
+    /// What a listing shows: a playlist's tracks, or the library view.
+    async fn view_tracks(&self, playlist_id: Option<&str>) -> Vec<AudioTrack> {
+        match playlist_id {
+            Some(pid) => self.list_playlist_tracks(pid).await,
+            None => self.unfiled_tracks().await,
         }
     }
 
@@ -563,7 +585,8 @@ impl AppState {
     }
 
     /// Return tracks for the given page (1-based) and total count.
-    /// If playlist_id is given, return in that playlist's track order.
+    /// If playlist_id is given, return in that playlist's track order;
+    /// otherwise the library view, which leaves out what a playlist holds.
     /// If filter is given, only include tracks whose title or channel
     /// contains the substring (case-insensitive).
     pub async fn list_tracks_page(
@@ -573,7 +596,7 @@ impl AppState {
         per_page: usize,
         filter: Option<&str>,
     ) -> (Vec<AudioTrack>, usize) {
-        let tracks = self.scoped_tracks(playlist_id).await;
+        let tracks = self.view_tracks(playlist_id).await;
         let tracks = match filter {
             Some(q) => {
                 let q = q.to_lowercase();
