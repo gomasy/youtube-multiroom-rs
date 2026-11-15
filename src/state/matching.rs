@@ -4,24 +4,13 @@
 //! by its own rules, and casing that means nothing. So neither side is compared
 //! as written — both are folded down to the characters that carry the name, and
 //! the score says how much of one the other accounts for.
-//!
-//! Nothing here touches Redis. The lookups themselves live with their subject
-//! (`find_track` in [`super::track`], `find_playlist` in [`super::playlist`]);
-//! this is only how candidates are ranked against each other.
 
 /// The score of a field that is the query and nothing else. Named because
 /// callers short-circuit on it: nothing can beat an exact match in its tier.
 pub(super) const EXACT: u32 = 100;
 
-/// How well `field` answers a query already reduced by [`fold`], higher being
-/// better. `None` when the two are unrelated, which is what keeps an
-/// unrecognized phrase from playing something arbitrary.
-///
-/// The three tiers are what a listener would rank the same way: the whole name,
-/// the start of it, and a mention somewhere inside.
-///
-/// The query arrives folded rather than being folded here, so a search over a
-/// few hundred candidates folds it once instead of once per comparison.
+/// How well `field` answers a query already reduced by [`fold`]: the whole
+/// name, the start of it, or a mention inside. `None` when unrelated.
 pub(super) fn match_score(field: &str, folded_query: &str) -> Option<u32> {
     let field = fold(field);
     // An empty query would otherwise be a prefix of everything.
@@ -39,11 +28,8 @@ pub(super) fn match_score(field: &str, folded_query: &str) -> Option<u32> {
     }
 }
 
-/// Reduce a string to the characters that name it: letters and digits, in
-/// lowercase. Everything else only separates words, and the two sides never
-/// agree on that — a title writes "Hello, World!" where speech recognition
-/// hands over "hello world", and a Japanese title spaces its words wherever it
-/// likes or not at all.
+/// Reduce a string to its lowercase letters and digits: punctuation and
+/// spacing never agree between a written title and speech recognition.
 pub(super) fn fold(s: &str) -> String {
     s.chars()
         .filter(|c| c.is_alphanumeric())
@@ -51,12 +37,9 @@ pub(super) fn fold(s: &str) -> String {
         .collect()
 }
 
-/// The highest-scoring item, or None if `score` answers for none of them.
-///
-/// Ties go to the earliest, which is what makes a phrase always resolve to the
-/// same thing: the caller orders the candidates the way the user sees them —
-/// library order, playlist creation order — and the answer follows that rather
-/// than whatever the iteration happened to reach last.
+/// The highest-scoring item, or None if `score` answers for none. Ties go to
+/// the earliest, so a phrase always resolves to the same thing in the caller's
+/// order.
 pub(super) fn best_scored<T>(
     items: impl IntoIterator<Item = T>,
     score: impl Fn(&T) -> Option<u32>,

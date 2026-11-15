@@ -33,25 +33,24 @@ pub(crate) struct VideoJob {
 }
 
 impl VideoJob {
-    pub(crate) fn new(label: String, counted: &'static str, dropped: &'static str) -> Self {
+    pub(crate) fn new(
+        label: impl Into<String>,
+        counted: &'static str,
+        dropped: &'static str,
+    ) -> Self {
         Self {
-            label,
+            label: label.into(),
             counted,
             dropped,
         }
     }
 
     /// Visit each video in turn until the list runs out or the job is stopped,
-    /// returning the tally however it ended. `visit` owns the work and its own
-    /// success logging; what it reports — a per-video failure, a reason to stop
-    /// early — is folded into the tally and log lines here.
+    /// returning the tally (already logged; returned for the tests).
     ///
-    /// The ID is handed over owned rather than lent: an `AsyncFnMut` borrowing
-    /// it makes the returned future higher-ranked, which stops `tokio::spawn`
-    /// from proving the job `Send`.
-    ///
-    /// Both callers spawn this and ignore the tally — it is already logged —
-    /// but returning it is what lets the stopping rules be tested.
+    /// The ID is handed over owned: an `AsyncFnMut` borrowing it makes the
+    /// returned future higher-ranked, which stops `tokio::spawn` from proving
+    /// the job `Send`.
     pub(crate) async fn run<F, Fut>(
         self,
         video_ids: &[String],
@@ -112,7 +111,7 @@ mod tests {
     }
 
     fn job() -> VideoJob {
-        VideoJob::new("Test job".to_string(), "done", "deleted while fetching")
+        VideoJob::new("Test job", "done", "deleted while fetching")
     }
 
     /// Run the job, recording which videos it actually reached.
@@ -146,40 +145,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_video_dropping_out_does_not_end_the_job() {
-        // A cancellation with the token still live means that one video was
-        // deleted mid-fetch: the rest still runs, and it is not counted.
-        let (done, seen) = run_recording(&ids(3), &CancellationToken::new(), |id| async move {
-            if id == "video1" {
-                Err(DownloadError::Cancelled)
-            } else {
-                Ok(Visited::Done)
-            }
-        })
-        .await;
-        assert_eq!(done, 2);
-        assert_eq!(seen, ids(3));
-    }
-
-    #[tokio::test]
-    async fn a_failure_does_not_end_the_job_either() {
-        let (done, seen) = run_recording(&ids(3), &CancellationToken::new(), |id| async move {
-            if id == "video0" {
-                Err(DownloadError::Failed("no such video".to_string()))
-            } else {
-                Ok(Visited::Done)
-            }
-        })
-        .await;
-        assert_eq!(done, 2);
-        assert_eq!(seen, ids(3));
+    async fn one_video_failing_or_dropping_out_does_not_end_the_job() {
+        // Cancelled with the token still live: that one video was deleted
+        // mid-fetch. Neither it nor a failure is counted.
+        for error in [
+            || DownloadError::Cancelled,
+            || DownloadError::Failed("no such video".to_string()),
+        ] {
+            let (done, seen) = run_recording(&ids(3), &CancellationToken::new(), |id| async move {
+                if id == "video1" {
+                    Err(error())
+                } else {
+                    Ok(Visited::Done)
+                }
+            })
+            .await;
+            assert_eq!(done, 2);
+            assert_eq!(seen, ids(3));
+        }
     }
 
     #[tokio::test]
     async fn a_real_stop_ends_the_job_at_once() {
-        // Stop all cancels the shared token, so the in-flight video reports
-        // Cancelled *and* the token reads cancelled. Nothing after it is
-        // fetched, which is what makes Stop all prompt.
+        // Stop all cancels the shared token, so nothing after the in-flight
+        // video is fetched.
         let cancel = CancellationToken::new();
         let (done, seen) = run_recording(&ids(4), &cancel, |id| {
             let cancel = cancel.clone();
@@ -198,8 +187,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_stop_between_videos_buys_the_next_one_no_fetch() {
-        // A visit stopped only after completing normally must still not let the
-        // loop start the following yt-dlp run.
         let cancel = CancellationToken::new();
         let (done, seen) = run_recording(&ids(4), &cancel, |id| {
             let cancel = cancel.clone();
@@ -217,8 +204,6 @@ mod tests {
 
     #[tokio::test]
     async fn losing_what_the_job_fills_stops_it() {
-        // The playlist being imported into was deleted: there is nowhere left
-        // to put the remaining videos, so none of them are fetched.
         let (done, seen) = run_recording(&ids(4), &CancellationToken::new(), |id| async move {
             if id == "video2" {
                 Ok(Visited::Stop("the playlist was deleted".to_string()))

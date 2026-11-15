@@ -1,13 +1,9 @@
 //! What clients are told about the yt-dlp-backed work in flight, and the
 //! cancellation generation that stops it.
 //!
-//! One entry per job, broadcast to every client as `downloads_update`. Nothing
-//! here knows what the work actually is: a download walks its entry from the
-//! metadata stage to a percentage, a metadata refresh only opens and closes
-//! one, a playlist import holds one until it has expanded into per-video jobs.
-//! An entry opens the moment the job is accepted rather than at its first
-//! yt-dlp call, so what the user asked for is visible while it queues. Kept
-//! in-process: a restart drops the map and clients re-sync from `init`.
+//! One entry per job, broadcast as `downloads_update` and opened the moment the
+//! job is accepted. Kept in-process: a restart drops the map and clients
+//! re-sync from `init`.
 
 use super::model::{DownloadKind, DownloadProgress, DownloadStatus};
 use super::ytdlp::DownloadError;
@@ -22,12 +18,9 @@ use tokio_util::sync::CancellationToken;
 /// still see the error.
 const DOWNLOAD_ERROR_TTL_SECS: u64 = 60;
 
-/// Keeps a playlist import that is still resolving its video list out of the
-/// video ID keyspace. Internal to the key: clients learn what an entry tracks
-/// from `DownloadKind`, not by parsing a prefix off.
+/// Keeps playlist-import entries out of the video ID keyspace.
 const PLAYLIST_PROGRESS_PREFIX: &str = "list:";
 
-/// The progress key for a playlist import, the one job not named by a video ID.
 pub(super) fn playlist_progress_key(list_id: &str) -> String {
     format!("{PLAYLIST_PROGRESS_PREFIX}{list_id}")
 }
@@ -59,42 +52,30 @@ impl AppState {
             .await;
     }
 
-    /// Put a job on display and return the stamp identifying its entry, which
-    /// `settle_progress` needs to close it out. Jobs start at the metadata
-    /// stage showing `title` — the video ID for a download until
-    /// set_download_meta lands the real one, the stored title for a metadata
-    /// refresh, the playlist ID for an import.
-    ///
-    /// Called as early as the job is known, before the slot wait and the cache
-    /// lookup, so a request is on display for all of it. Living here rather
-    /// than in the client that asked is what carries it across a reload.
-    ///
-    /// None when the key already belongs to a job on display: that entry is the
-    /// other job's to settle, and a second request must not reset it.
-    pub(super) async fn begin_progress(&self, key: &str, title: &str) -> Option<f64> {
-        let started_at = now_f64();
-        self.update_downloads(|downloads| insert_entry(downloads, key, title, started_at))
-            .await
-            .then_some(started_at)
-    }
-
-    /// Fold a finished job into the display: cleared once it completed or was
-    /// stopped — a cancellation is not a failure to report — and kept on
-    /// display as an error for a while otherwise. Without a stamp from
-    /// `begin_progress` this job owns no entry and has nothing to close out.
-    pub(super) async fn settle_progress<T>(
+    /// Keep `work` on display under `key` while it runs: shown at the metadata
+    /// stage as `title`, cleared on success or cancellation, kept as an error
+    /// for a while otherwise. A key a running job already owns is left to that
+    /// job.
+    pub(super) async fn with_progress<T>(
         self: &Arc<Self>,
         key: &str,
-        stamp: Option<f64>,
-        result: &Result<T, DownloadError>,
-    ) {
-        let Some(started_at) = stamp else {
-            return;
-        };
-        match result {
-            Ok(_) | Err(DownloadError::Cancelled) => self.finish_download(key, started_at).await,
-            Err(e) => self.fail_download(key, started_at, &e.to_string()).await,
+        title: &str,
+        work: impl Future<Output = Result<T, DownloadError>>,
+    ) -> Result<T, DownloadError> {
+        let started_at = now_f64();
+        let owned = self
+            .update_downloads(|downloads| insert_entry(downloads, key, title, started_at))
+            .await;
+        let result = work.await;
+        if owned {
+            match &result {
+                Ok(_) | Err(DownloadError::Cancelled) => {
+                    self.finish_download(key, started_at).await;
+                }
+                Err(e) => self.fail_download(key, started_at, &e.to_string()).await,
+            }
         }
+        result
     }
 
     /// Set the title after the metadata fetch. Live and streamed tracks are
@@ -131,7 +112,6 @@ impl AppState {
         .await;
     }
 
-    /// Remove a finished job from the progress map and broadcast.
     async fn finish_download(&self, key: &str, started_at: f64) {
         self.update_downloads(|downloads| {
             owned_entry(downloads, key, started_at).is_some() && downloads.remove(key).is_some()
@@ -162,12 +142,7 @@ impl AppState {
         let key = key.to_string();
         tokio::spawn(async move {
             time::sleep(time::Duration::from_secs(DOWNLOAD_ERROR_TTL_SECS)).await;
-            state
-                .update_downloads(|downloads| {
-                    owned_entry(downloads, &key, started_at).is_some()
-                        && downloads.remove(&key).is_some()
-                })
-                .await;
+            state.finish_download(&key, started_at).await;
         });
     }
 
@@ -177,9 +152,7 @@ impl AppState {
         self.download_cancel.lock().await.clone()
     }
 
-    /// Cancel all work started under the current token. Each active yt-dlp run
-    /// observes it, stops its process group, and removes only its own staging
-    /// directory before returning.
+    /// Cancel all work started under the current token.
     pub async fn cancel_downloads(&self) {
         // Held until the stale progress snapshot is cleared, so a download that
         // already picked up the replacement token keeps its entry.
@@ -208,10 +181,8 @@ impl AppState {
     }
 }
 
-/// Start an entry for `key` unless a still-running job already owns it,
-/// reporting whether one was inserted. What a failed job left behind is a
-/// display, not an owner: a retry takes the entry over, so its progress is what
-/// is shown and the expiry the failure scheduled no longer applies.
+/// Start an entry for `key` unless a running job owns it, reporting whether one
+/// was inserted. A failed job's leftover entry is taken over by a retry.
 fn insert_entry(
     downloads: &mut HashMap<String, DownloadProgress>,
     key: &str,
@@ -244,9 +215,6 @@ fn insert_entry(
 }
 
 /// The entry under `key`, while it is still the one `started_at` identifies.
-/// An entry belongs to the job that started it: once another job has taken the
-/// key, every write the first still owes — the outcome it reports, the error it
-/// expires — is aimed at an entry that is no longer its own.
 fn owned_entry<'a>(
     downloads: &'a mut HashMap<String, DownloadProgress>,
     key: &str,

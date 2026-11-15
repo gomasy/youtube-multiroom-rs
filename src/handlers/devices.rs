@@ -42,9 +42,7 @@ pub async fn play_on_all(
     queue_on_devices(&state, track, device_ids, &locale).await
 }
 
-/// Every registered device. Failing to read them is ours to report, not a
-/// malformed request — the caller asked for "all of them" and we cannot say
-/// which those are.
+/// Every registered device; failing to read them is a 500.
 async fn all_device_ids(state: &AppState) -> AppResult<Vec<String>> {
     state
         .device_ids()
@@ -53,17 +51,9 @@ async fn all_device_ids(state: &AppState) -> AppResult<Vec<String>> {
 }
 
 /// Apply a per-device write to every target, returning the devices it reached.
-///
-/// A named device that is no longer registered is skipped rather than failing
-/// the request: the client's list is a snapshot, and one stale entry must not
-/// cost the user the devices still there. Reaching none at all is the error,
-/// and which error depends on why — a device that exists but could not be
-/// written to is our fault, not a malformed request. `failed` carries no Redis
-/// detail; the write already logged it.
-///
-/// The ID is handed over owned for the reason `VideoJob::run` documents: a
-/// borrowing `write` makes the returned future higher-ranked, which stops axum
-/// from proving the handler `Send`.
+/// A device no longer registered is skipped; reaching none is an error (500 if
+/// a write failed, else 400). The ID is handed over owned for the reason
+/// `VideoJob::run` documents.
 async fn reach_devices<F, Fut>(
     device_ids: Vec<String>,
     failed: &'static str,
@@ -143,8 +133,7 @@ pub async fn queue_next(
 
 /// DELETE /api/devices/:id/queue/:entry
 ///
-/// Remove one queue item by value match. Entries are unique, so a device
-/// consuming one concurrently cannot cause the wrong track to be removed.
+/// Remove one queue item by value match.
 pub async fn remove_queue_item(
     State(state): State<Arc<AppState>>,
     Path((device_id, entry)): Path<(String, String)>,
@@ -175,9 +164,8 @@ pub async fn clear_queue(
 
 /// POST /api/devices/:id/seek
 ///
-/// Queue a seek command for a device's current track. Since the Alexa skill
-/// cannot push directives to devices, the seek is applied when the Echo next
-/// connects to the skill (via voice command or track transition).
+/// Queue a seek for a device's current track, applied when the Echo next
+/// contacts the skill.
 pub async fn seek_device(
     State(state): State<Arc<AppState>>,
     Path(device_id): Path<String>,
@@ -211,9 +199,7 @@ pub async fn seek_device(
 /// POST /api/devices/:id/sync
 ///
 /// Line the other devices up with this one: queue its current track on each,
-/// starting from where it is now. Like a seek, each device applies it the next
-/// time it contacts the skill, so this is what brings a room that joined late
-/// into the same part of the same track rather than back to its beginning.
+/// starting from where it is now.
 pub async fn sync_devices(
     State(state): State<Arc<AppState>>,
     Path(device_id): Path<String>,
@@ -256,21 +242,14 @@ pub async fn sync_devices(
     })))
 }
 
-/// Where a follower should pick the leader's track up.
-///
-/// A live stream has no position to match — the relay hands out whatever is at
-/// the live edge either way — and a finite track is clamped short of its end,
-/// as a seek is, so a follower does not start by immediately finishing.
+/// Where a follower should pick the leader's track up: the leader's position
+/// clamped short of the end, or zero for a live stream, which has no position
+/// to match.
 fn sync_offset(leader: &DeviceState, track: &AudioTrack) -> u64 {
     if track.is_live {
         return 0;
     }
-    let position = leader.estimated_position_ms(crate::state::now_f64());
-    // A track of unknown length has nothing to clamp against, and the position
-    // is still the best answer — unlike a seek, it was measured, not asked for.
-    track
-        .max_offset_ms()
-        .map_or(position, |max_ms| position.min(max_ms))
+    track.clamp_offset_ms(leader.estimated_position_ms(crate::state::now_f64()))
 }
 
 /// POST /api/devices/:id/stop

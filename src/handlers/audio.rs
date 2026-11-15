@@ -118,9 +118,7 @@ pub async fn relay_audio(
         return Err(AppError::bad_request("Track is not a streamed track"));
     }
 
-    let start_ms = track
-        .max_offset_ms()
-        .map_or(query.start, |max| query.start.min(max));
+    let start_ms = track.clamp_offset_ms(query.start);
     let remaining =
         Duration::from_millis(track.duration.saturating_mul(1000).saturating_sub(start_ms));
     let source = state

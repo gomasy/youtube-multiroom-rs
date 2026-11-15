@@ -21,20 +21,19 @@ pub async fn alexa_webhook(
     headers: HeaderMap,
     body: Bytes,
 ) -> AppResult<Json<Value>> {
-    if let Err(e) = verify_request(&headers, &body).await {
+    // The reason is logged; the sender is told only that verification failed.
+    let reject = |e| {
         tracing::warn!("Rejected Alexa request: {e}");
-        return Err(AppError::bad_request("Request verification failed"));
-    }
+        AppError::bad_request("Request verification failed")
+    };
+    verify_request(&headers, &body).await.map_err(reject)?;
 
     let body: Value =
         serde_json::from_slice(&body).map_err(|_| AppError::bad_request("Invalid JSON body"))?;
 
-    // The two body-level checks report the way the signature check does: the
-    // reason is logged, and the sender is told only that verification failed.
-    if let Err(e) = verify_timestamp(&body).and_then(|()| verify_application_id(&body)) {
-        tracing::warn!("Rejected Alexa request: {e}");
-        return Err(AppError::bad_request("Request verification failed"));
-    }
+    verify_timestamp(&body)
+        .and_then(|()| verify_application_id(&body))
+        .map_err(reject)?;
 
     let req_type = body["request"]["type"].as_str().unwrap_or("unknown");
     tracing::info!("Alexa request: {}", req_type);

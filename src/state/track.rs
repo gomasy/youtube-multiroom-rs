@@ -33,31 +33,13 @@ impl AppState {
         Ok(json_str.and_then(|s| AudioTrack::from_redis_json(&s)))
     }
 
-    pub async fn remove_track(&self, id: &str) -> Option<AudioTrack> {
-        let (track, slot) = self.unregister_track(id).await?;
-        self.forget_references(&HashSet::from([id])).await;
-        self.release_extract_slot(id, &slot).await;
-        Some(track)
-    }
-
-    /// Delete every registered track named, and return how many that was.
-    ///
-    /// The per-video work — claiming the extract slot, removing the cache file,
-    /// dropping the registration — is still one track at a time. What follows
-    /// is not: each of the sweeps that clears the references to a deleted track
-    /// (the library order, every playlist, the queued play commands, the device
-    /// queues) costs the same whether it clears one id or a hundred, so they
-    /// run once for the whole set. Deleting a page of tracks one at a time
-    /// meant a SCAN of the pending commands, a read of every playlist and a
-    /// read of every device queue *per track*.
-    ///
-    /// Ids naming nothing are skipped, and a repeat is deleted once.
+    /// Delete every registered track named and return how many. The reference
+    /// sweeps run once for the whole set rather than per track. Unknown ids
+    /// are skipped; a repeat counts once.
     pub async fn remove_tracks(&self, ids: &[String]) -> usize {
-        // A repeat finds nothing registered the second time round, so it claims
-        // no second slot and cannot appear here twice.
         let mut claimed: Vec<(&str, Arc<ExtractSlot>)> = Vec::new();
         for id in ids {
-            if let Some((_, slot)) = self.unregister_track(id).await {
+            if let Some(slot) = self.unregister_track(id).await {
                 claimed.push((id.as_str(), slot));
             }
         }
@@ -73,41 +55,29 @@ impl AppState {
         removed.len()
     }
 
-    /// Delete one track's cache file and its registration, leaving what still
-    /// refers to it for [`Self::forget_references`]. None when nothing was
-    /// registered under this id — a download still in flight for the video
-    /// registers a fresh track rather than resurrecting this one.
+    /// Delete one track's cache file and registration, leaving its references
+    /// for [`Self::forget_references`]. None when nothing is registered under
+    /// this id.
     ///
-    /// The video's extract slot comes back with the track, still held: it is
-    /// what stops a re-download of the same video from registering underneath
-    /// the sweep that has yet to run, which would strip the fresh track of the
-    /// order position and playlist memberships it just earned. The caller
-    /// releases it once that sweep is done.
-    async fn unregister_track(&self, id: &str) -> Option<(AudioTrack, Arc<ExtractSlot>)> {
+    /// The extract slot comes back still held, so a re-download cannot
+    /// register underneath the pending sweep; the caller releases it
+    /// afterwards.
+    async fn unregister_track(&self, id: &str) -> Option<Arc<ExtractSlot>> {
         // Not just a fast path: marking the slot deleted would cancel an
         // in-flight first download of this video.
         self.get_track(id).await?;
 
-        // Claim the video's extract slot for the deletion. A download that
-        // would rewrite this entry when it commits is told to discard its own
-        // registration instead, so the deletion never waits it out.
+        // Claimed for the deletion: a download about to commit discards its
+        // own registration.
         let slot = self.extract_slot(id).await;
         slot.mark_deleted();
-        match self.unregister_track_locked(id).await {
-            Some(track) => Some((track, slot)),
-            None => {
-                self.release_extract_slot(id, &slot).await;
-                None
-            }
-        }
-    }
-
-    /// The half of a deletion that runs under the video's extract slot.
-    async fn unregister_track_locked(&self, id: &str) -> Option<AudioTrack> {
-        let track = self.get_track(id).await?;
+        let Some(track) = self.get_track(id).await else {
+            self.release_extract_slot(id, &slot).await;
+            return None;
+        };
         let file = (!track.file_path.is_empty()).then(|| Path::new(&track.file_path));
         self.delete_track_registration(id, file).await;
-        Some(track)
+        Some(slot)
     }
 
     /// Remove a track's file and registration. File first: if the HDEL empties
@@ -121,11 +91,8 @@ impl AppState {
         warn_redis!("deleting track {id}", conn.hdel(REDIS_KEY_TRACKS, id).await);
     }
 
-    /// Drop every reference to a set of deleted tracks, so nothing left behind
-    /// can play one or put it back.
-    ///
-    /// Each sweep is safe to run late: a listing skips ids no track answers to,
-    /// and `peek_queue` clears a queue entry whose track is gone.
+    /// Drop every reference to a set of deleted tracks. Each sweep is safe to
+    /// run late.
     async fn forget_references(&self, ids: &HashSet<&str>) {
         self.unlink_from_order_and_playlists(ids).await;
         self.clear_pending_referencing(ids).await;
@@ -149,9 +116,8 @@ impl AppState {
         }
         let mut conn = self.redis.clone();
         if let Err(e) = pipe.query_async::<()>(&mut conn).await {
-            // The whole pipeline failed or none of it did, so the count is what
-            // there is to report — naming one of the ids would suggest the rest
-            // succeeded.
+            // The pipeline fails as a whole, so the count is reported rather
+            // than one id.
             tracing::warn!("Redis error unlinking {} deleted track(s): {e}", ids.len());
         }
     }
@@ -278,9 +244,6 @@ impl AppState {
         let mut tracks: Vec<AudioTrack> = order.iter().filter_map(|id| by_id.remove(id)).collect();
 
         let mut rest: Vec<AudioTrack> = by_id.into_values().collect();
-        // total_cmp rather than partial_cmp: a total order over every f64
-        // leaves no incomparable case to decide about, and playlists() sorts
-        // the same field the same way.
         rest.sort_by(|a, b| {
             b.created_at
                 .total_cmp(&a.created_at)
@@ -345,13 +308,8 @@ impl AppState {
         }
     }
 
-    /// Replace an order list — the library's or a playlist's — wholesale. At
-    /// most a few hundred ids, so a full replace is cheaper to reason about
-    /// than a diff, and it is atomic so no reader sees the list half-written.
-    ///
-    /// Callers hold `order_lock`: the read they based `ids` on and this write
-    /// have to be one step, or a concurrent edit lands between them and is then
-    /// overwritten. Returns whether the list was written.
+    /// Replace an order list (the library's or a playlist's) atomically.
+    /// Callers hold `order_lock`. Returns whether the list was written.
     async fn write_order_list(&self, key: &str, ids: &[String]) -> bool {
         // RPUSH with no values is an error, so an empty list is deleted rather
         // than written. DEL alone also leaves no stale entries behind.
@@ -361,26 +319,16 @@ impl AppState {
             pipe.rpush(key, ids);
         }
         let mut conn = self.redis.clone();
-        match pipe.query_async::<()>(&mut conn).await {
-            Ok(()) => true,
-            Err(e) => {
-                tracing::warn!("Redis error writing the order list {key}: {e}");
-                false
-            }
-        }
+        redis_or!(
+            "writing the order list {key}",
+            pipe.query_async::<()>(&mut conn).await.map(|()| true),
+            false
+        )
     }
 
-    /// Put `video_id` back where `snapshot` had it in the order list.
-    ///
-    /// A download prepends, which is right for a track being added and wrong
-    /// for one being recovered: a repair or an import restores files the
-    /// library already has a place for, and moving them all to the top would
-    /// scramble an order nobody asked to change.
-    ///
-    /// The position is taken from the neighbours rather than from an index, so
-    /// what the rest of the list did in the meantime is preserved: the track
-    /// lands just after the last id that precedes it in the snapshot and is
-    /// still there.
+    /// Put `video_id` back where `snapshot` had it: just after the last id
+    /// preceding it there that is still listed. A download prepends, which is
+    /// wrong for a recovered track.
     pub(crate) async fn restore_order_position(&self, video_id: &str, snapshot: &[String]) {
         let _guard = self.order_lock.lock().await;
         let Ok(mut current) = self.try_track_order().await else {
@@ -395,10 +343,9 @@ impl AppState {
             .await;
     }
 
-    /// Replace the library order with `edit`'s verdict on what it currently
-    /// holds. The read and the write are one step under `order_lock`, and a
-    /// read that fails aborts rather than writing back a list that every id
-    /// Redis failed to report is missing from.
+    /// Replace the library order with `edit`'s result, as one step under
+    /// `order_lock`. A failed read aborts rather than writing back a partial
+    /// list.
     pub(crate) async fn rewrite_track_order(
         &self,
         edit: impl FnOnce(Vec<String>) -> Vec<String>,
@@ -411,14 +358,9 @@ impl AppState {
             .then_some(ids.len())
     }
 
-    /// The raw order list, including ids no registered track answers to. Those
-    /// are what an import leaves as placeholders for videos still to arrive, so
-    /// a recovery job has to read the list as stored rather than as listed.
-    ///
-    /// A read that failed reads as empty here, which is what the one caller
-    /// wants: an absent snapshot leaves recovered tracks where the download put
-    /// them rather than moving them somewhere guessed at. Callers that write
-    /// the list back must use `try_track_order` instead.
+    /// The raw order list, including import placeholders no track answers to.
+    /// A failed read reads as empty; callers that write the list back use
+    /// `try_track_order`.
     pub(crate) async fn track_order(&self) -> Vec<String> {
         self.try_track_order().await.unwrap_or_default()
     }
@@ -440,10 +382,9 @@ impl AppState {
         })
     }
 
-    /// If the youtube:tracks key is missing in Redis (e.g. after a fresh init),
-    /// re-fetch metadata from audio_cache m4a filenames and register them.
-    /// Since yt-dlp takes time per track, restoration runs in the background
-    /// and broadcasts tracks_update on completion so clients refresh.
+    /// If youtube:tracks is missing (e.g. after a fresh init), rebuild it in
+    /// the background from the audio_cache filenames and broadcast
+    /// tracks_update when done.
     pub async fn restore_tracks_if_missing(self: &Arc<Self>) {
         let mut conn = self.redis.clone();
         match conn.exists::<_, bool>(REDIS_KEY_TRACKS).await {
@@ -519,16 +460,6 @@ impl AppState {
         )
     }
 
-    /// Return tracks for the given playback scope. If a playlist is specified,
-    /// return its track order; otherwise the full library order, filed tracks
-    /// included (unlike [`Self::view_tracks`]).
-    pub async fn scoped_tracks(&self, playlist_id: Option<&str>) -> Vec<AudioTrack> {
-        match playlist_id {
-            Some(pid) => self.list_playlist_tracks(pid).await,
-            None => self.list_tracks().await,
-        }
-    }
-
     /// What a listing shows: a playlist's tracks, or the library view.
     async fn view_tracks(&self, playlist_id: Option<&str>) -> Vec<AudioTrack> {
         match playlist_id {
@@ -537,10 +468,13 @@ impl AppState {
         }
     }
 
-    /// Return tracks in the active scope (active playlist, or entire library if none).
+    /// The playback scope: the active playlist's tracks, or the full library
+    /// order, filed tracks included (unlike [`Self::view_tracks`]).
     async fn active_scope_tracks(&self) -> Vec<AudioTrack> {
-        let scope = self.active_playlist().await;
-        self.scoped_tracks(scope.as_deref()).await
+        match self.active_playlist().await {
+            Some(pid) => self.list_playlist_tracks(&pid).await,
+            None => self.list_tracks().await,
+        }
     }
 
     /// Return the next track to play after the current one ends, based on the
@@ -572,10 +506,11 @@ impl AppState {
     /// randomly; otherwise advance in order (even when mode is "off", and out
     /// of the track "repeat_one" is holding).
     pub async fn skip_next_track(&self, current_id: &str) -> Option<AudioTrack> {
+        let tracks = self.active_scope_tracks().await;
         if self.playback_mode().await == "shuffle" {
-            random_track_from(self.active_scope_tracks().await, current_id)
+            random_track_from(tracks, current_id)
         } else {
-            neighbor_track(&self.active_scope_tracks().await, current_id, 1)
+            neighbor_track(&tracks, current_id, 1)
         }
     }
 
@@ -615,12 +550,9 @@ impl AppState {
         (items, total)
     }
 
-    /// Resolve a batch of track references in a single HMGET, keyed by track ID.
-    ///
-    /// A reference is either a queue entry ("{id}#{millis}") or a bare track ID;
-    /// [`token_track_id`] reduces both to the same thing, so a list of any
-    /// length costs one round-trip rather than one per ID. References naming no
-    /// track are absent from the result, which makes it a membership test too.
+    /// Resolve track references (queue entries or bare IDs) in a single HMGET,
+    /// keyed by track ID. References naming no track are absent from the
+    /// result.
     pub(crate) async fn fetch_tracks_for(
         &self,
         entries: impl Iterator<Item = &String>,
@@ -633,13 +565,11 @@ impl AppState {
         }
 
         let mut conn = self.redis.clone();
-        let vals: Vec<Option<String>> = match conn.hmget(REDIS_KEY_TRACKS, &ids).await {
-            Ok(vals) => vals,
-            Err(e) => {
-                tracing::warn!("Redis error resolving queue tracks: {e}");
-                return HashMap::new();
-            }
-        };
+        let vals: Vec<Option<String>> = redis_or!(
+            "resolving queue tracks",
+            conn.hmget(REDIS_KEY_TRACKS, &ids).await,
+            Vec::new()
+        );
         ids.into_iter()
             .zip(vals)
             .filter_map(|(id, v)| {
@@ -734,15 +664,11 @@ fn anchored_index(current: &[String], snapshot: &[String], video_id: &str) -> us
         .map_or(0, |i| i + 1)
 }
 
-/// How well a track answers a spoken query, already folded by the caller. The
-/// title is scored a whole tier above the channel, so a weak title match still
-/// outranks a perfect channel one rather than being decided by which happens to
-/// score higher — asking for a song by name is far more common than asking for
-/// everything by an uploader.
+/// How well a track answers a folded query. Titles score a whole tier above
+/// channels, so a weak title match still outranks a perfect channel one.
 fn track_score(track: &AudioTrack, folded_query: &str) -> Option<u32> {
     let by_title = match_score(&track.title, folded_query).map(|score| score + TITLE_TIER);
-    // A title that answers the query outright leaves the channel nothing to
-    // add, and reading it costs another fold of the field.
+    // An exact title match leaves the channel nothing to add.
     if by_title == Some(EXACT + TITLE_TIER) {
         return by_title;
     }
@@ -774,8 +700,6 @@ pub(super) fn cached_video_ids(cache_dir: &Path) -> Vec<(String, PathBuf)> {
 }
 
 /// A file's mtime as UNIX seconds, or None if the filesystem cannot say.
-/// Takes the metadata rather than the path so a caller that has already read it
-/// — for the size, say — does not pay for a second stat.
 pub(super) fn mtime_f64(meta: &std::fs::Metadata) -> Option<f64> {
     meta.modified()
         .ok()
@@ -793,34 +717,15 @@ fn file_mtime_f64(path: &Path) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use super::super::ids;
     use super::*;
-
-    fn ids(list: &[&str]) -> Vec<String> {
-        list.iter().map(|s| (*s).to_string()).collect()
-    }
-
-    /// Minimal track for tests.
-    fn track(id: &str) -> AudioTrack {
-        AudioTrack {
-            id: id.into(),
-            title: id.into(),
-            thumbnail: String::new(),
-            duration: 10,
-            channel: String::new(),
-            is_live: false,
-            streamed: false,
-            scheduled_start: None,
-            created_at: 0.0,
-            file_path: String::new(),
-        }
-    }
 
     #[test]
     fn neighbor_track_wraps_and_falls_back() {
         let tracks = vec![
-            track("aaaaaaaaaa1"),
-            track("aaaaaaaaaa2"),
-            track("aaaaaaaaaa3"),
+            AudioTrack::stub("aaaaaaaaaa1"),
+            AudioTrack::stub("aaaaaaaaaa2"),
+            AudioTrack::stub("aaaaaaaaaa3"),
         ];
 
         // Forward: advance to next, wrap from last to first
@@ -850,20 +755,22 @@ mod tests {
             neighbor_track(&tracks, "gone", -1).unwrap().id,
             "aaaaaaaaaa3"
         );
-        // Empty returns None
         assert!(neighbor_track(&[], "aaaaaaaaaa1", 1).is_none());
     }
 
     #[test]
     fn random_track_excludes_current_unless_only_one() {
         // With 2 tracks, the other one is always picked
-        let tracks = vec![track("aaaaaaaaaa1"), track("aaaaaaaaaa2")];
+        let tracks = vec![
+            AudioTrack::stub("aaaaaaaaaa1"),
+            AudioTrack::stub("aaaaaaaaaa2"),
+        ];
         for _ in 0..5 {
             let picked = random_track_from(tracks.clone(), "aaaaaaaaaa1").unwrap();
             assert_eq!(picked.id, "aaaaaaaaaa2");
         }
         // With only 1 track, that track is returned
-        let only = vec![track("aaaaaaaaaa1")];
+        let only = vec![AudioTrack::stub("aaaaaaaaaa1")];
         assert_eq!(
             random_track_from(only, "aaaaaaaaaa1").unwrap().id,
             "aaaaaaaaaa1"
@@ -871,16 +778,14 @@ mod tests {
         assert!(random_track_from(Vec::new(), "aaaaaaaaaa1").is_none());
     }
 
-    /// Track with a title and channel of its own, for query matching.
     fn named(id: &str, title: &str, channel: &str) -> AudioTrack {
         AudioTrack {
             title: title.into(),
             channel: channel.into(),
-            ..track(id)
+            ..AudioTrack::stub(id)
         }
     }
 
-    /// The track a spoken query resolves to, as `find_track` picks it.
     fn best_match<'a>(tracks: &'a [AudioTrack], query: &str) -> Option<&'a AudioTrack> {
         let folded = fold(query);
         best_scored(tracks, |track| track_score(track, &folded))

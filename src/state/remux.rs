@@ -122,9 +122,7 @@ async fn stream_copy(
     output: &Path,
     cancel: &CancellationToken,
 ) -> Result<(), DownloadError> {
-    if cancel.is_cancelled() {
-        return Err(DownloadError::Cancelled);
-    }
+    DownloadError::check(cancel)?;
     let mut child = Command::new("ffmpeg")
         .args(["-nostdin", "-loglevel", "error", "-y", "-i"])
         .arg(input)
@@ -140,8 +138,6 @@ async fn stream_copy(
         .spawn()
         .map_err(|e| format!("Failed to run ffmpeg: {e}"))?;
 
-    // Drained on its own task so a chatty ffmpeg cannot block on a full pipe
-    // while we wait for it to exit.
     let stderr = child.stderr.take().map(spawn_reader);
     let status = tokio::select! {
         result = child.wait() => result.map_err(|e| format!("Failed to wait for ffmpeg: {e}"))?,
@@ -167,10 +163,8 @@ async fn stream_copy(
     Ok(())
 }
 
-/// How many seconds of audio ffmpeg can read out of `path` — deliberately not
-/// what the header claims, since the demuxer walks every fragment to answer
-/// this. `None` when ffprobe reports nothing usable, which callers treat as a
-/// file to leave alone rather than as a length.
+/// Seconds of audio ffmpeg can read out of `path` (not what the header
+/// claims). `None` when ffprobe reports nothing usable.
 async fn readable_duration(path: &Path) -> Option<f64> {
     let output = Command::new("ffprobe")
         .args([

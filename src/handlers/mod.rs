@@ -13,8 +13,6 @@
 //! - [`alexa`] — the Alexa skill webhook
 //! - [`ws`] — the WebSocket push channel
 //!
-//! The modules are private: main.rs reaches every handler through the
-//! re-exports below, so `crate::handlers::X` stays the single import path.
 //! What the modules share — the error type, the "resolve or 404" lookups and
 //! the response locale — lives here.
 
@@ -51,13 +49,9 @@ use crate::state::{AppState, AudioTrack, DeviceState, WriteOutcome};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 
 pub(crate) type AppResult<T> = Result<T, AppError>;
-
-// ════════════════════════════════════════
-// Error type
-// ════════════════════════════════════════
 
 pub struct AppError {
     status: StatusCode,
@@ -104,10 +98,6 @@ impl IntoResponse for AppError {
     }
 }
 
-// ════════════════════════════════════════
-// Shared request vocabulary
-// ════════════════════════════════════════
-
 /// Body shared by every endpoint that acts on a set of tracks.
 #[derive(Deserialize)]
 pub struct TrackIdsRequest {
@@ -116,13 +106,7 @@ pub struct TrackIdsRequest {
 
 impl TrackIdsRequest {
     /// The requested tracks that exist, in the order asked for and without
-    /// repeats. One HMGET resolves the whole list, which matters on endpoints
-    /// that routinely carry a hundred IDs.
-    ///
-    /// An ID naming nothing is dropped rather than costing the caller work that
-    /// could only end in "track not found". Repeats are dropped by claiming
-    /// each track as it is accepted, so the second occurrence finds none —
-    /// without which a caller would do the work twice and count it twice.
+    /// repeats, resolved in one HMGET.
     pub(crate) async fn known_ids(&self, state: &AppState) -> Vec<String> {
         self.known_ids_where(state, |_| true).await
     }
@@ -142,10 +126,8 @@ impl TrackIdsRequest {
     }
 }
 
-/// Turn a guarded write's outcome into a handler result. The three cases mean
-/// the same thing at every call site: the target vanishing between the caller's
-/// 404 check and the write itself is still the client's 404, and a write that
-/// failed is ours to report as a 500.
+/// Turn a guarded write's outcome into a handler result: a vanished target is
+/// a 404, a failed write a 500.
 pub(crate) fn written_or_err(
     outcome: WriteOutcome,
     gone: &'static str,
@@ -180,9 +162,12 @@ pub(crate) async fn playlist_or_404(state: &AppState, playlist_id: &str) -> AppR
     }
 }
 
-/// Resolve the response locale for this request. The client advertises its
-/// locale via the X-App-Lang header (derived from navigator.language); the
-/// fallback policy itself lives in crate::locale.
+/// The reply of an endpoint that started a background job over `total` items.
+pub(crate) fn job_started(total: usize, message: &str) -> Json<Value> {
+    Json(json!({ "status": "ok", "total": total, "message": message }))
+}
+
+/// The response locale, from the client's X-App-Lang header.
 pub(crate) fn client_locale(headers: &HeaderMap) -> String {
     crate::locale::or_default(headers.get("x-app-lang").and_then(|v| v.to_str().ok()))
 }

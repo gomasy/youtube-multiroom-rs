@@ -8,7 +8,7 @@ use super::model::{
     AudioTrack, Playlist, PlaylistImportInfo, PlaylistJson, PlaylistNameError, WriteOutcome,
 };
 use super::progress::playlist_progress_key;
-use super::url::{is_playlist_id, is_video_id, watch_url};
+use super::url::{is_playlist_id, is_video_id};
 use super::ytdlp::{DownloadError, run_yt_dlp_cancellable};
 use super::{
     AppState, REDIS_KEY_ACTIVE_PLAYLIST, REDIS_KEY_PLAYLISTS, now_f64, playlist_key, since_epoch,
@@ -28,11 +28,8 @@ const PLAYLIST_IMPORT_MAX: usize = 100;
 /// `PLAYLIST_IMPORT_MAX` per run.
 const PLAYLIST_SYNC_SCAN_MAX: usize = 500;
 const PLAYLIST_FLAT_TIMEOUT_SECS: u64 = 60;
-/// Track ids appended per script invocation. Each one costs an LREM that scans
-/// the list, so an unbounded batch would hold Redis — which runs a script to
-/// completion before serving anyone else — for as long as the whole append
-/// takes. A hundred keeps any one invocation short while still costing a
-/// round-trip per hundred tracks rather than one per track.
+/// Track ids appended per script invocation. Bounded because Redis runs a
+/// script to completion and each id costs a list-scanning LREM.
 const PLAYLIST_APPEND_CHUNK: usize = 100;
 
 /// Append tracks only while the playlist is still registered. The list key is
@@ -196,9 +193,8 @@ impl AppState {
         .and_then(|s| serde_json::from_str(&s).ok())
     }
 
-    /// Whether a playlist is registered, without paying to deserialize it.
-    /// Mirrors device_exists; a Redis error reports "gone" so callers 404 rather
-    /// than acting on a playlist they could not confirm.
+    /// Whether a playlist is registered. A Redis error reports "gone" so
+    /// callers 404.
     pub async fn playlist_exists(&self, playlist_id: &str) -> bool {
         let mut conn = self.redis.clone();
         redis_or!(
@@ -237,9 +233,8 @@ impl AppState {
         })
     }
 
-    /// The first track of a playlist that still resolves to something, which is
-    /// where playing one by name starts. Only the ids are read until one
-    /// answers, rather than materializing a playlist to take one track off it.
+    /// The first track of a playlist that still resolves, where playing it by
+    /// name starts.
     pub async fn first_playlist_track(&self, playlist_id: &str) -> Option<AudioTrack> {
         for track_id in self.playlist_track_ids(playlist_id).await {
             if let Some(track) = self.get_track(&track_id).await {
@@ -253,13 +248,11 @@ impl AppState {
     /// setting if it pointed here (tracks themselves are not deleted). Returns false if not found.
     pub async fn delete_playlist(&self, playlist_id: &str) -> bool {
         let mut conn = self.redis.clone();
-        let removed: i64 = match conn.hdel(REDIS_KEY_PLAYLISTS, playlist_id).await {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::warn!("Redis error deleting playlist {playlist_id}: {e}");
-                return false;
-            }
-        };
+        let removed: i64 = redis_or!(
+            "deleting playlist {playlist_id}",
+            conn.hdel(REDIS_KEY_PLAYLISTS, playlist_id).await,
+            0
+        );
         if removed == 0 {
             return false;
         }
@@ -288,18 +281,10 @@ impl AppState {
             .1
     }
 
-    /// Append tracks to an existing playlist in the order given, moving any
-    /// already listed to the end. Returns how many landed and why it stopped.
-    ///
-    /// The appends go out a chunk at a time rather than one id at a time: the
-    /// existence check and the mutations share a script either way, so a batch
-    /// is both fewer round-trips and *more* atomic than the same ids appended
-    /// separately. A chunk that fails leaves the ones before it in place, which
-    /// is what the count is for — the caller reports the failure but the
-    /// tracks that landed are real.
-    ///
-    /// `order_lock` is taken per chunk rather than held across all of them, so
-    /// a large import cannot lock reordering out for its whole duration.
+    /// Append tracks in the order given, moving any already listed to the end.
+    /// Returns how many landed and why it stopped: a failed chunk leaves the
+    /// earlier ones in place. `order_lock` is taken per chunk so a large
+    /// import cannot lock reordering out.
     pub async fn add_playlist_tracks(
         &self,
         playlist_id: &str,
@@ -339,20 +324,15 @@ impl AppState {
 
     /// Remove a track from a playlist. Returns false if not found.
     pub async fn remove_playlist_track(&self, playlist_id: &str, track_id: &str) -> bool {
-        // Serialize with reorder's read-then-replace to prevent the removed
-        // track from being restored by a concurrent write-back.
+        // Serialized with reorder's read-then-replace.
         let _guard = self.order_lock.lock().await;
         let mut conn = self.redis.clone();
-        match conn
-            .lrem::<_, _, i64>(playlist_key(playlist_id), 0, track_id)
-            .await
-        {
-            Ok(n) => n > 0,
-            Err(e) => {
-                tracing::warn!("Redis error removing track from playlist {playlist_id}: {e}");
-                false
-            }
-        }
+        redis_or!(
+            "removing track from playlist {playlist_id}",
+            conn.lrem::<_, _, i64>(playlist_key(playlist_id), 0, track_id)
+                .await,
+            0
+        ) > 0
     }
 
     /// Remove multiple tracks from one playlist without touching the library,
@@ -367,8 +347,7 @@ impl AppState {
             return Ok(0);
         }
 
-        // Serialize with reorder's read-then-replace so a concurrent write-back
-        // cannot restore an entry removed by this operation.
+        // Serialized with reorder's read-then-replace.
         let _guard = self.order_lock.lock().await;
         let key = playlist_key(playlist_id);
         let mut pipe = redis::pipe();
@@ -480,31 +459,21 @@ impl AppState {
             }
             None => conn.del::<_, ()>(REDIS_KEY_ACTIVE_PLAYLIST).await,
         };
-        match result {
-            Ok(()) => true,
-            Err(e) => {
-                tracing::warn!("Redis error writing active playlist: {e}");
-                false
-            }
-        }
+        redis_or!("writing active playlist", result.map(|()| true), false)
     }
 
-    /// Flat-expand a YouTube playlist and start importing it into a local
-    /// playlist of the same name (created if absent) in the background,
-    /// returning that name and the item count. Per-video progress is broadcast
-    /// over the same downloads_update as extract_audio; the expansion itself is
-    /// a yt-dlp run with no video to report yet, so it holds its own entry.
+    /// Flat-expand a YouTube playlist and start importing it in the background
+    /// into a local playlist of the same name (created if absent), returning
+    /// that name and the item count.
     pub async fn import_playlist(
         self: &Arc<Self>,
         list_id: &str,
         mode: FetchMode,
         cancel: &CancellationToken,
     ) -> Result<PlaylistImportInfo, DownloadError> {
-        let key = playlist_progress_key(list_id);
-        let stamp = self.begin_progress(&key, list_id).await;
-        let result = self.expand_and_start_import(list_id, mode, cancel).await;
-        self.settle_progress(&key, stamp, &result).await;
-        result
+        let work = self.expand_and_start_import(list_id, mode, cancel);
+        self.with_progress(&playlist_progress_key(list_id), list_id, work)
+            .await
     }
 
     async fn expand_and_start_import(
@@ -526,9 +495,7 @@ impl AppState {
             .take(PLAYLIST_NAME_MAX_CHARS)
             .collect();
 
-        if cancel.is_cancelled() {
-            return Err(DownloadError::Cancelled);
-        }
+        DownloadError::check(cancel)?;
         // Append to an existing playlist with the same name (avoid duplicates on re-import)
         let (playlist, created) = self
             .find_or_create_playlist(&name)
@@ -559,13 +526,9 @@ impl AppState {
             .source
             .as_deref()
             .ok_or("Playlist has no YouTube source")?;
-        let key = playlist_progress_key(list_id);
-        let stamp = self.begin_progress(&key, &playlist.name).await;
-        let result = self
-            .expand_and_start_sync(playlist, list_id, mode, cancel)
-            .await;
-        self.settle_progress(&key, stamp, &result).await;
-        result
+        let work = self.expand_and_start_sync(playlist, list_id, mode, cancel);
+        self.with_progress(&playlist_progress_key(list_id), &playlist.name, work)
+            .await
     }
 
     async fn expand_and_start_sync(
@@ -615,11 +578,9 @@ impl AppState {
         // it stays outside the lock so Stop all is never blocked from
         // terminating unrelated processes.
         let _commit_guard = self.download_cancel.lock().await;
-        if cancel.is_cancelled() {
-            // A newly created playlist may already be visible to another
-            // client; left empty rather than risk deleting their changes.
-            return Err(DownloadError::Cancelled);
-        }
+        // A newly created playlist may already be visible to another client;
+        // left empty rather than risk deleting their changes.
+        DownloadError::check(cancel)?;
         let importing = self
             .claim_import(&playlist.id)
             .ok_or("This playlist is already being imported into")?;
@@ -635,9 +596,7 @@ impl AppState {
             );
             let (state, cancel, playlist) = (&state, &cancel, &playlist);
             job.run(&video_ids, cancel, |video_id| async move {
-                let track = state
-                    .extract_audio(&watch_url(&video_id), mode, cancel)
-                    .await?;
+                let track = state.extract_audio(&video_id, mode, cancel).await?;
                 match state.add_playlist_track(&playlist.id, &track.id).await {
                     WriteOutcome::Written => {
                         let mut conn = state.redis.clone();
@@ -645,15 +604,12 @@ impl AppState {
                             "recording synced video {video_id}",
                             conn.sadd(playlist_seen_key(&playlist.id), &video_id).await
                         );
-                        // Reflect each successfully imported track in the lists
-                        state.broadcast_tracks();
-                        state.broadcast_playlists().await;
+                        state.broadcast_playlist_membership().await;
                         Ok(Visited::Done)
                     }
                     // Nowhere left to put the remaining videos.
                     WriteOutcome::Gone => Ok(Visited::Stop("the playlist was deleted".to_string())),
-                    // The Redis error is already logged; this names the video
-                    // it cost, which the log does not know.
+                    // Names the video; the Redis error itself is already logged.
                     WriteOutcome::Failed => {
                         tracing::warn!(
                             "Playlist import '{}': failed to add {video_id}",
@@ -694,9 +650,7 @@ async fn expand_playlist(
     .map_err(|e| e.context("Failed to expand playlist"))?;
     let meta: Value = serde_json::from_slice(&stdout)
         .map_err(|e| format!("Failed to parse playlist metadata: {e}"))?;
-    if cancel.is_cancelled() {
-        return Err(DownloadError::Cancelled);
-    }
+    DownloadError::check(cancel)?;
 
     // Exclude non-video entries and duplicates (same video appearing multiple times)
     let mut seen: HashSet<&str> = HashSet::new();
@@ -725,14 +679,13 @@ fn unheld_ids(listed: Vec<String>, held: &HashSet<String>, limit: usize) -> Vec<
         .collect()
 }
 
-/// Trim a user-supplied playlist name and accept it only if it is non-empty and
-/// within the length cap. Shared by create and rename so the two cannot drift.
+/// Trim a playlist name and accept it only if non-empty and within the length
+/// cap.
 fn valid_playlist_name(name: &str) -> Option<&str> {
     let name = name.trim();
     (!name.is_empty() && name.chars().count() <= PLAYLIST_NAME_MAX_CHARS).then_some(name)
 }
 
-/// Serialize a playlist for Redis, reporting rather than panicking on failure.
 fn serialize_playlist(playlist: &Playlist) -> Option<String> {
     serde_json::to_string(playlist)
         .inspect_err(|e| tracing::warn!("Failed to serialize playlist {}: {e}", playlist.id))

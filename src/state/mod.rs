@@ -21,9 +21,6 @@
 //! - [`job`] — the stopping rules shared by the background per-video jobs
 //! - [`ytdlp`] — running yt-dlp and reaping its process group
 //! - [`url`] — recognizing YouTube URLs
-//!
-//! The modules are private: everything the rest of the crate uses is
-//! re-exported here, so `crate::state::X` stays the single import path.
 
 use download::ExtractSlot;
 use model::{DownloadProgress, FailureRecord};
@@ -56,6 +53,7 @@ mod ytdlp;
 
 pub use download::FetchMode;
 pub use library::LIBRARY_EXPORT_VERSION;
+pub(crate) use model::PlaylistJson;
 pub use model::{
     AudioTrack, CacheReport, DeviceState, DeviceUpdate, LibraryExport, PendingCommand, PlayRequest,
     PlaylistNameError, ReorderOutcome, ReorderRequest, SeekRequest, SyncRequest, WriteOutcome,
@@ -85,13 +83,9 @@ const REDIS_QUEUE_PREFIX: &str = "youtube:queue";
 pub(crate) const AUDIO_EXT: &str = "m4a";
 pub const AUDIO_MIME: &str = "audio/mp4";
 
-/// Log the result of a fire-and-forget Redis command. These callers have no
-/// recovery to offer, but a silently dropped error would hide a broken Redis
-/// behind seemingly successful operations.
-///
-/// A macro rather than a function so the awaited result is bound before the
-/// format arguments are built: `fmt::Arguments` is not `Send`, and holding one
-/// across the await would make every enclosing future non-`Send`.
+/// Log the result of a fire-and-forget Redis command. A macro so the awaited
+/// result is bound before the format arguments are built: `fmt::Arguments` is
+/// not `Send`.
 macro_rules! warn_redis {
     ($what:literal, $result:expr) => {{
         let result: redis::RedisResult<()> = $result;
@@ -102,21 +96,11 @@ macro_rules! warn_redis {
 }
 pub(crate) use warn_redis;
 
-/// The read counterpart to [`warn_redis`]: the value Redis returned, or
-/// `$fallback` with the error logged.
-///
-/// Only for reads whose caller has an answer that is merely *worse* rather than
-/// wrong — an empty listing, a "no" to an existence check. Where an error must
-/// not read as "not found" (`try_get_track`, `try_playback_mode`) the
-/// `RedisResult` is returned instead and the caller decides.
-///
-/// A macro for the same reason `warn_redis` is one, and it takes the same
-/// `$what` phrase so both halves of a broken Redis report themselves the same
-/// way.
+/// The counterpart to [`warn_redis`] for results with a value: what Redis
+/// returned, or `$fallback` with the error logged. Only where the fallback is
+/// merely worse, not wrong.
 macro_rules! redis_or {
     ($what:literal, $result:expr, $fallback:expr) => {
-        // The await in `$result` completes in the scrutinee, so no
-        // `fmt::Arguments` is ever held across it.
         match $result {
             Ok(value) => value,
             Err(e) => {
@@ -140,12 +124,9 @@ pub(crate) fn playlist_key(playlist_id: &str) -> String {
     format!("{REDIS_PLAYLIST_PREFIX}:{playlist_id}")
 }
 
-/// The stream URL signing key when API_TOKEN supplies none: whatever Redis
-/// already holds, or `fresh` stored there for later starts to find. Sharing it
-/// is what lets a signed URL outlive the process that issued it — a restart
-/// mid-track would otherwise invalidate the URL the Echo is playing from. A
-/// Redis failure degrades to a key private to this process, which costs
-/// playback a re-issued URL rather than the server its start.
+/// The stream URL signing key when API_TOKEN supplies none, shared through
+/// Redis so signed URLs survive a restart. A Redis failure degrades to a
+/// process-private key.
 async fn shared_stream_secret(conn: &mut ConnectionManager, fresh: String) -> String {
     use redis::AsyncCommands;
 
@@ -176,13 +157,10 @@ pub struct AppState {
     pub tx: broadcast::Sender<String>,
     pub cache_dir: PathBuf,
     pub api_token: Option<String>,
-    /// HMAC key for the signed stream URLs handed to Echo devices and the
-    /// browser's audio element. Always present — API_TOKEN when it is set,
-    /// otherwise a generated key shared through Redis — so those URLs are signed
-    /// even with authentication otherwise disabled.
+    /// HMAC key for signed stream URLs: API_TOKEN when set, otherwise a key
+    /// shared through Redis.
     pub stream_secret: String,
-    /// Whether track restoration from audio_cache is in progress (prevents
-    /// concurrent runs).
+    /// Track restoration from audio_cache is in progress.
     restoring: AtomicBool,
     /// Serializes modifications to youtube:tracks_order so reorder's
     /// read-then-replace and extract/remove's LPUSH/LREM don't interleave.
@@ -212,11 +190,8 @@ pub struct AppState {
     /// Bumped when the sleep timer is set/cancelled; the spawned timer task
     /// checks this to know if it's been superseded.
     sleep_timer_gen: AtomicU64,
-    /// Bumped on every track-list change. A client that fetched a page over
-    /// REST before its WebSocket existed compares the revision it was served
-    /// with the one in `init`: equal means the page it holds is still current.
-    /// In-process only, so it restarts at 0 — clients treat every reconnect as
-    /// a change regardless.
+    /// Bumped on every track-list change, so a client can tell whether a page
+    /// it fetched over REST is still current. In-process only: restarts at 0.
     tracks_rev: AtomicU64,
 }
 
@@ -226,11 +201,8 @@ impl AppState {
         redis_url: &str,
     ) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
         let (tx, _) = broadcast::channel::<String>(256);
-        // An unreadable working directory leaves the cache path relative, which
-        // resolves to the same place for a server started the usual way. Both
-        // that and a failed create are reported rather than swallowed: a cache
-        // directory that never appeared explains failures that would otherwise
-        // surface much later, one staging-directory error at a time.
+        // Both failures are logged, not fatal: a missing cache directory
+        // explains later errors.
         let cache_dir = std::env::current_dir()
             .inspect_err(|e| tracing::warn!("Cannot read the working directory: {e}"))
             .unwrap_or_default()
@@ -243,9 +215,7 @@ impl AppState {
         }
 
         let client = redis::Client::open(redis_url)?;
-        // Naming the URL is what makes this error actionable, but it is the one
-        // place a password could reach stderr, so it goes out redacted. The
-        // Client::open error above carries no URL of its own.
+        // The URL may carry a password, so it goes out redacted.
         let mut redis = time::timeout(time::Duration::from_secs(5), ConnectionManager::new(client))
             .await
             .map_err(|_| {
@@ -286,8 +256,6 @@ impl AppState {
         }))
     }
 
-    // ── Broadcast ──
-
     /// Send a message to all connected WebSocket clients (no-op if no subscribers).
     pub(crate) fn broadcast(&self, msg: Value) {
         let _ = self.tx.send(msg.to_string());
@@ -301,8 +269,7 @@ impl AppState {
     }
 
     /// Notify clients that the track list changed (content is re-fetched via
-    /// REST). Not `async`, unlike its siblings: the frame carries no payload,
-    /// so there is no state to read before sending.
+    /// REST).
     pub fn broadcast_tracks(&self) {
         // Bumped before sending, so a client reading the revision after this
         // frame is never told the list is older than what it just heard about.
@@ -317,7 +284,6 @@ impl AppState {
         self.tracks_rev.load(Ordering::SeqCst)
     }
 
-    /// Broadcast playlist list/content changes to all clients.
     pub async fn broadcast_playlists(&self) {
         self.broadcast(json!({
             "type": "playlists_update",
@@ -325,25 +291,35 @@ impl AppState {
         }));
     }
 
-    /// Broadcast active playlist (selection scope) changes to all clients.
     pub async fn broadcast_active_playlist(&self) {
         self.broadcast(json!({
             "type": "active_playlist_update",
             "playlist": self.active_playlist().await,
         }));
     }
+
+    /// A playlist's membership changed: its count, and the page it lists.
+    pub async fn broadcast_playlist_membership(&self) {
+        self.broadcast_playlists().await;
+        self.broadcast_tracks();
+    }
+
+    /// Tracks were deleted: the list, the playlist counts, and any device
+    /// that was playing or queuing one.
+    pub async fn broadcast_track_removal(&self) {
+        self.broadcast_tracks();
+        self.broadcast_devices().await;
+        self.broadcast_playlists().await;
+    }
 }
 
-/// The "track list changed, re-fetch it" nudge. Tracks are paginated over REST
-/// rather than pushed, so this frame carries no payload. Shared with the
-/// WebSocket resync path so the message shape has one definition.
+/// The payload-free "track list changed, re-fetch it" frame, shared with the
+/// WebSocket resync.
 pub fn tracks_update_message() -> Value {
     json!({ "type": "tracks_update" })
 }
 
-/// Time elapsed since the UNIX epoch. A clock predating 1970 reads as zero
-/// rather than an error: every caller wants a number to derive a timestamp or
-/// an ID from, and none has a better answer than the epoch itself.
+/// Time elapsed since the UNIX epoch; a clock predating 1970 reads as zero.
 pub(crate) fn since_epoch() -> std::time::Duration {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -352,4 +328,9 @@ pub(crate) fn since_epoch() -> std::time::Duration {
 
 pub(crate) fn now_f64() -> f64 {
     since_epoch().as_secs_f64()
+}
+
+#[cfg(test)]
+pub(crate) fn ids(ids: &[&str]) -> Vec<String> {
+    ids.iter().map(|s| s.to_string()).collect()
 }

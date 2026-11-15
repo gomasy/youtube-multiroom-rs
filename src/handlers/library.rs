@@ -46,13 +46,12 @@ pub async fn import_library(
     let outcome = state.import_library(&req.doc).await;
     let missing = outcome.missing_ids.len();
     let downloading = if req.download && missing > 0 {
-        // Captured before spawning, so a Stop all received immediately
-        // afterwards still cancels this job.
-        let cancel = state.download_token().await;
         // Streamed tracks come back streamed.
         let streamed = req.doc.tracks.iter().filter(|t| t.streamed);
         let streamed = streamed.map(|t| t.id.clone()).collect();
-        state.start_track_recovery(outcome.missing_ids, streamed, cancel);
+        state
+            .start_track_recovery(outcome.missing_ids, streamed)
+            .await;
         missing
     } else {
         0

@@ -55,16 +55,14 @@ impl AppState {
             return false;
         }
         let mut conn = self.redis.clone();
-        match conn.set::<_, _, ()>(REDIS_KEY_PLAYBACK_MODE, mode).await {
-            Ok(()) => true,
-            Err(e) => {
-                tracing::warn!("Redis error writing playback mode: {e}");
-                false
-            }
-        }
+        redis_or!(
+            "writing playback mode",
+            conn.set::<_, _, ()>(REDIS_KEY_PLAYBACK_MODE, mode)
+                .await
+                .map(|()| true),
+            false
+        )
     }
-
-    // ── Sleep timer ──
 
     /// Return the sleep timer expiry as UNIX seconds, or None if not set / expired.
     pub async fn sleep_timer(&self) -> Option<f64> {
@@ -79,12 +77,8 @@ impl AppState {
 
     /// Set a sleep timer firing after `minutes`, spawning the task that stops
     /// all devices and switches playback mode to "off". Returns the expiry
-    /// (UNIX seconds), or None when out of range.
-    ///
-    /// The range is enforced here because `minutes` arrives straight from a
-    /// WebSocket payload and `minutes * 60` would overflow u64. Rejected rather
-    /// than clamped — a client asking for a year is not asking for a day — so a
-    /// nonsense request also leaves a running timer undisturbed.
+    /// (UNIX seconds), or None when out of range: rejected rather than clamped,
+    /// so a nonsense request leaves a running timer alone.
     pub async fn set_sleep_timer(self: &Arc<Self>, minutes: u64) -> Option<f64> {
         if !(1..=MAX_SLEEP_TIMER_MINUTES).contains(&minutes) {
             tracing::warn!("Rejecting out-of-range sleep timer: {minutes} minutes");
@@ -150,7 +144,6 @@ impl AppState {
         });
     }
 
-    /// Cancel the sleep timer.
     pub async fn cancel_sleep_timer(&self) {
         self.sleep_timer_gen.fetch_add(1, Ordering::Relaxed);
         let mut conn = self.redis.clone();
@@ -167,9 +160,6 @@ impl AppState {
         }));
     }
 
-    /// Not `async`, for the same reason `broadcast_tracks` is not: the mode is
-    /// handed in by the caller that just set it, so there is no state to read
-    /// before sending.
     pub fn broadcast_playback_mode(&self, mode: &str) {
         self.broadcast(json!({
             "type": "playback_mode_update",

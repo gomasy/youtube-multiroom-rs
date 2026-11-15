@@ -185,10 +185,8 @@ impl AppState {
         self.playback_failures.lock().await.remove(device_id);
     }
 
-    /// Device states with their Up Next queues attached. On every Alexa webhook
-    /// response path and every broadcast, so it is held to three round-trips
-    /// regardless of device count: HGETALL for the devices, one pipeline for
-    /// all queues, one HMGET for the tracks they reference.
+    /// Device states with their Up Next queues attached, in three round-trips
+    /// regardless of device count.
     pub async fn devices_json(&self) -> Value {
         let devices = self.all_devices().await;
         if devices.is_empty() {
@@ -264,13 +262,8 @@ impl AppState {
         }
     }
 
-    // ── Pending command ──
-
     /// Queue playback for a device. [`WriteOutcome::Gone`] means the device is
-    /// not registered: the existence check and the write share one Redis
-    /// script, so a stale client targeting a deleted device cannot leave an
-    /// orphan pending key behind. A failure carries no detail — it is logged
-    /// here, where what went wrong is known.
+    /// not registered; the check and the write share one Redis script.
     pub async fn queue_play(
         &self,
         device_id: &str,
@@ -279,7 +272,7 @@ impl AppState {
     ) -> WriteOutcome {
         let cmd = PendingCommand {
             action: "play".to_string(),
-            track: track.clone(),
+            track,
             offset_ms,
         };
         let json_str = match serde_json::to_string(&cmd) {
@@ -316,7 +309,7 @@ impl AppState {
             device_id,
             DeviceUpdate::new()
                 .status("queued")
-                .track(track)
+                .track(cmd.track)
                 .position(offset_ms),
         )
         .await;
@@ -339,7 +332,6 @@ impl AppState {
         Self::parse_pending(device_id, result)
     }
 
-    /// Discard a queued command.
     pub async fn clear_pending(&self, device_id: &str) {
         let mut conn = self.redis.clone();
         warn_redis!(
@@ -347,8 +339,6 @@ impl AppState {
             conn.del(pending_key(device_id)).await
         );
     }
-
-    // ── Up Next queue ──
 
     /// Append a track to the device's Up Next queue. [`WriteOutcome::Gone`]
     /// means the device is not registered.
@@ -377,13 +367,11 @@ impl AppState {
     pub async fn peek_queue(&self, device_id: &str) -> Option<(String, AudioTrack)> {
         let mut conn = self.redis.clone();
         loop {
-            let front: Option<String> = match conn.lindex(queue_key(device_id), 0).await {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!("Redis error reading queue for {device_id}: {e}");
-                    return None;
-                }
-            };
+            let front: Option<String> = redis_or!(
+                "reading queue for {device_id}",
+                conn.lindex(queue_key(device_id), 0).await,
+                None
+            );
             let entry = front?;
             match self.try_get_track(token_track_id(&entry)).await {
                 Ok(Some(track)) => return Some((entry, track)),
@@ -402,16 +390,13 @@ impl AppState {
     /// unique, so no index is needed and concurrent consumption doesn't conflict.
     pub async fn remove_queue_entry(&self, device_id: &str, entry: &str) -> bool {
         let mut conn = self.redis.clone();
-        match conn.lrem::<_, _, i64>(queue_key(device_id), 1, entry).await {
-            Ok(n) => n > 0,
-            Err(e) => {
-                tracing::warn!("Redis error removing queue entry for {device_id}: {e}");
-                false
-            }
-        }
+        redis_or!(
+            "removing queue entry for {device_id}",
+            conn.lrem::<_, _, i64>(queue_key(device_id), 1, entry).await,
+            0
+        ) > 0
     }
 
-    /// Clear the entire queue.
     pub async fn clear_queue(&self, device_id: &str) {
         let mut conn = self.redis.clone();
         warn_redis!(

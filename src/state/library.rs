@@ -1,17 +1,9 @@
-//! Backing the library structure up, and putting it back.
+//! Exporting the library structure — tracks, their order, the playlists — and
+//! importing it back. Only Redis holds it, so an export is the copy that
+//! survives a wipe.
 //!
-//! Redis holds what no audio file records: which videos the library knows, the
-//! order they play in, and the playlists they belong to. The audio itself can
-//! always be fetched again — `restore_tracks_if_missing` rebuilds the track
-//! metadata from the cache directory alone — but the order and the playlists
-//! exist in exactly one place, and a wiped Redis loses them for good. An export
-//! is the copy that survives that.
-//!
-//! An import is deliberately additive. Playlists are matched by name and
-//! appended to rather than replaced, and the restored order keeps whatever this
-//! server has that the document never mentioned. Ids naming videos that are not
-//! here are kept as placeholders: the listing skips them, and downloading one
-//! later drops it straight into the gap it was holding.
+//! An import is additive: playlists are matched by name and appended to, and
+//! ids naming videos that are not here stay in the order as placeholders.
 
 use super::model::{ImportOutcome, LibraryExport, PlaylistExport, WriteOutcome};
 use super::url::is_video_id;
@@ -65,9 +57,8 @@ impl AppState {
             .collect();
         let restored = self.restore_order(&order).await;
 
-        // The scope is named by an ID only the exporting server knew, so it is
-        // re-resolved through the playlists just matched. One that resolves to
-        // nothing reverts to the whole library rather than to a stale ID.
+        // The exported scope ID is re-resolved through the playlists just
+        // matched; one that resolves to nothing reverts to the whole library.
         let scope = doc
             .active_playlist
             .as_ref()
@@ -79,7 +70,7 @@ impl AppState {
             self.broadcast_playback_mode(&doc.playback_mode);
         }
 
-        // One HMGET for the whole list: what is already here needs no download.
+        // What is already here needs no download.
         let registered = self.fetch_tracks_for(order.iter()).await;
         let missing_ids = order
             .iter()
@@ -97,12 +88,9 @@ impl AppState {
         }
     }
 
-    /// Recreate the exported playlists here, matching by name so re-importing
-    /// into a server that already has them appends rather than duplicating —
-    /// the rule a YouTube playlist import already follows.
-    ///
-    /// Returns the mapping from exported playlist ID to local one, which is
-    /// what resolves the exported selection scope.
+    /// Recreate the exported playlists, matching by name so a re-import
+    /// appends rather than duplicates. Returns the mapping from exported
+    /// playlist ID to local one.
     async fn restore_playlists(&self, exported: &[PlaylistExport]) -> HashMap<String, String> {
         let mut mapping = HashMap::new();
         for entry in exported {
@@ -131,8 +119,8 @@ impl AppState {
             let (added, outcome) = self.add_playlist_tracks(&local_id, &track_ids).await;
             match outcome {
                 WriteOutcome::Written => {}
-                // Deleted from under the import. The rest of the document is
-                // still worth restoring, so only this playlist is given up on.
+                // Deleted from under the import; only this playlist is given
+                // up on.
                 WriteOutcome::Gone => {
                     tracing::warn!(
                         "Library import: '{name}' was deleted while it was being filled"
@@ -174,24 +162,17 @@ fn merged_order(imported: &[String], current: Vec<String>) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::ids;
     use super::*;
-
-    fn ids(list: &[&str]) -> Vec<String> {
-        list.iter().map(|s| (*s).to_string()).collect()
-    }
 
     #[test]
     fn an_imported_order_leads_and_keeps_what_it_never_mentioned() {
         let order = merged_order(&ids(&["a", "b", "c"]), ids(&["z", "b", "y"]));
-        // The document decides the order of what it names; local-only ids
-        // follow in the order they already had
         assert_eq!(order, ids(&["a", "b", "c", "z", "y"]));
     }
 
     #[test]
     fn no_id_is_listed_twice() {
-        // A malformed document repeating an id must not leave two copies in the
-        // list, which would make a reorder move an arbitrary one of them
         let order = merged_order(&ids(&["a", "a", "b"]), ids(&["b", "b"]));
         assert_eq!(order, ids(&["a", "b"]));
     }

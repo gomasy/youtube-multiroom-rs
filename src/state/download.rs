@@ -9,7 +9,6 @@
 use super::job::{VideoJob, Visited};
 use super::model::AudioTrack;
 use super::remux::rebuild_container;
-use super::url::extract_video_id;
 use super::warn_redis;
 use super::ytdlp::{
     DownloadError, PROGRESS_PREFIX, abort_reader, fetch_metadata, parse_progress_percent,
@@ -75,28 +74,23 @@ impl FetchMode {
 impl AppState {
     pub async fn extract_audio(
         self: &Arc<Self>,
-        url: &str,
+        video_id: &str,
         mode: FetchMode,
         cancel: &CancellationToken,
     ) -> Result<AudioTrack, DownloadError> {
-        let video_id = extract_video_id(url).ok_or("Could not recognize YouTube URL")?;
-
-        // On display from here rather than from the first yt-dlp call, so the
-        // queuing behind another request and the cache lookup are visible too.
-        let stamp = self.begin_progress(&video_id, &video_id).await;
-        let result = self
-            .under_extract_slot(&video_id, cancel, async |slot| {
-                self.extract_audio_locked(&video_id, mode, slot, cancel)
-                    .await
-            })
-            .await;
-        self.settle_progress(&video_id, stamp, &result).await;
-        result
+        // On display before the slot wait and the cache lookup.
+        let work = self.under_extract_slot(video_id, cancel, async |slot| {
+            self.extract_audio_locked(video_id, mode, slot, cancel)
+                .await
+        });
+        self.with_progress(video_id, video_id, work).await
     }
 
     /// Run `work` holding the video's extract slot, then release it. Every
     /// yt-dlp-backed operation on one video takes its turn here, so a download
-    /// and a metadata refresh cannot interleave their writes.
+    /// and a metadata refresh cannot interleave their writes. Reported as a
+    /// cancellation while a deletion is in flight: anything registered for the
+    /// video is on its way out.
     async fn under_extract_slot<F>(
         self: &Arc<Self>,
         video_id: &str,
@@ -108,16 +102,15 @@ impl AppState {
         F: AsyncFnOnce(&ExtractSlot) -> Result<AudioTrack, DownloadError>,
     {
         let slot = self.extract_slot(video_id).await;
-        // Waiting behind another operation stays interruptible, and a
-        // cancellation that lands while queued still applies once the lock
-        // is handed over.
+        // Waiting stays interruptible; a cancellation landing while queued
+        // still applies.
         let guard = tokio::select! {
             biased;
             _ = cancel.cancelled() => None,
             guard = slot.lock.lock() => Some(guard),
         };
         let result = match guard {
-            Some(guard) if !cancel.is_cancelled() => {
+            Some(guard) if !cancel.is_cancelled() && !slot.is_deleted() => {
                 let result = work(&slot).await;
                 drop(guard);
                 result
@@ -157,22 +150,12 @@ impl AppState {
         slot: &ExtractSlot,
         cancel: &CancellationToken,
     ) -> Result<AudioTrack, DownloadError> {
-        // Inside a deletion window: anything registered for this video is on its
-        // way out, so a cache hit would report success for a track about to
-        // disappear and a fresh download would only be discarded. Reported the
-        // way a stop is; the caller can ask again once the deletion has drained.
-        if slot.is_deleted() {
-            return Err(DownloadError::Cancelled);
-        }
-
         // Entries pointing at an old format (mp3 etc.) are stale w.r.t.
         // AUDIO_MIME, so they are skipped and re-fetched.
         if let Some(track) = self.get_track(video_id).await {
             // A stop can land during the Redis lookup. Only the hit needs this
             // check; fetch_and_register re-checks on the miss path.
-            if cancel.is_cancelled() {
-                return Err(DownloadError::Cancelled);
-            }
+            DownloadError::check(cancel)?;
             if track.is_live {
                 tracing::info!("Cache hit (live): {}", video_id);
                 return Ok(track);
@@ -194,7 +177,6 @@ impl AppState {
     }
 
     /// Fetch metadata → download (unless live or streamed) → register in Redis.
-    /// Progress is reflected in the downloads progress entry.
     async fn fetch_and_register(
         &self,
         video_id: &str,
@@ -203,30 +185,27 @@ impl AppState {
         cancel: &CancellationToken,
     ) -> Result<AudioTrack, DownloadError> {
         let url = watch_url(video_id);
-        // Fetch metadata
         tracing::info!("Fetching metadata: {}", video_id);
         let meta = fetch_metadata(&url, Some(cancel)).await?;
-        let title = meta["title"].as_str().unwrap_or(video_id).to_string();
+        let title = AudioTrack::extract_title(video_id, &meta);
         let is_live = AudioTrack::extract_is_live(&meta);
         let streamed = !is_live && mode == FetchMode::Stream;
         self.set_download_meta(video_id, &title, is_live || streamed)
             .await;
-        if cancel.is_cancelled() {
-            return Err(DownloadError::Cancelled);
-        }
+        DownloadError::check(cancel)?;
 
-        // Live streams cannot be saved as files; register metadata only and
-        // resolve the CDN URL at playback time (handlers::live_audio). Upcoming
-        // streams too.
+        // Live (and upcoming) streams cannot be saved as files, and a streamed
+        // track's CDN URL expires within hours: both register metadata only
+        // and resolve the URL at playback time.
         let mut published_path = None;
-        let track = if is_live {
-            tracing::info!("Live stream detected, skipping download: {}", video_id);
-            AudioTrack::from_meta(video_id, &meta, now_f64(), String::new())
-        } else if streamed {
-            // The CDN URL expires within hours, so it is resolved at playback.
-            tracing::info!("Registering for streaming, skipping download: {}", video_id);
+        let track = if is_live || streamed {
+            if is_live {
+                tracing::info!("Live stream detected, skipping download: {}", video_id);
+            } else {
+                tracing::info!("Registering for streaming, skipping download: {}", video_id);
+            }
             AudioTrack {
-                streamed: true,
+                streamed,
                 ..AudioTrack::from_meta(video_id, &meta, now_f64(), String::new())
             }
         } else {
@@ -236,15 +215,13 @@ impl AppState {
             let staged_path = staging_dir.join(format!("{video_id}.{AUDIO_EXT}"));
 
             tracing::info!("Downloading: {}", title);
-            // Nothing this attempt wrote is visible until publishing succeeds,
-            // so failure and cancellation only have to discard the directory.
-            // The outcome is held until that has happened — taking `?` here
-            // would leak the staging directory.
+            // The outcome is held until the staging directory is removed: `?`
+            // here would leak it.
             let published = async {
                 self.run_download(video_id, &url, &staged_path, cancel)
                     .await?;
-                // Still in staging, so a rebuild that goes wrong is discarded
-                // with the rest of the attempt rather than served.
+                // Still in staging, so a bad rebuild is discarded with the
+                // attempt.
                 rebuild_container(&staged_path, AudioTrack::extract_duration(&meta), cancel).await;
                 self.publish_download(cancel, &staged_path, &output_path)
                     .await
@@ -276,9 +253,7 @@ impl AppState {
             // I/O would let a stalled Redis delay stopping unrelated yt-dlp
             // processes.
             let _commit_guard = self.download_cancel.lock().await;
-            if cancel.is_cancelled() {
-                return Err(DownloadError::Cancelled);
-            }
+            DownloadError::check(cancel)?;
         }
         // The track is committed from here. Redis may have applied HSET even if
         // the response was lost, so a published file is left in place: a
@@ -303,11 +278,9 @@ impl AppState {
             );
         }
 
-        // A deletion that started while this download ran already removed the
-        // entry, so the writes above put back a track the user deleted. Undoing
-        // them here — rather than making the deletion wait — keeps deletion
-        // prompt. The mark is only ever set, so a deletion landing after this
-        // check runs entirely after these writes and removes them itself.
+        // A deletion that started mid-download already removed the entry, so
+        // the writes above are undone here rather than making the deletion
+        // wait. One landing after this check removes them itself.
         if slot.is_deleted() {
             self.discard_registration(video_id, published_path.as_deref())
                 .await;
@@ -332,32 +305,19 @@ impl AppState {
         tracing::info!("Discarded {video_id}: deleted while its registration was in flight");
     }
 
-    // ── Metadata refresh ──
-
-    /// Re-fetch what YouTube says about tracks already in the library, one at a
-    /// time in the background. Each track costs a yt-dlp run, so this returns
-    /// as soon as the job is spawned and its result reaches clients as the
-    /// track list changing underneath them.
+    /// Re-fetch metadata for library tracks, one at a time in the background.
+    /// Progress goes over downloads_update, so Stop all ends it.
     ///
-    /// Progress goes over the same downloads_update channel a download uses,
-    /// which is also what makes Stop all end a refresh.
-    pub fn start_metadata_refresh(
-        self: &Arc<Self>,
-        video_ids: Vec<String>,
-        cancel: CancellationToken,
-    ) {
+    /// Like the other `start_*` jobs, the cancellation token is taken before
+    /// spawning, so a stop arriving right after the call still applies.
+    pub async fn start_metadata_refresh(self: &Arc<Self>, video_ids: Vec<String>) {
+        let cancel = self.download_token().await;
         let state = self.clone();
         tokio::spawn(async move {
-            let job = VideoJob::new(
-                "Metadata refresh".to_string(),
-                "refreshed",
-                "deleted while fetching",
-            );
+            let job = VideoJob::new("Metadata refresh", "refreshed", "deleted while fetching");
             let (state, cancel) = (&state, &cancel);
             job.run(&video_ids, cancel, |video_id| async move {
                 let track = state.refresh_video_metadata(&video_id, cancel).await?;
-                // Reflect each refreshed track as it lands, so a long job is
-                // visibly making progress in the track list.
                 state.broadcast_tracks();
                 tracing::info!("Metadata refreshed: {} ({video_id})", track.title);
                 Ok(Visited::Done)
@@ -366,34 +326,21 @@ impl AppState {
         });
     }
 
-    /// Download videos the library has a place for but no file for, one at a
-    /// time in the background, returning each to that place when it lands.
-    ///
-    /// Both callers hand over exactly that kind of list: a cache repair, whose
-    /// tracks lost their files, and a library import, whose tracks were never
-    /// here. A plain download prepends — right for something being added, wrong
-    /// for something being recovered — so the order is snapshotted first and
-    /// each finished track is put back (see `restore_order_position`).
-    ///
-    /// Progress goes over the same downloads_update channel a download uses,
-    /// which is also what makes Stop all end a recovery.
-    pub fn start_track_recovery(
+    /// Download videos the library has a place for but no file for (a cache
+    /// repair or a library import), one at a time in the background, returning
+    /// each to its place in the order.
+    pub async fn start_track_recovery(
         self: &Arc<Self>,
         video_ids: Vec<String>,
         streamed: std::collections::HashSet<String>,
-        cancel: CancellationToken,
     ) {
+        let cancel = self.download_token().await;
         let state = self.clone();
         tokio::spawn(async move {
-            // Read as stored rather than as listed: an import leaves ids for
-            // videos that have not arrived yet, and those are the ones being
-            // recovered here.
+            // As stored, not as listed: import placeholders are what is being
+            // recovered.
             let snapshot = state.track_order().await;
-            let job = VideoJob::new(
-                "Track recovery".to_string(),
-                "recovered",
-                "deleted while downloading",
-            );
+            let job = VideoJob::new("Track recovery", "recovered", "deleted while downloading");
             let (state, cancel, snapshot, streamed) = (&state, &cancel, &snapshot, &streamed);
             job.run(&video_ids, cancel, |video_id| async move {
                 let mode = FetchMode::new(streamed.contains(&video_id));
@@ -416,9 +363,7 @@ impl AppState {
         snapshot: &[String],
         cancel: &CancellationToken,
     ) -> Result<AudioTrack, DownloadError> {
-        let track = self
-            .extract_audio(&watch_url(video_id), mode, cancel)
-            .await?;
+        let track = self.extract_audio(video_id, mode, cancel).await?;
         self.restore_order_position(video_id, snapshot).await;
         self.broadcast_tracks();
         Ok(track)
@@ -426,19 +371,12 @@ impl AppState {
 
     /// Download streamed tracks in the background, each keeping its place in
     /// the order as a recovery does.
-    pub fn start_track_download(
-        self: &Arc<Self>,
-        video_ids: Vec<String>,
-        cancel: CancellationToken,
-    ) {
+    pub async fn start_track_download(self: &Arc<Self>, video_ids: Vec<String>) {
+        let cancel = self.download_token().await;
         let state = self.clone();
         tokio::spawn(async move {
             let snapshot = state.track_order().await;
-            let job = VideoJob::new(
-                "Track download".to_string(),
-                "downloaded",
-                "deleted while downloading",
-            );
+            let job = VideoJob::new("Track download", "downloaded", "deleted while downloading");
             let (state, cancel, snapshot) = (&state, &cancel, &snapshot);
             job.run(&video_ids, cancel, |video_id| async move {
                 // Skip what was deleted or downloaded since the job was queued.
@@ -550,25 +488,15 @@ impl AppState {
         slot: &ExtractSlot,
         cancel: &CancellationToken,
     ) -> Result<AudioTrack, DownloadError> {
-        // Inside a deletion window: refreshing would only rewrite an entry the
-        // deletion has already superseded. Reported the way a stop is.
-        if slot.is_deleted() {
-            return Err(DownloadError::Cancelled);
-        }
-        // Only a registered track can be refreshed: nothing is downloaded here,
-        // so an unknown ID cannot be turned into one by trying.
+        // Nothing is downloaded here, so only a registered track can be
+        // refreshed.
         let Some(existing) = self.get_track(video_id).await else {
             return Err("Track not found".into());
         };
 
-        // Shown under its current title, stale or not — it is the only name the
-        // user has for the track being worked on.
-        let stamp = self.begin_progress(video_id, &existing.title).await;
-        let result = self
-            .fetch_and_rewrite_metadata(&existing, slot, cancel)
-            .await;
-        self.settle_progress(video_id, stamp, &result).await;
-        result
+        // Shown under its current title, the only name the user has for it.
+        let work = self.fetch_and_rewrite_metadata(&existing, slot, cancel);
+        self.with_progress(video_id, &existing.title, work).await
     }
 
     /// Fetch metadata for a registered track and write it over the stored entry.
@@ -582,12 +510,9 @@ impl AppState {
         tracing::info!("Refreshing metadata: {video_id}");
         let meta = fetch_metadata(&watch_url(video_id), Some(cancel)).await?;
 
-        // What YouTube reports about the video is replaced; what describes the
-        // local copy is carried over. `is_live` especially: a stream that has
-        // since ended reports itself as a normal video, and adopting that would
-        // leave an entry claiming a cached file it never had. `streamed` is
-        // the same kind of fact: how the library keeps the audio, not what the
-        // video is.
+        // What YouTube reports is replaced; what describes the local copy
+        // (`is_live`, `streamed`) is carried over, since an ended stream
+        // reports itself as a normal video.
         let track = AudioTrack {
             is_live: existing.is_live,
             streamed: existing.streamed,
@@ -599,12 +524,8 @@ impl AppState {
             )
         };
 
-        // No commit guard, unlike a live registration: this only rewrites an
-        // entry that already existed, so a stop racing it leaves nothing
-        // behind. The check just spares Redis a pointless write.
-        if cancel.is_cancelled() {
-            return Err(DownloadError::Cancelled);
-        }
+        // No commit guard needed: this only rewrites an existing entry.
+        DownloadError::check(cancel)?;
         self.rewrite_track_entry(&track, slot).await?;
         Ok(track)
     }
@@ -640,16 +561,13 @@ impl AppState {
         output_path: &Path,
     ) -> Result<(), DownloadError> {
         let _commit_guard = self.download_cancel.lock().await;
-        if cancel.is_cancelled() {
-            return Err(DownloadError::Cancelled);
-        }
+        DownloadError::check(cancel)?;
         Ok(link_into_cache(staged_path, output_path).await?)
     }
 
     /// Download audio with yt-dlp into `staged_path`, reporting the percentage
-    /// from its progress lines. `staged_path` sits inside the attempt's staging
-    /// directory, so yt-dlp's .part file and post-processing intermediates land
-    /// there too and never touch the served cache.
+    /// from its progress lines. yt-dlp's intermediates land beside it in the
+    /// staging directory.
     async fn run_download(
         &self,
         video_id: &str,
@@ -657,9 +575,7 @@ impl AppState {
         staged_path: &Path,
         cancel: &CancellationToken,
     ) -> Result<(), DownloadError> {
-        if cancel.is_cancelled() {
-            return Err(DownloadError::Cancelled);
-        }
+        DownloadError::check(cancel)?;
         let staged_str = staged_path.to_string_lossy().to_string();
         // Prefer an AAC source so AUDIO_EXT needs a remux rather than a re-encode
         let format_spec = format!("bestaudio[ext={AUDIO_EXT}]/bestaudio");
@@ -732,20 +648,11 @@ impl AppState {
     /// Drop staging directories orphaned by a crash or a hard kill. Only safe
     /// at startup, when no download of this process owns one yet.
     pub async fn clear_download_staging(&self) {
-        let root = self.cache_dir.join(DOWNLOAD_STAGING_DIR);
-        if let Err(e) = tokio::fs::remove_dir_all(&root).await
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!(
-                "Failed to clear download staging directory {}: {e}",
-                root.display()
-            );
-        }
+        remove_staging_dir(&self.cache_dir.join(DOWNLOAD_STAGING_DIR)).await;
     }
 }
 
-/// Discard one attempt's staging directory along with any partial or
-/// post-processing files yt-dlp left in it.
+/// Discard a staging directory along with whatever yt-dlp left in it.
 async fn remove_staging_dir(path: &Path) {
     if let Err(e) = tokio::fs::remove_dir_all(path).await
         && e.kind() != std::io::ErrorKind::NotFound

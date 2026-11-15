@@ -17,13 +17,9 @@ pub async fn ws_upgrade(State(state): State<Arc<AppState>>, ws: WebSocketUpgrade
     ws.on_upgrade(move |socket| ws_handler(socket, state))
 }
 
-/// Snapshot of the pushed state a client mirrors, applied idempotently so
-/// resending is always safe. Deliberately excludes the track list, which the
-/// client pages in over REST — callers that need it refreshed too must send
-/// tracks_update_message() alongside.
-///
-/// The six reads are independent and the Redis connection is multiplexed, so
-/// they are issued together.
+/// Snapshot of the pushed state a client mirrors; resending is always safe.
+/// Excludes the track list, which is paged over REST — send
+/// tracks_update_message() alongside to refresh it.
 async fn init_message(state: &AppState) -> String {
     let (devices, playback_mode, downloads, playlists, active_playlist, sleep_timer) = tokio::join!(
         state.devices_json(),
@@ -42,8 +38,7 @@ async fn init_message(state: &AppState) -> String {
         "playlists": playlists,
         "active_playlist": active_playlist,
         "sleep_timer": sleep_timer,
-        // Lets a client that already fetched a page over REST tell whether the
-        // list changed before this connection existed (see AppState::tracks_rev).
+        // See AppState::tracks_rev.
         "tracks_rev": state.tracks_rev(),
     })
     .to_string()
@@ -125,7 +120,6 @@ async fn ws_handler(mut socket: WebSocket, state: Arc<AppState>) {
     }
 }
 
-/// Process a single client WebSocket message.
 /// Responses are sent via client_tx, delivered by ws_handler's select loop.
 async fn handle_ws_message(
     state: &Arc<AppState>,
@@ -160,10 +154,8 @@ async fn handle_ws_message(
         }
         "set_sleep_timer" => {
             let requested = &data["minutes"];
-            // Absent and null both mean "no timer"; anything else must be a
-            // whole number of minutes. A present but unusable value (negative,
-            // fractional, non-numeric) is malformed, not a cancellation —
-            // treating it as one would drop a timer nobody asked to stop.
+            // Absent and null both mean "no timer". A present but unusable
+            // value is malformed, not a cancellation.
             let minutes = if requested.is_null() {
                 Some(0)
             } else {
@@ -189,10 +181,8 @@ async fn handle_ws_message(
     }
 }
 
-/// Kick off a download for the requested URL. Downloads can take minutes, so
-/// the work runs on its own task and reports back over client_tx, leaving the
-/// select loop free for broadcasts and further commands. The work puts itself
-/// on display as soon as it is accepted, so the reply is only the outcome.
+/// Kick off a download for the requested URL on its own task, reporting the
+/// outcome over client_tx.
 async fn start_extract(
     state: &Arc<AppState>,
     client_tx: &UnboundedSender<String>,
@@ -214,13 +204,15 @@ async fn start_extract(
     let tx = client_tx.clone();
     let url = url.to_string();
     tokio::spawn(async move {
-        // Playlist URLs are expanded and trigger a batch import.
         let outcome: Result<Value, DownloadError> =
             match classify_url(&url) {
-                UrlKind::Video => state.extract_audio(&url, mode, &cancel).await.map(|track| {
-                    state.broadcast_tracks();
-                    json!({ "type": "extract_audio_result", "track": track })
-                }),
+                UrlKind::Video(video_id) => state
+                    .extract_audio(&video_id, mode, &cancel)
+                    .await
+                    .map(|track| {
+                        state.broadcast_tracks();
+                        json!({ "type": "extract_audio_result", "track": track })
+                    }),
                 UrlKind::Playlist(list_id) => state
                     .import_playlist(&list_id, mode, &cancel)
                     .await

@@ -1,17 +1,16 @@
 //! Recognizing YouTube URLs. Host and ID validation live here so a
 //! user-supplied URL is never handed to yt-dlp as-is.
 
-/// Classified input URL type (video / playlist / unknown).
 pub enum UrlKind {
-    Video,
+    /// The video ID.
+    Video(String),
+    /// The playlist ID.
     Playlist(String),
     Unknown,
 }
 
-/// The canonical watch URL for a video ID. Every yt-dlp invocation naming a
-/// single video builds its URL here rather than forwarding what the user typed:
-/// the ID has been validated by [`extract_video_id`] or [`is_video_id`], so
-/// rebuilding the URL keeps a deceptive host out of yt-dlp's hands.
+/// The canonical watch URL for a validated video ID, so what the user typed
+/// never reaches yt-dlp.
 pub(crate) fn watch_url(video_id: &str) -> String {
     format!("https://www.youtube.com/watch?v={video_id}")
 }
@@ -20,8 +19,8 @@ pub(crate) fn watch_url(video_id: &str) -> String {
 /// ID and a playlist ID (e.g. a watch URL during playlist playback) are treated
 /// as video for backward compatibility.
 pub fn classify_url(url: &str) -> UrlKind {
-    if extract_video_id(url).is_some() {
-        UrlKind::Video
+    if let Some(video_id) = extract_video_id(url) {
+        UrlKind::Video(video_id)
     } else if let Some(list_id) = extract_playlist_id(url) {
         UrlKind::Playlist(list_id)
     } else {
@@ -40,14 +39,11 @@ fn parse_youtube_url(value: &str) -> Option<url::Url> {
         return None;
     }
     let host = parsed.host_str()?;
-    if matches!(
+    matches!(
         host,
         "youtube.com" | "www.youtube.com" | "m.youtube.com" | "music.youtube.com" | "youtu.be"
-    ) {
-        Some(parsed)
-    } else {
-        None
-    }
+    )
+    .then_some(parsed)
 }
 
 /// Extract a YouTube playlist ID from the list= parameter. Whether the list can
@@ -69,12 +65,11 @@ fn is_id_chars(s: &str) -> bool {
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
 }
 
-/// Check whether a string matches the YouTube video ID format.
 pub(crate) fn is_video_id(s: &str) -> bool {
     s.len() == 11 && is_id_chars(s)
 }
 
-pub(crate) fn extract_video_id(url: &str) -> Option<String> {
+fn extract_video_id(url: &str) -> Option<String> {
     let parsed = parse_youtube_url(url)?;
     let host = parsed.host_str()?;
     let candidate = if host == "youtu.be" {
@@ -92,11 +87,7 @@ pub(crate) fn extract_video_id(url: &str) -> Option<String> {
         }
     }?;
 
-    if is_video_id(candidate) {
-        Some(candidate.to_string())
-    } else {
-        None
-    }
+    is_video_id(candidate).then(|| candidate.to_string())
 }
 
 pub(crate) fn is_playlist_id(value: &str) -> bool {
@@ -145,14 +136,14 @@ mod tests {
 
     #[test]
     fn classifies_urls() {
-        assert!(matches!(
-            classify_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
-            UrlKind::Video
-        ));
+        match classify_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ") {
+            UrlKind::Video(id) => assert_eq!(id, "dQw4w9WgXcQ"),
+            _ => panic!("expected video"),
+        }
         // Both v= and list= reads as a video
         assert!(matches!(
             classify_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL0123456789abcdefghij"),
-            UrlKind::Video
+            UrlKind::Video(_)
         ));
         match classify_url("https://www.youtube.com/playlist?list=PL0123456789abcdefghij") {
             UrlKind::Playlist(id) => assert_eq!(id, "PL0123456789abcdefghij"),

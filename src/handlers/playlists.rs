@@ -4,7 +4,7 @@ use super::{
     AppError, AppResult, TrackIdsRequest, client_locale, playlist_or_404, track_or_404,
     written_or_err,
 };
-use crate::state::{AppState, FetchMode, PlaylistNameError};
+use crate::state::{AppState, FetchMode, PlaylistJson, PlaylistNameError};
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::response::Json;
@@ -31,10 +31,7 @@ pub async fn create_playlist(
 ) -> AppResult<Json<Value>> {
     let playlist = state.create_playlist(&req.name).await.map_err(name_error)?;
     state.broadcast_playlists().await;
-    // Return in the same shape as the client's Playlist type (count required)
-    let mut playlist = serde_json::to_value(&playlist)
-        .map_err(|e| AppError::internal(format!("Failed to serialize playlist: {e}")))?;
-    playlist["count"] = json!(0);
+    let playlist = PlaylistJson { playlist, count: 0 };
     Ok(Json(json!({ "status": "ok", "playlist": playlist })))
 }
 
@@ -69,10 +66,9 @@ pub async fn delete_playlist(
     if !state.delete_playlist(&playlist_id).await {
         return Err(AppError::not_found("Playlist not found"));
     }
-    state.broadcast_playlists().await;
     // The tracks it held are back in the library view.
-    state.broadcast_tracks();
-    // If this playlist was the active playback scope, notify that it reverted to full library
+    state.broadcast_playlist_membership().await;
+    // The active scope reverts to the full library if it pointed here.
     state.broadcast_active_playlist().await;
     Ok(Json(json!({ "status": "ok" })))
 }
@@ -147,9 +143,7 @@ pub async fn add_playlist_track(
         "Playlist not found",
         "Failed to add track to playlist",
     )?;
-    state.broadcast_playlists().await;
-    // Notify clients viewing this playlist to refresh their track list
-    state.broadcast_tracks();
+    state.broadcast_playlist_membership().await;
     let locale = client_locale(&headers);
     Ok(Json(json!({
         "status": "ok",
@@ -166,8 +160,7 @@ pub async fn remove_playlist_track(
     if !state.remove_playlist_track(&playlist_id, &track_id).await {
         return Err(AppError::not_found("Track not in playlist"));
     }
-    state.broadcast_playlists().await;
-    state.broadcast_tracks();
+    state.broadcast_playlist_membership().await;
     Ok(Json(json!({ "status": "ok" })))
 }
 
@@ -179,22 +172,16 @@ pub async fn bulk_add_playlist_tracks(
     Json(req): Json<TrackIdsRequest>,
 ) -> AppResult<Json<Value>> {
     playlist_or_404(&state, &playlist_id).await?;
-    // Resolving the whole list up front costs no accuracy: a track deleted
-    // between here and its append is stripped from every playlist by the
-    // deletion itself. Dropping repeats matters beyond the saved round-trip —
-    // the script moves an already-listed track to the end, so a repeat would
-    // have reordered the playlist against the request.
+    // Repeats are dropped: the script moves an already-listed track to the
+    // end, so one would reorder the playlist against the request.
     let track_ids = req.known_ids(&state).await;
     let ids: Vec<&str> = track_ids.iter().map(String::as_str).collect();
-    // A playlist deleted mid-request stops the append rather than it being
-    // written where nobody can see it.
     let (added, outcome) = state.add_playlist_tracks(&playlist_id, &ids).await;
 
     // Whatever landed before a failure is real, so clients are told about it
     // even when the request as a whole is reported as failed.
     if added > 0 {
-        state.broadcast_playlists().await;
-        state.broadcast_tracks();
+        state.broadcast_playlist_membership().await;
     }
     written_or_err(
         outcome,
@@ -224,8 +211,7 @@ pub async fn bulk_remove_playlist_tracks(
             AppError::internal("Failed to remove tracks from playlist")
         })?;
     if removed > 0 {
-        state.broadcast_playlists().await;
-        state.broadcast_tracks();
+        state.broadcast_playlist_membership().await;
     }
     Ok(Json(json!({ "status": "ok", "removed": removed })))
 }

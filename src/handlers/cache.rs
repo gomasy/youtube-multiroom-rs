@@ -1,7 +1,7 @@
 //! The state of the audio cache: what it holds, what it holds for nothing, and
 //! what the library expects of it that is no longer there.
 
-use super::{AppResult, client_locale};
+use super::{AppResult, client_locale, job_started};
 use crate::state::{AppState, CacheReport};
 use axum::extract::State;
 use axum::http::HeaderMap;
@@ -34,10 +34,8 @@ pub async fn cleanup_cache(
 
 /// POST /api/cache/repair
 ///
-/// Re-download the audio of every registered track whose cache file is gone.
-/// Each costs a yt-dlp run, so this only starts the job and says how many
-/// tracks it will visit; the files themselves land later, as `tracks_update`
-/// frames, and the progress is reported over the download channel.
+/// Start re-downloading every registered track whose cache file is gone, and
+/// say how many.
 pub async fn repair_cache(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -50,17 +48,14 @@ pub async fn repair_cache(
         .map(|t| t.id)
         .collect();
     let total = track_ids.len();
-
     if total > 0 {
-        // Captured before spawning, so a Stop all received immediately
-        // afterwards still cancels this job.
-        let cancel = state.download_token().await;
-        state.start_track_recovery(track_ids, Default::default(), cancel);
+        state
+            .start_track_recovery(track_ids, Default::default())
+            .await;
     }
     let locale = client_locale(&headers);
-    Ok(Json(json!({
-        "status": "ok",
-        "total": total,
-        "message": t!("api_cache_repair_started", locale = &locale, count = total),
-    })))
+    Ok(job_started(
+        total,
+        &t!("api_cache_repair_started", locale = &locale, count = total),
+    ))
 }

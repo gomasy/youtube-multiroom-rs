@@ -32,6 +32,15 @@ pub enum DownloadError {
 }
 
 impl DownloadError {
+    /// `Err(Cancelled)` once `cancel` has fired.
+    pub(crate) fn check(cancel: &CancellationToken) -> Result<(), Self> {
+        if cancel.is_cancelled() {
+            Err(Self::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+
     /// Prefix a failure with context. Cancellation carries no message, so it
     /// passes through untouched.
     pub(crate) fn context(self, context: &str) -> Self {
@@ -67,10 +76,8 @@ fn snippet(s: &str) -> String {
     s.chars().take(300).collect()
 }
 
-/// What a failed child said on stderr, ready for an error message: drained,
-/// lossily decoded, trimmed and bounded. Only called on the failure path —
-/// draining is not free, since a descendant can hold the pipe open. `None` is a
-/// reader never started or already abandoned, and reports as no output.
+/// A failed child's stderr, drained, lossily decoded, trimmed and bounded for
+/// an error message. `None` reports as no output.
 pub(crate) async fn stderr_snippet(task: Option<tokio::task::JoinHandle<Vec<u8>>>) -> String {
     let buf = match task {
         Some(task) => drain_output(task).await.unwrap_or_default(),

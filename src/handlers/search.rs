@@ -44,23 +44,14 @@ pub async fn search_youtube(Query(query): Query<SearchQuery>) -> AppResult<Json<
     Ok(Json(json!({ "results": results })))
 }
 
-/// Convert a yt-dlp flat-playlist entry into an AudioTrack for search results.
-/// Using AudioTrack ensures wire-format compatibility with /api/tracks
-/// (file_path is serde(skip) so it's never exposed).
+/// Convert a yt-dlp flat-playlist entry into an AudioTrack, the wire shape of
+/// /api/tracks.
 fn search_entry(v: &Value) -> Option<AudioTrack> {
     let id = v["id"].as_str()?;
     Some(AudioTrack {
-        id: id.to_string(),
-        title: v["title"].as_str().unwrap_or(id).to_string(),
         // Flat entries have inconsistent thumbnail formats; use a known URL pattern
         thumbnail: format!("https://i.ytimg.com/vi/{id}/mqdefault.jpg"),
-        duration: AudioTrack::extract_duration(v),
-        channel: AudioTrack::extract_channel(v),
-        is_live: AudioTrack::extract_is_live(v),
-        streamed: false,
-        scheduled_start: AudioTrack::extract_scheduled_start(v),
-        created_at: 0.0,
-        file_path: String::new(),
+        ..AudioTrack::from_meta(id, v, 0.0, String::new())
     })
 }
 
