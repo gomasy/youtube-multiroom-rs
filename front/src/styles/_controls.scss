@@ -1,6 +1,5 @@
 @use "mixins" as *;
 
-// ── Buttons ──
 .btn {
   background: var(--accent);
   color: #fff;
@@ -48,7 +47,6 @@
   .btn { flex: 1; }
 }
 
-// ── Small borderless action buttons ──
 .text-btn {
   background: none;
   border: none;
@@ -63,7 +61,6 @@
   &.text-btn-danger:hover { color: var(--accent); }
 }
 
-// ── Icon-only action buttons ──
 .delete-btn {
   background: none;
   border: none;
@@ -87,7 +84,6 @@
   }
 }
 
-// ── Text inputs and selects ──
 .select,
 .input {
   @include card($radius: var(--radius-sm));
@@ -102,7 +98,6 @@
 .input::placeholder { color: var(--text-dim); }
 .select { cursor: pointer; }
 
-// ── Loading spinner ──
 .spinner {
   @include circle(16px);
   display: inline-block;

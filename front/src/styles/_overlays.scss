@@ -1,6 +1,5 @@
 @use "mixins" as *;
 
-// ── Toasts ──
 .toast-container {
   @include stack(8px);
   position: fixed;
@@ -28,7 +27,6 @@
   to   { opacity: 1; transform: translateY(0); }
 }
 
-// ── Auth modal ──
 .auth-modal {
   @include center;
   position: fixed;
@@ -56,7 +54,6 @@
   }
 }
 
-// ── Add-to-playlist menu ──
 .playlist-menu-anchor {
   position: relative;
   flex-shrink: 0;

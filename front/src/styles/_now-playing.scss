@@ -43,7 +43,6 @@ $thumb-size: 64px;
   color: var(--text-dim);
 }
 
-// ── Preview playback in the browser ──
 .preview-player {
   @include row(10px);
   padding: 10px 14px;

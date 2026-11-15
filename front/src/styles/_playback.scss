@@ -1,7 +1,6 @@
 @use "tokens" as *;
 @use "mixins" as *;
 
-// ── Playback mode (mutually exclusive segments) ──
 .playback-mode-section { margin-bottom: $section-gap; }
 
 .segmented {
@@ -48,7 +47,6 @@
   @include flexible;
 }
 
-// ── Sleep timer ──
 .sleep-timer-section { margin-bottom: $section-gap; }
 .sleep-select { width: 100%; }
 

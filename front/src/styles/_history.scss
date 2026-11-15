@@ -96,7 +96,6 @@
   &:active { cursor: grabbing; }
 }
 
-// ── Pagination ──
 .pagination {
   @include center(12px);
   margin-top: 14px;
@@ -115,7 +114,6 @@
   text-align: center;
 }
 
-// ── Playlist tabs ──
 .playlist-bar {
   @include row(6px);
   flex-wrap: wrap;
@@ -161,7 +159,6 @@
   width: 160px;
 }
 
-// ── Bulk actions ──
 .bulk-actions {
   @include row(8px);
   flex-wrap: wrap;

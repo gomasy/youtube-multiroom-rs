@@ -30,7 +30,6 @@
   cursor: pointer;
 }
 
-// ── Search results ──
 .search-results {
   @include card;
   @include stack(6px);
