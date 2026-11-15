@@ -114,6 +114,8 @@
   "mode.loop.hint": "Play scope tracks in order",
   "mode.off": "Off",
   "mode.off.hint": "Stop after track ends",
+  "mode.repeatOne": "Repeat 1",
+  "mode.repeatOne.hint": "Repeat the current track",
   "mode.scope": "Play scope",
   "mode.shuffle": "Shuffle",
   "mode.shuffle.hint": "Play random tracks from scope",

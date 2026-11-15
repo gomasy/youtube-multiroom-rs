@@ -114,6 +114,8 @@
   "mode.loop.hint": "再生範囲を順に連続再生",
   "mode.off": "オフ",
   "mode.off.hint": "曲が終わったら停止",
+  "mode.repeatOne": "1曲",
+  "mode.repeatOne.hint": "現在の曲を繰り返し再生",
   "mode.scope": "再生範囲",
   "mode.shuffle": "シャッフル",
   "mode.shuffle.hint": "再生範囲からランダムに連続再生",

@@ -65,7 +65,7 @@ export interface Playlist {
   count: number;
 }
 
-export type PlaybackMode = "loop" | "shuffle" | "off";
+export type PlaybackMode = "loop" | "repeat_one" | "shuffle" | "off";
 
 /** In-progress download progress (managed server-side, broadcast to all clients) */
 export interface DownloadProgress {

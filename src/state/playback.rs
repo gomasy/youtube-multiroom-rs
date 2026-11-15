@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tokio::time;
 
-const PLAYBACK_MODES: [&str; 3] = ["loop", "shuffle", "off"];
+const PLAYBACK_MODES: [&str; 4] = ["loop", "repeat_one", "shuffle", "off"];
 const DEFAULT_PLAYBACK_MODE: &str = "off";
 
 /// Upper bound for the sleep timer. Anything longer is indistinguishable from a

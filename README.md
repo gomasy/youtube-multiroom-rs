@@ -213,7 +213,7 @@ An install keeps the manifest and its icons on the device and re-fetches them la
 2. Paste a YouTube URL (auto-extracted on paste), or type keywords and press 検索 to search and pick a result. A playlist URL (`playlist?list=...`) bulk-imports its videos. The box clears as soon as the request is sent, so URLs can be queued back to back — every accepted request appears in the progress list, which lives on the server and survives a reload. Tick 「ストリーミング（ダウンロードしない）」 below the box to add videos without downloading them (see [Streaming Mode](#streaming-mode))
 3. Say **「アレクサ、YouTube プレーヤーを開いて」** to each Echo
 4. Select devices in the Web UI and click play, then say the phrase again on each Echo to start playback
-5. Optionally pick a playback mode (off / loop / shuffle) to auto-play the next track, and narrow the scope to a playlist with 再生範囲
+5. Optionally pick a playback mode (off / loop / repeat one / shuffle) to auto-play the next track, and narrow the scope to a playlist with 再生範囲
 6. Drag the grip handle (⋮⋮) on a row to reorder the library; hold the drag over the pagination buttons to flip pages and drop the track elsewhere
 7. 「次に再生に追加」 appends the selected track to the play-next queue of the selected devices; queued tracks play before the loop/shuffle mode kicks in and can be reviewed or removed on each device card
 8. Say 「アレクサ、次の曲」 / 「アレクサ、前の曲」 while playing to skip; on an Echo Show the on-screen buttons work too. 「アレクサ、YouTube プレーヤーで〇〇をかけて」 plays a track from the library by name, and 「〇〇のプレイリストをかけて」 a playlist
@@ -233,7 +233,7 @@ An install keeps the manifest and its icons on the device and re-fetches them la
     │    ├── youtube:tracks                # track metadata (hash)
     │    ├── youtube:tracks_order          # track display/playback order (list)
     │    ├── youtube:devices               # Echo device states (hash)
-    │    ├── youtube:playback_mode         # auto-play mode ("off" | "loop" | "shuffle")
+    │    ├── youtube:playback_mode         # auto-play mode ("off" | "loop" | "repeat_one" | "shuffle")
     │    ├── youtube:playlists             # named playlist metadata (hash)
     │    ├── youtube:playlist:{id}         # playlist track ids in order (list)
     │    ├── youtube:active_playlist       # loop/shuffle selection scope (playlist id)
@@ -306,6 +306,7 @@ What happens when a track ends is set by a global playback mode, persisted in Re
 
 - `off` — stop after the current track
 - `loop` — continue with the next track in order, wrapping to the top
+- `repeat_one` — play the current track again
 - `shuffle` — continue with a random track other than the current one
 
 On `AudioPlayer.PlaybackNearlyFinished` the server picks the next track and enqueues it via an `ENQUEUE` directive. The selection scope defaults to the whole library and can be narrowed to a playlist with 再生範囲 (persisted in `youtube:active_playlist`). A deleted scope falls back to the whole library; an empty one stops auto-play.
@@ -384,7 +385,7 @@ Production builds also pass `--no-source-maps` — the maps are 2 MB against a 2
 
 Audio extraction runs over the WebSocket to avoid reverse proxy read timeouts. The client sends `{ "type": "extract_audio", "url": "...", "stream": false }` (`stream: true` registers without downloading; absent means `false`) and receives `extract_audio_result`, `extract_audio_error` or `extract_audio_cancelled`; a playlist URL instead answers with `playlist_import_result` (`name`, `total`) once the background import has started. Each request runs on its own task and is answered exactly once, so several can be in flight on one socket — two requests for the same video are serialized server-side, and the second gets the first's result from the cache.
 
-The client can also send `cancel_downloads`, `set_playback_mode` (`"off" | "loop" | "shuffle"`), `set_active_playlist` (playlist id or null), `set_sleep_timer` (`minutes`, null or 0 to cancel), and `ping` (answered with `pong`).
+The client can also send `cancel_downloads`, `set_playback_mode` (`"off" | "loop" | "repeat_one" | "shuffle"`), `set_active_playlist` (playlist id or null), `set_sleep_timer` (`minutes`, null or 0 to cancel), and `ping` (answered with `pong`).
 
 On connect the server sends an `init` frame with the server version, device map, playback mode, in-progress downloads, playlists, active playlist, sleep timer expiry, and `tracks_rev`. The track list itself is fetched separately via `GET /api/tracks`; `tracks_rev` is what tells a client whether the page it already holds is current. A client that falls behind the broadcast channel is re-sent the whole `init` frame followed by a `tracks_update`, so a dropped message resyncs it rather than leaving it silently stale.
 

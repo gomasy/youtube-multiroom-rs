@@ -530,8 +530,11 @@ impl AppState {
         eligible: impl Fn(&AudioTrack) -> bool,
     ) -> Option<AudioTrack> {
         let mode = self.playback_mode().await;
-        if mode != "loop" && mode != "shuffle" {
-            return None; // "off": no auto-play
+        match mode.as_str() {
+            // `eligible` only screens what a mode would pick instead.
+            "repeat_one" => return self.get_track(current_id).await,
+            "loop" | "shuffle" => {}
+            _ => return None, // "off": no auto-play
         }
         let mut tracks = self.active_scope_tracks().await;
         // The current track stays so the loop keeps its position
@@ -544,7 +547,8 @@ impl AppState {
     }
 
     /// Return the track to play on an explicit "next" command. Shuffle picks
-    /// randomly; otherwise advance in order (even when mode is "off").
+    /// randomly; otherwise advance in order (even when mode is "off", and out
+    /// of the track "repeat_one" is holding).
     pub async fn skip_next_track(&self, current_id: &str) -> Option<AudioTrack> {
         if self.playback_mode().await == "shuffle" {
             random_track_from(self.active_scope_tracks().await, current_id)

@@ -4,6 +4,7 @@ import type { PlaybackMode, Playlist } from "../types";
 const MODES: { value: PlaybackMode; labelKey: string; hintKey: string }[] = [
   { value: "off", labelKey: "mode.off", hintKey: "mode.off.hint" },
   { value: "loop", labelKey: "mode.loop", hintKey: "mode.loop.hint" },
+  { value: "repeat_one", labelKey: "mode.repeatOne", hintKey: "mode.repeatOne.hint" },
   { value: "shuffle", labelKey: "mode.shuffle", hintKey: "mode.shuffle.hint" },
 ];
 
