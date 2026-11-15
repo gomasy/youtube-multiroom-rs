@@ -12,10 +12,7 @@ const FADE_MS = 300;
 
 export function useToast() {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
-  /**
-   * Dismissal timers still pending. Tracked so unmounting cancels them instead
-   * of leaving each outstanding toast holding a timer for its full duration.
-   */
+  /** Pending dismissal timers, cancelled on unmount. */
   const timers = useRef(new Set<ReturnType<typeof setTimeout>>());
 
   useEffect(
@@ -26,13 +23,13 @@ export function useToast() {
     [],
   );
 
-  const showToast = useCallback((message: string, duration = TOAST_MS) => {
+  const showToast = useCallback((message: string) => {
     const id = nextId++;
     setToasts((prev) => [...prev, { id, message }]);
     const timer = setTimeout(() => {
       timers.current.delete(timer);
       setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, duration);
+    }, TOAST_MS);
     timers.current.add(timer);
   }, []);
 

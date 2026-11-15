@@ -6,7 +6,7 @@ import {
   importLibrary,
   repairCache,
 } from "../api";
-import { showApiError } from "../errors";
+import { reportErrors, withBusy } from "../errors";
 import { formatBytes } from "../format";
 import { t, tFmt } from "../i18n";
 import type { CacheStatus } from "../types";
@@ -26,27 +26,18 @@ interface Props {
   showToast: (msg: string) => void;
 }
 
-/**
- * Cache upkeep and library backup: the two things that need doing occasionally
- * and never while listening.
- *
- * Collapsed until asked for, which is also what keeps the cache scan off the
- * page load — it walks the whole cache directory, and nothing here changes
- * often enough to be worth watching.
- */
+/** Cache upkeep and library backup. Collapsed until asked for, which keeps the cache scan off the page load. */
 export function LibraryTools({ onUnauthorized, showToast }: Props) {
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState<CacheStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [withAudio, setWithAudio] = useState(false);
 
-  const load = useCallback(async () => {
-    try {
-      setStatus(await fetchCacheStatus(onUnauthorized));
-    } catch (e) {
-      showApiError(showToast, e);
-    }
-  }, [onUnauthorized, showToast]);
+  const load = useCallback(
+    () =>
+      reportErrors(showToast, async () => setStatus(await fetchCacheStatus(onUnauthorized))),
+    [onUnauthorized, showToast],
+  );
 
   function toggle() {
     const next = !open;
@@ -55,20 +46,11 @@ export function LibraryTools({ onUnauthorized, showToast }: Props) {
   }
 
   /** Disable the panel for the duration of `action`, reporting what it throws. */
-  async function withBusy(action: () => Promise<void>) {
-    setBusy(true);
-    try {
-      await action();
-    } catch (e) {
-      showApiError(showToast, e);
-    } finally {
-      setBusy(false);
-    }
-  }
+  const busyWhile = (action: () => Promise<void>) => withBusy(setBusy, showToast, action);
 
   /** Run an action that reports a message and changes what the panel shows. */
   function run(action: () => Promise<{ message?: string }>, fallback: string) {
-    return withBusy(async () => {
+    return busyWhile(async () => {
       const data = await action();
       showToast(data.message || fallback);
       await load();
@@ -76,7 +58,7 @@ export function LibraryTools({ onUnauthorized, showToast }: Props) {
   }
 
   function save() {
-    return withBusy(async () => {
+    return busyWhile(async () => {
       const doc = await exportLibrary(onUnauthorized);
       saveAs(doc, `youtube-multiroom-${new Date().toISOString().slice(0, 10)}.json`);
       showToast(t("tools.exported"));
@@ -88,8 +70,6 @@ export function LibraryTools({ onUnauthorized, showToast }: Props) {
     try {
       doc = JSON.parse(await file.text()) as Record<string, unknown>;
     } catch {
-      // Reported on its own terms: a file that is not JSON at all says nothing
-      // useful through the parser's message.
       showToast(t("tools.notAnExport"));
       return;
     }

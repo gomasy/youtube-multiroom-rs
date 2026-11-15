@@ -5,7 +5,6 @@ import type { Device, DownloadProgress, PlaybackMode, Playlist, Track, WSMessage
 
 interface WSCallbacks {
   onVersion: (version: string) => void;
-  onInit: (devices: Record<string, Device>) => void;
   /** Track-list revision at connect time (undefined if the server omits it) */
   onInitTracks: (rev: number | undefined) => void;
   onDeviceUpdate: (devices: Record<string, Device>) => void;
@@ -21,15 +20,11 @@ interface WSCallbacks {
   onConnectedChange: (connected: boolean) => void;
 }
 
-// Reconnect backoff, doubling per consecutive failure so a server that stays
-// down is not hammered once every 3 seconds by every open tab.
+// Reconnect backoff, doubling per consecutive failure.
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 
-/**
- * A frame we cannot parse is not worth tearing the connection down for, so
- * report it and let the socket carry on.
- */
+/** A malformed frame is reported and skipped, not worth tearing the connection down. */
 function parseMessage(raw: string): WSMessage | null {
   try {
     return JSON.parse(raw);
@@ -82,9 +77,7 @@ export function useWebSocket(active: boolean, callbacks: WSCallbacks) {
       switch (data.type) {
         case "init":
           if (data.version) cb.onVersion(data.version);
-          cb.onInit(data.devices || {});
-          // The REST snapshot predates this subscription, so the gap is
-          // reconciled here rather than waited out.
+          cb.onDeviceUpdate(data.devices || {});
           cb.onInitTracks(data.tracks_rev);
           if (data.playback_mode) cb.onPlaybackMode(data.playback_mode);
           // Restores the progress display after a reload or reconnect
@@ -124,8 +117,7 @@ export function useWebSocket(active: boolean, callbacks: WSCallbacks) {
           cb.onPlaylistImportStarted(data.name, data.total);
           break;
         // extract_audio_cancelled is deliberately silent: Stop all already
-        // clears the display for every job it stopped, so a toast per cancelled
-        // request would only report what the user just asked for.
+        // clears the display.
       }
     };
 
@@ -193,42 +185,24 @@ function previewMove(
 }
 
 interface ReorderOptions {
-  /**
-   * The page on screen, and the page the loaded tracks were fetched for. These
-   * differ between a page change and its fetch landing, and every index here is
-   * global (page offset + row), so both are needed.
-   */
+  /** The page on screen, and the page the loaded tracks were fetched for (they differ mid-fetch). */
   page: number;
   loadedPage: number;
   totalPages: number;
   setPage: Dispatch<SetStateAction<number>>;
   tracks: Track[];
   setTracks: Dispatch<SetStateAction<Track[]>>;
-  /**
-   * Whether there is an order to edit. A single track has nothing to move, and
-   * a filtered view is not showing the stored order, so a drop position in it
-   * would name the wrong slot.
-   */
+  /** False for a single track or a filtered view, which does not show the stored order. */
   enabled: boolean;
   /** Playlist whose order is being edited (null reorders the whole library). */
   playlistId: string | null;
   onUnauthorized: () => void;
   onError: (error: unknown) => void;
-  /**
-   * Run once the move has been persisted or has failed, so the caller can
-   * re-fetch and replace the optimistic order with what the server stored.
-   */
+  /** Run once the move has been persisted or has failed. */
   onSettled: () => void;
 }
 
-/**
- * Drag-to-reorder for a paginated track list.
- *
- * Owns the pointer gesture end to end: the drop position, edge scrolling,
- * holding over a pagination button to turn the page, and the optimistic
- * reorder written back on release. The caller supplies the list state and gets
- * back the refs to attach and the indices that drive the row styling.
- */
+/** Drag-to-reorder for a paginated track list, including edge scrolling and page flips. */
 export function useTrackReorder(opts: ReorderOptions) {
   const { page, loadedPage, totalPages, setPage, tracks, setTracks, enabled } = opts;
   const [dragId, setDragId] = useState<string | null>(null);
@@ -316,11 +290,7 @@ export function useTrackReorder(opts: ReorderOptions) {
     updateDropIndex(e.clientY);
   }
 
-  /**
-   * Apply the move where the pointer was released: reorder the visible rows at
-   * once so the list does not snap back mid-request, then persist and let the
-   * caller re-fetch the authoritative order.
-   */
+  /** Reorder the visible rows at once, then persist and let the caller re-fetch. */
   async function commit() {
     const id = dragId;
     const to = dropIndex;

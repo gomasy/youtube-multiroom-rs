@@ -23,8 +23,7 @@ export function setToken(token: string) {
 function authHeaders(): Record<string, string> {
   const h: Record<string, string> = { "Content-Type": "application/json" };
   if (apiToken) h["Authorization"] = `Bearer ${apiToken}`;
-  // Advertise the browser locale so the server can localize API messages
-  // (toasts, etc.) to match the UI language.
+  // Lets the server localize API messages.
   h["X-App-Lang"] = lang;
   return h;
 }
@@ -47,17 +46,28 @@ async function authFetch(
   return res;
 }
 
-/** Perform an authFetch and throw t(errorKey) on a non-OK response. */
-export async function authOk(
+/**
+ * Perform an authFetch and throw t(errorKey) on a non-OK response, or
+ * t(conflictKey) on a 409 when one is given.
+ */
+async function authOk(
   url: string,
   errorKey: string,
   options: RequestInit = {},
   onUnauthorized?: () => void,
+  conflictKey?: string,
 ): Promise<Response> {
   const res = await authFetch(url, options, onUnauthorized);
+  if (conflictKey && res.status === 409) throw new Error(t(conflictKey));
   if (!res.ok) throw new Error(t(errorKey));
   return res;
 }
+
+/** Request options for a JSON body. */
+const json = (body: unknown, method = "POST"): RequestInit => ({
+  method,
+  body: JSON.stringify(body),
+});
 
 // Path builders for the resources addressed by ID. Routed through here so no
 // call site can forget to escape an ID into the URL.
@@ -70,20 +80,6 @@ export async function deleteTrack(trackId: string, onUnauthorized?: () => void):
   await authOk(trackPath(trackId), "history.deleteFailed", { method: "DELETE" }, onUnauthorized);
 }
 
-/** authOk with its own message for a 409. */
-async function conflictOk(
-  url: string,
-  errorKey: string,
-  conflictKey: string,
-  options: RequestInit,
-  onUnauthorized?: () => void,
-): Promise<Response> {
-  const res = await authFetch(url, options, onUnauthorized);
-  if (res.status === 409) throw new Error(t(conflictKey));
-  if (!res.ok) throw new Error(t(errorKey));
-  return res;
-}
-
 /** For the endpoints that name a playlist, where a 409 means the name is taken. */
 function playlistNameOk(
   url: string,
@@ -91,7 +87,7 @@ function playlistNameOk(
   options: RequestInit,
   onUnauthorized?: () => void,
 ): Promise<Response> {
-  return conflictOk(url, errorKey, "api.playlistNameTaken", options, onUnauthorized);
+  return authOk(url, errorKey, options, onUnauthorized, "api.playlistNameTaken");
 }
 
 /** authOk that parses the response body as JSON. */
@@ -104,15 +100,40 @@ async function authJson<T>(
   return (await authOk(url, errorKey, options, onUnauthorized)).json();
 }
 
+/** POST `{ track_ids }`, the body of every bulk track endpoint. */
+function postTrackIds<T>(
+  url: string,
+  errorKey: string,
+  trackIds: string[],
+  onUnauthorized?: () => void,
+): Promise<T> {
+  return authJson(url, errorKey, json({ track_ids: trackIds }), onUnauthorized);
+}
+
+/** POST a track and the devices it is for. */
+function postTrackToDevices(
+  url: string,
+  errorKey: string,
+  trackId: string,
+  deviceIds: string[],
+  onUnauthorized?: () => void,
+): Promise<{ message?: string }> {
+  return authJson(
+    url,
+    errorKey,
+    json({ track_id: trackId, device_ids: deviceIds }),
+    onUnauthorized,
+  );
+}
+
 export async function fetchTracks(
   page: number,
-  perPage: number,
   onUnauthorized?: () => void,
   token?: string,
   playlistId?: string | null,
   filter?: string,
 ): Promise<TracksPage> {
-  let url = `/api/tracks?page=${page}&per_page=${perPage}`;
+  let url = `/api/tracks?page=${page}&per_page=${PER_PAGE}`;
   if (playlistId) url += `&playlist=${encodeURIComponent(playlistId)}`;
   if (filter) url += `&q=${encodeURIComponent(filter)}`;
   return authJson(
@@ -132,14 +153,7 @@ export async function reorderTrack(
   await authOk(
     "/api/tracks/reorder",
     "api.reorderFailed",
-    {
-      method: "POST",
-      body: JSON.stringify({
-        track_id: trackId,
-        new_index: newIndex,
-        playlist: playlistId ?? null,
-      }),
-    },
+    json({ track_id: trackId, new_index: newIndex, playlist: playlistId ?? null }),
     onUnauthorized,
   );
 }
@@ -170,7 +184,7 @@ export async function createPlaylist(
   const res = await playlistNameOk(
     "/api/playlists",
     "api.createPlaylistFailed",
-    { method: "POST", body: JSON.stringify({ name }) },
+    json({ name }),
     onUnauthorized,
   );
   const data: { playlist: Playlist } = await res.json();
@@ -185,7 +199,7 @@ export async function renamePlaylist(
   await playlistNameOk(
     playlistPath(playlistId),
     "api.renamePlaylistFailed",
-    { method: "PATCH", body: JSON.stringify({ name }) },
+    json({ name }, "PATCH"),
     onUnauthorized,
   );
 }
@@ -210,7 +224,7 @@ export async function addToPlaylist(
   return authJson(
     `${playlistPath(playlistId)}/tracks`,
     "api.addToPlaylistFailed",
-    { method: "POST", body: JSON.stringify({ track_id: trackId }) },
+    json({ track_id: trackId }),
     onUnauthorized,
   );
 }
@@ -232,29 +246,15 @@ export async function bulkDeleteTracks(
   trackIds: string[],
   onUnauthorized?: () => void,
 ): Promise<{ deleted: number }> {
-  return authJson(
-    "/api/tracks/bulk-delete",
-    "api.bulkDeleteFailed",
-    { method: "POST", body: JSON.stringify({ track_ids: trackIds }) },
-    onUnauthorized,
-  );
+  return postTrackIds("/api/tracks/bulk-delete", "api.bulkDeleteFailed", trackIds, onUnauthorized);
 }
 
-/**
- * Start a background re-fetch of the given tracks' metadata. `total` is how
- * many tracks the job will visit; the refresh itself lands later, as
- * tracks_update frames.
- */
+/** Start a background re-fetch of the given tracks' metadata; `total` is how many. */
 export async function refreshTracksMetadata(
   trackIds: string[],
   onUnauthorized?: () => void,
 ): Promise<{ total: number; message?: string }> {
-  return authJson(
-    "/api/tracks/refresh-metadata",
-    "api.refreshMetadataFailed",
-    { method: "POST", body: JSON.stringify({ track_ids: trackIds }) },
-    onUnauthorized,
-  );
+  return postTrackIds("/api/tracks/refresh-metadata", "api.refreshMetadataFailed", trackIds, onUnauthorized);
 }
 
 /** Start downloading the streamed tracks among those given; `total` is how many. */
@@ -262,12 +262,7 @@ export async function downloadTracks(
   trackIds: string[],
   onUnauthorized?: () => void,
 ): Promise<{ total: number; message?: string }> {
-  return authJson(
-    "/api/tracks/download",
-    "api.downloadTracksFailed",
-    { method: "POST", body: JSON.stringify({ track_ids: trackIds }) },
-    onUnauthorized,
-  );
+  return postTrackIds("/api/tracks/download", "api.downloadTracksFailed", trackIds, onUnauthorized);
 }
 
 /** Turn the cached tracks among those given into streamed ones, deleting their files. */
@@ -275,12 +270,7 @@ export async function releaseTracks(
   trackIds: string[],
   onUnauthorized?: () => void,
 ): Promise<{ released: number; message?: string }> {
-  return authJson(
-    "/api/tracks/release",
-    "api.releaseTracksFailed",
-    { method: "POST", body: JSON.stringify({ track_ids: trackIds }) },
-    onUnauthorized,
-  );
+  return postTrackIds("/api/tracks/release", "api.releaseTracksFailed", trackIds, onUnauthorized);
 }
 
 /**
@@ -293,12 +283,12 @@ export async function syncPlaylist(
   stream: boolean,
   onUnauthorized?: () => void,
 ): Promise<{ total: number; message?: string }> {
-  const res = await conflictOk(
+  const res = await authOk(
     `${playlistPath(playlistId)}/sync`,
     "api.syncPlaylistFailed",
-    "api.syncPlaylistBusy",
-    { method: "POST", body: JSON.stringify({ stream }) },
+    json({ stream }),
     onUnauthorized,
+    "api.syncPlaylistBusy",
   );
   return res.json();
 }
@@ -308,12 +298,7 @@ export async function bulkAddToPlaylist(
   trackIds: string[],
   onUnauthorized?: () => void,
 ): Promise<{ message?: string }> {
-  return authJson(
-    `${playlistPath(playlistId)}/tracks/bulk`,
-    "api.bulkAddToPlaylistFailed",
-    { method: "POST", body: JSON.stringify({ track_ids: trackIds }) },
-    onUnauthorized,
-  );
+  return postTrackIds(`${playlistPath(playlistId)}/tracks/bulk`, "api.bulkAddToPlaylistFailed", trackIds, onUnauthorized);
 }
 
 export async function bulkRemoveFromPlaylist(
@@ -321,12 +306,7 @@ export async function bulkRemoveFromPlaylist(
   trackIds: string[],
   onUnauthorized?: () => void,
 ): Promise<{ removed: number }> {
-  return authJson(
-    `${playlistPath(playlistId)}/tracks/bulk-remove`,
-    "api.bulkRemoveFromPlaylistFailed",
-    { method: "POST", body: JSON.stringify({ track_ids: trackIds }) },
-    onUnauthorized,
-  );
+  return postTrackIds(`${playlistPath(playlistId)}/tracks/bulk-remove`, "api.bulkRemoveFromPlaylistFailed", trackIds, onUnauthorized);
 }
 
 export async function searchYouTube(
@@ -348,15 +328,7 @@ export async function playTracks(
   deviceIds: string[],
   onUnauthorized?: () => void,
 ): Promise<{ message?: string }> {
-  return authJson(
-    "/api/play",
-    "api.playFailed",
-    {
-      method: "POST",
-      body: JSON.stringify({ track_id: trackId, device_ids: deviceIds }),
-    },
-    onUnauthorized,
-  );
+  return postTrackToDevices("/api/play", "api.playFailed", trackId, deviceIds, onUnauthorized);
 }
 
 export async function queueNext(
@@ -364,15 +336,7 @@ export async function queueNext(
   deviceIds: string[],
   onUnauthorized?: () => void,
 ): Promise<{ message?: string }> {
-  return authJson(
-    "/api/queue",
-    "api.queueFailed",
-    {
-      method: "POST",
-      body: JSON.stringify({ track_id: trackId, device_ids: deviceIds }),
-    },
-    onUnauthorized,
-  );
+  return postTrackToDevices("/api/queue", "api.queueFailed", trackId, deviceIds, onUnauthorized);
 }
 
 export async function removeQueueItem(
@@ -400,7 +364,7 @@ export async function seekDevice(
   await authOk(
     `${devicePath(deviceId)}/seek`,
     "devices.seekFailed",
-    { method: "POST", body: JSON.stringify({ position_ms: positionMs }) },
+    json({ position_ms: positionMs }),
     onUnauthorized,
   );
 }
@@ -417,11 +381,7 @@ export async function clearQueue(
   );
 }
 
-/**
- * Line every other device up with this one, starting from where it is now.
- * The empty body is what asks for "all the others"; the endpoint also accepts
- * an explicit list.
- */
+/** Line every other device up with this one; the empty body asks for "all the others". */
 export async function syncDevices(
   deviceId: string,
   onUnauthorized?: () => void,
@@ -429,7 +389,7 @@ export async function syncDevices(
   return authJson(
     `${devicePath(deviceId)}/sync`,
     "api.syncFailed",
-    { method: "POST", body: "{}" },
+    json({}),
     onUnauthorized,
   );
 }
@@ -451,10 +411,7 @@ export async function cleanupCache(
   );
 }
 
-/**
- * Start re-downloading the tracks whose cached audio is gone. The files
- * themselves land later, as tracks_update frames.
- */
+/** Start re-downloading the tracks whose cached audio is gone. */
 export async function repairCache(
   onUnauthorized?: () => void,
 ): Promise<{ message?: string }> {
@@ -466,11 +423,7 @@ export async function repairCache(
   );
 }
 
-/**
- * The export document exactly as the server serialized it. Left as text rather
- * than parsed: it is on its way to a file, and a round trip through JS could
- * only lose something.
- */
+/** The export document as text: it is on its way to a file. */
 export async function exportLibrary(onUnauthorized?: () => void): Promise<string> {
   return (
     await authOk("/api/library/export", "api.exportFailed", {}, onUnauthorized)
@@ -484,7 +437,7 @@ export async function importLibrary(
   return authJson(
     "/api/library/import",
     "api.importFailed",
-    { method: "POST", body: JSON.stringify(doc) },
+    json(doc),
     onUnauthorized,
   );
 }
@@ -493,7 +446,7 @@ export async function checkAuth(
   token?: string,
 ): Promise<{ authorized: boolean; data: TracksPage | null }> {
   try {
-    const data = await fetchTracks(1, PER_PAGE, undefined, token);
+    const data = await fetchTracks(1, undefined, token);
     return { authorized: true, data };
   } catch (error) {
     if (error instanceof UnauthorizedError) {

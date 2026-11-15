@@ -8,7 +8,7 @@ import {
   seekDevice as apiSeekDevice,
   syncDevices,
 } from "../api";
-import { showApiError } from "../errors";
+import { reportErrors, showApiError, withBusy } from "../errors";
 import { t } from "../i18n";
 import { ScrollingText } from "./ScrollingText";
 import { SeekBar } from "./SeekBar";
@@ -62,41 +62,28 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
     );
   }
 
-  async function deleteDevice(deviceId: string) {
-    try {
+  function deleteDevice(deviceId: string) {
+    return reportErrors(showToast, async () => {
       await apiDeleteDevice(deviceId, onUnauthorized);
-      setSelectedDevices((prev) => {
-        const next = new Set(prev);
-        next.delete(deviceId);
-        return next;
-      });
+      // The effect above drops it from the selection once it leaves `devices`.
       onDeviceDeleted(deviceId);
       showToast(t("devices.deleted"));
-    } catch (e) {
-      showApiError(showToast, e);
-    }
+    });
   }
 
-  async function seekDevice(deviceId: string, positionMs: number) {
-    try {
+  function seekDevice(deviceId: string, positionMs: number) {
+    return reportErrors(showToast, async () => {
       await apiSeekDevice(deviceId, positionMs, onUnauthorized);
       showToast(t("devices.seekQueued"));
-    } catch (e) {
-      showApiError(showToast, e);
-    }
+    });
   }
 
-  /**
-   * Bring every other device to where this one is. Applied as each Echo next
-   * contacts the skill, exactly as a seek is.
-   */
-  async function syncOthers(deviceId: string) {
-    try {
+  /** Bring every other device to where this one is. */
+  function syncOthers(deviceId: string) {
+    return reportErrors(showToast, async () => {
       const data = await syncDevices(deviceId, onUnauthorized);
       showToast(data.message || t("devices.syncQueued"));
-    } catch (e) {
-      showApiError(showToast, e);
-    }
+    });
   }
 
   async function sendToSelected(
@@ -117,15 +104,11 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
       return;
     }
 
-    setBusy(true);
-    try {
-      const data = await call(currentTrack.id, Array.from(selectedDevices), onUnauthorized);
+    const trackId = currentTrack.id;
+    await withBusy(setBusy, showToast, async () => {
+      const data = await call(trackId, Array.from(selectedDevices), onUnauthorized);
       showToast(data.message || fallbackMsg);
-    } catch (e) {
-      showApiError(showToast, e);
-    } finally {
-      setBusy(false);
-    }
+    });
   }
 
   const playOnSelected = () => sendToSelected(playTracks, setPlaying, t("devices.playQueued"));

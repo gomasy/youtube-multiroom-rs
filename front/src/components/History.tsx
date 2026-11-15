@@ -16,7 +16,7 @@ import {
   syncPlaylist,
   PER_PAGE,
 } from "../api";
-import { showApiError } from "../errors";
+import { reportErrors, showApiError, withBusy } from "../errors";
 import { useTrackReorder } from "../hooks";
 import { t, tFmt } from "../i18n";
 import { loadStreamMode } from "../prefs";
@@ -73,13 +73,11 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
     setPage,
     tracks,
     setTracks,
-    // A filtered view is not showing the stored order, so a drop position in it
-    // would name the wrong slot.
     enabled: reorderEnabled,
     playlistId: viewPlaylist,
     onUnauthorized,
     onError: (e) => showApiError(showToast, e),
-    onSettled: () => setLocalVersion((v) => v + 1),
+    onSettled: refetch,
   });
 
   useEffect(() => {
@@ -100,7 +98,7 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
       }
     }
     let cancelled = false;
-    fetchTracks(page, PER_PAGE, onUnauthorized, undefined, viewPlaylist, filter || undefined)
+    fetchTracks(page, onUnauthorized, undefined, viewPlaylist, filter || undefined)
       .then((data) => {
         if (cancelled) return;
         setTracks(data.tracks);
@@ -111,7 +109,7 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
       })
       .catch((error: unknown) => {
         if (cancelled) return;
-        showError(error);
+        showApiError(showToast, error);
       });
     return () => {
       cancelled = true;
@@ -120,8 +118,12 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
 
   if (total === 0 && !filter && !viewPlaylist && playlists.length === 0) return null;
 
-  function showError(e: unknown) {
-    showApiError(showToast, e);
+  function report(action: () => Promise<void>) {
+    return reportErrors(showToast, action);
+  }
+
+  function refetch() {
+    setLocalVersion((v) => v + 1);
   }
 
   function renderNameForm(
@@ -187,14 +189,12 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
 
   async function deleteTrack(track: Track) {
     if (!window.confirm(tFmt("history.confirmDeleteTrack", { title: track.title }))) return;
-    try {
+    await report(async () => {
       await apiDeleteTrack(track.id, onUnauthorized);
       onTrackDeleted(track.id);
-      setLocalVersion((v) => v + 1);
+      refetch();
       showToast(t("history.trackDeleted"));
-    } catch (e) {
-      showError(e);
-    }
+    });
   }
 
   async function removeTrackFromView(track: Track) {
@@ -203,13 +203,11 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
       title: track.title,
       playlist: viewingPlaylist.name,
     }))) return;
-    try {
+    await report(async () => {
       await removeFromPlaylist(viewPlaylist, track.id, onUnauthorized);
-      setLocalVersion((v) => v + 1);
+      refetch();
       showToast(t("history.removedFromPlaylist"));
-    } catch (e) {
-      showError(e);
-    }
+    });
   }
 
   async function submitNewPlaylist() {
@@ -218,15 +216,13 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
       setNewName(null);
       return;
     }
-    try {
+    await report(async () => {
       const playlist = await createPlaylist(name, onUnauthorized);
       setNewName(null);
       showToast(`${t("history.playlistCreated")}: ${playlist.name}`);
       onPlaylistCreated(playlist);
       switchView(playlist.id);
-    } catch (e) {
-      showError(e);
-    }
+    });
   }
 
   async function submitRename() {
@@ -235,45 +231,37 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
       setRenameName(null);
       return;
     }
-    try {
+    await report(async () => {
       await renamePlaylist(viewingPlaylist.id, name, onUnauthorized);
       setRenameName(null);
       showToast(t("history.playlistRenamed"));
-    } catch (e) {
-      showError(e);
-    }
+    });
   }
 
   async function deleteViewingPlaylist() {
     if (!viewingPlaylist) return;
     const playlist = viewingPlaylist;
     if (!window.confirm(tFmt("history.confirmDeletePlaylist", { name: playlist.name }))) return;
-    try {
+    await report(async () => {
       await deletePlaylist(playlist.id, onUnauthorized);
       showToast(`${t("history.playlistDeleted")}: ${playlist.name}`);
       if (viewPlaylistRef.current === playlist.id) switchView(null);
-    } catch (e) {
-      showError(e);
-    }
+    });
   }
 
   /** New videos follow the streaming toggle, as a pasted URL does. */
   async function syncViewingPlaylist() {
     if (!viewingPlaylist || syncing) return;
-    setSyncing(true);
-    try {
-      const data = await syncPlaylist(viewingPlaylist.id, loadStreamMode(), onUnauthorized);
+    const playlistId = viewingPlaylist.id;
+    await withBusy(setSyncing, showToast, async () => {
+      const data = await syncPlaylist(playlistId, loadStreamMode(), onUnauthorized);
       showToast(
         data.message ||
           (data.total > 0
             ? tFmt("history.syncStarted", { count: data.total })
             : t("history.syncUpToDate")),
       );
-    } catch (e) {
-      showError(e);
-    } finally {
-      setSyncing(false);
-    }
+    });
   }
 
   function toggleSelect(trackId: string) {
@@ -300,10 +288,9 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
   }
 
   /**
-   * Removal from the open playlist, or permanent deletion from the library when
-   * none is open. The two are never interchangeable, so the view is resolved
-   * once up front and re-checked after every await — those give the user time
-   * to switch views, and acting on the new one would touch the wrong tracks.
+   * Removes from the open playlist, or deletes from the library when none is
+   * open. The view is re-checked after each await, since the user may have
+   * switched.
    */
   async function bulkRemove() {
     if (selected.size === 0) return;
@@ -321,7 +308,7 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
       : window.confirm(tFmt("history.confirmBulkDelete", { count: trackIds.length }));
     if (!confirmed) return;
 
-    try {
+    await report(async () => {
       if (playlist) {
         const { removed } = await bulkRemoveFromPlaylist(playlist.id, trackIds, onUnauthorized);
         showToast(tFmt("history.tracksRemovedFromPlaylist", { count: removed }));
@@ -333,32 +320,24 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
         if (viewPlaylistRef.current !== null) return;
       }
       exitSelectMode();
-      setLocalVersion((v) => v + 1);
-    } catch (e) {
-      showError(e);
-    }
+      refetch();
+    });
   }
 
-  /**
-   * Unlike the other bulk actions, not scoped to the open view: metadata
-   * belongs to the track itself, so refreshing from inside a playlist updates
-   * the same library entries the library view would.
-   */
+  /** Not scoped to the open view: metadata belongs to the track itself. */
   async function bulkRefreshMetadata() {
     if (selected.size === 0) return;
-    try {
+    await report(async () => {
       const data = await refreshTracksMetadata(Array.from(selected), onUnauthorized);
       showToast(data.message || tFmt("history.metadataRefreshStarted", { count: data.total }));
       exitSelectMode();
-    } catch (e) {
-      showError(e);
-    }
+    });
   }
 
   /** The server acts only on the selected tracks each change applies to. */
   async function bulkDownload() {
     if (selected.size === 0) return;
-    try {
+    await report(async () => {
       const data = await downloadTracks(Array.from(selected), onUnauthorized);
       showToast(
         data.total === 0
@@ -366,15 +345,13 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
           : data.message || tFmt("history.downloadStarted", { count: data.total }),
       );
       exitSelectMode();
-    } catch (e) {
-      showError(e);
-    }
+    });
   }
 
   async function bulkRelease() {
     if (selected.size === 0) return;
     if (!window.confirm(tFmt("history.confirmBulkRelease", { count: selected.size }))) return;
-    try {
+    await report(async () => {
       const data = await releaseTracks(Array.from(selected), onUnauthorized);
       showToast(
         data.released === 0
@@ -382,35 +359,29 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
           : data.message || tFmt("history.released", { count: data.released }),
       );
       exitSelectMode();
-      if (data.released > 0) setLocalVersion((v) => v + 1);
-    } catch (e) {
-      showError(e);
-    }
+      if (data.released > 0) refetch();
+    });
   }
 
   async function bulkAddToPlaylistAction(playlistId: string) {
     if (selected.size === 0) return;
     setBulkMenuOpen(false);
-    try {
+    await report(async () => {
       const data = await bulkAddToPlaylist(playlistId, Array.from(selected), onUnauthorized);
       showToast(data.message || t("history.addedToPlaylist"));
       exitSelectMode();
       // The moved tracks have left this view.
-      setLocalVersion((v) => v + 1);
-    } catch (e) {
-      showError(e);
-    }
+      refetch();
+    });
   }
 
   async function addTrackToPlaylist(playlistId: string, trackId: string) {
     setMenuTrackId(null);
-    try {
+    await report(async () => {
       const data = await addToPlaylist(playlistId, trackId, onUnauthorized);
       showToast(data.message || t("history.addedToPlaylist"));
-      setLocalVersion((v) => v + 1);
-    } catch (e) {
-      showError(e);
-    }
+      refetch();
+    });
   }
 
   return (
@@ -558,7 +529,7 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
               {bulkMenuOpen && (
                 <AddToPlaylistMenu
                   playlists={playlists}
-                  onAdd={(pid) => bulkAddToPlaylistAction(pid)}
+                  onAdd={bulkAddToPlaylistAction}
                   onClose={() => setBulkMenuOpen(false)}
                 />
               )}

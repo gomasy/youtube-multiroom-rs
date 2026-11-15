@@ -12,3 +12,29 @@ export function showApiError(showToast: (msg: string) => void, e: unknown) {
   if (e instanceof DOMException && e.name === "AbortError") return;
   showToast(`${t("common.error")}: ${e instanceof Error ? e.message : String(e)}`);
 }
+
+/** Run `action`, toasting what it throws. */
+export async function reportErrors(
+  showToast: (msg: string) => void,
+  action: () => Promise<void>,
+): Promise<void> {
+  try {
+    await action();
+  } catch (e) {
+    showApiError(showToast, e);
+  }
+}
+
+/** reportErrors, with `setBusy` held true for the duration. */
+export async function withBusy(
+  setBusy: (busy: boolean) => void,
+  showToast: (msg: string) => void,
+  action: () => Promise<void>,
+): Promise<void> {
+  setBusy(true);
+  try {
+    await reportErrors(showToast, action);
+  } finally {
+    setBusy(false);
+  }
+}

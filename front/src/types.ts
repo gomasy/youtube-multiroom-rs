@@ -9,11 +9,7 @@ export interface Track {
   streamed?: boolean;
   /** Scheduled start (Unix secs) while the stream is upcoming */
   scheduled_start?: number;
-  /**
-   * The track is registered but its cached audio is gone, so an Echo asked to
-   * play it would fail. Only the library listing reports this; it is absent
-   * rather than false for the tracks that are fine.
-   */
+  /** Registered but its cached audio is gone; absent when fine. */
   file_missing?: boolean;
 }
 
@@ -41,7 +37,6 @@ export interface Device {
   queue?: QueueItem[];
 }
 
-/** A single item in the Up Next queue */
 export interface QueueItem extends Track {
   /** Unique entry identifier within the queue. Used for deletion. */
   entry: string;
@@ -95,10 +90,7 @@ export interface WSInitMessage {
   active_playlist?: string | null;
   /** Sleep timer expiry (UNIX seconds), null if not set */
   sleep_timer?: number | null;
-  /**
-   * Track-list revision at connect time. Equal to the rev of an already
-   * fetched page means that page is still current, so no refetch is needed.
-   */
+  /** Track-list revision at connect time; equal to a fetched page's rev means it is current. */
   tracks_rev?: number;
 }
 

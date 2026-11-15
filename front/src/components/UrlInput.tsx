@@ -7,10 +7,7 @@ import { TrackRowInfo } from "./TrackRowInfo";
 import type { Track } from "../types";
 
 interface Props {
-  /**
-   * Returns whether the request actually went out. A rejected one leaves the
-   * text where it is, so it can be sent again once the socket is back.
-   */
+  /** Returns whether the request went out; a rejected one leaves the text in place. */
   onExtract: (url: string, stream: boolean) => boolean;
   onUnauthorized: () => void;
   showToast: (msg: string) => void;
@@ -51,10 +48,7 @@ export function UrlInput({ onExtract, onUnauthorized, showToast }: Props) {
 
   const isUrl = isYoutubeUrl(value);
 
-  /**
-   * Drop any in-flight search so a late response cannot overwrite the results
-   * the user is now looking at.
-   */
+  /** Drop any in-flight search so a late response cannot overwrite newer results. */
   function cancelSearch() {
     searchRef.current?.abort();
     searchRef.current = null;
@@ -68,9 +62,8 @@ export function UrlInput({ onExtract, onUnauthorized, showToast }: Props) {
       return;
     }
     if (isYoutubeUrl(trimmed)) {
-      // The box is handed back the moment the request is out: the server
-      // displays it in the list below and keeps it there across a reload, so
-      // holding the input would only stop the next URL being queued.
+      // The server displays the request in the list below, so the box is
+      // freed at once.
       if (!onExtract(trimmed, stream)) return;
       cancelSearch();
       setValue("");

@@ -24,10 +24,7 @@ export function App() {
   const [devices, setDevices] = useState<Record<string, Device>>({});
   const [tracksVersion, setTracksVersion] = useState(0);
   const [initialTracks, setInitialTracks] = useState<TracksPage | null>(null);
-  /**
-   * Whether an init frame has already been handled on this page load. Only the
-   * first one can be answered by the REST snapshot; later ones are reconnects.
-   */
+  /** Whether an init frame was already handled: only the first can be answered by the REST snapshot. */
   const seenInit = useRef(false);
   const [currentTrack, setCurrentTrack] = useState<Track | null>(null);
   const [playbackMode, setPlaybackMode] = useState<PlaybackMode>("off");
@@ -89,11 +86,7 @@ export function App() {
     showToast(`${name}: ${tFmt("common.importStarted", { total })}`);
   }, [showToast]);
 
-  /**
-   * Drop the REST snapshot and re-fetch the visible page. The snapshot only
-   * describes the state before the first render, so once it is known to be
-   * behind it must not be applied again.
-   */
+  /** Drop the REST snapshot and re-fetch the visible page. */
   const refreshTracks = useCallback(() => {
     setInitialTracks(null);
     setTracksVersion((v) => v + 1);
@@ -108,13 +101,9 @@ export function App() {
   const { sendMessage } = useWebSocket(wsActive, {
     onVersion: setVersion,
     onConnectedChange: setConnected,
-    onInit: setDevices,
     onInitTracks: (rev) => {
-      // The REST snapshot was served before this subscription existed. A
-      // matching revision means nothing changed in that gap, so the page on
-      // screen is current. Anything else — a changed revision, a server too old
-      // to report one, or a reconnect, whose gap is the whole disconnected
-      // period and whose counter a restart may have reset — needs a fetch.
+      // The REST snapshot is current only for the first init with a matching
+      // revision; anything else (including every reconnect) needs a fetch.
       const snapshotIsCurrent =
         !seenInit.current && initialTracks !== null && initialTracks.rev === rev;
       seenInit.current = true;
@@ -132,11 +121,7 @@ export function App() {
     onPlaylistImportStarted: handlePlaylistImportStarted,
   });
 
-  /**
-   * Push a command to the server, reporting the one way it fails here: the
-   * socket is down, so nothing was sent. Returns whether it went out, for
-   * callers that also have local state to flip.
-   */
+  /** Send a command, toasting when the socket is down. Returns whether it went out. */
   function send(msg: Record<string, unknown>): boolean {
     if (sendMessage(msg)) return true;
     showToast(t("common.notConnected"));
