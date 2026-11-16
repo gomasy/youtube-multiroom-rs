@@ -51,9 +51,7 @@
     background: var(--accent-tint);
   }
 
-  &.dragging { opacity: 0.4; }
-  &.drop-before { box-shadow: 0 -2px 0 0 var(--accent); }
-  &.drop-after  { box-shadow: 0 2px 0 0 var(--accent); }
+  @include drag-states;
 }
 
 .history-thumb {
@@ -90,8 +88,7 @@
   cursor: grab;
   // Keeps a touch drag from scrolling the page.
   touch-action: none;
-  user-select: none;
-  -webkit-user-select: none;
+  @include no-select;
 
   &:active { cursor: grabbing; }
 }

@@ -88,3 +88,23 @@
 @mixin reduced-motion {
   @media (prefers-reduced-motion: reduce) { @content; }
 }
+
+@mixin no-select {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+// Drag-to-reorder item states; the drop marker sits on the item's leading or
+// trailing edge along `$axis` (y for rows, x for inline items).
+@mixin drag-states($axis: y) {
+  $before: 0 -2px 0 0;
+  $after: 0 2px 0 0;
+  @if $axis == x {
+    $before: -4px 0 0 -1px;
+    $after: 4px 0 0 -1px;
+  }
+
+  &.dragging { opacity: 0.4; }
+  &.drop-before { box-shadow: $before var(--accent); }
+  &.drop-after { box-shadow: $after var(--accent); }
+}
