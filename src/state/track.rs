@@ -274,11 +274,9 @@ impl AppState {
         let (key, ids) = match playlist_id {
             Some(pid) => {
                 let mut ids = self.playlist_track_ids(pid).await;
-                let Some(pos) = ids.iter().position(|id| id == track_id) else {
+                if !move_id(&mut ids, track_id, new_index) {
                     return ReorderOutcome::NotInList;
-                };
-                let id = ids.remove(pos);
-                ids.insert(new_index.min(ids.len()), id);
+                }
                 (playlist_key(pid), ids)
             }
             None => {
@@ -616,6 +614,16 @@ fn random_track_from(mut tracks: Vec<AudioTrack>, current_id: &str) -> Option<Au
     // Nanoseconds of the current time are random enough for track selection variety
     let nanos = since_epoch().subsec_nanos() as usize;
     Some(tracks.swap_remove(nanos % tracks.len()))
+}
+
+/// Move `id` to `new_index` (clamped to the end). False when `ids` lacks it.
+fn move_id(ids: &mut Vec<String>, id: &str, new_index: usize) -> bool {
+    let Some(pos) = ids.iter().position(|x| x == id) else {
+        return false;
+    };
+    let id = ids.remove(pos);
+    ids.insert(new_index.min(ids.len()), id);
+    true
 }
 
 /// The stored library order after moving `track_id` to `new_index` of
