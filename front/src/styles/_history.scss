@@ -126,6 +126,9 @@
   cursor: pointer;
   transition: background 0.15s, color 0.15s, border-color 0.15s;
   max-width: 100%;
+  // Long press drags; no callout or selection.
+  @include no-select;
+  -webkit-touch-callout: none;
 
   &:hover {
     color: var(--text);
@@ -138,7 +141,11 @@
     color: var(--text);
     font-weight: 600;
   }
+
+  @include drag-states(x);
 }
+
+.playlist-bar:has(.dragging) .playlist-tab { cursor: grabbing; }
 
 .playlist-tab-count {
   opacity: 0.7;

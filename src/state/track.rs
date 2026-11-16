@@ -306,9 +306,10 @@ impl AppState {
         }
     }
 
-    /// Replace an order list (the library's or a playlist's) atomically.
+    /// Replace an order list (the library's, a playlist's, or the playlists')
+    /// atomically.
     /// Callers hold `order_lock`. Returns whether the list was written.
-    async fn write_order_list(&self, key: &str, ids: &[String]) -> bool {
+    pub(super) async fn write_order_list(&self, key: &str, ids: &[String]) -> bool {
         // RPUSH with no values is an error, so an empty list is deleted rather
         // than written. DEL alone also leaves no stale entries behind.
         let mut pipe = redis::pipe();
@@ -617,7 +618,7 @@ fn random_track_from(mut tracks: Vec<AudioTrack>, current_id: &str) -> Option<Au
 }
 
 /// Move `id` to `new_index` (clamped to the end). False when `ids` lacks it.
-fn move_id(ids: &mut Vec<String>, id: &str, new_index: usize) -> bool {
+pub(super) fn move_id(ids: &mut Vec<String>, id: &str, new_index: usize) -> bool {
     let Some(pos) = ids.iter().position(|x| x == id) else {
         return false;
     };

@@ -5,13 +5,16 @@ use super::download::FetchMode;
 use super::job::{VideoJob, Visited};
 use super::matching::{best_scored, fold, match_score};
 use super::model::{
-    AudioTrack, Playlist, PlaylistImportInfo, PlaylistJson, PlaylistNameError, WriteOutcome,
+    AudioTrack, Playlist, PlaylistImportInfo, PlaylistJson, PlaylistNameError, ReorderOutcome,
+    WriteOutcome,
 };
 use super::progress::playlist_progress_key;
+use super::track::move_id;
 use super::url::{is_playlist_id, is_video_id};
 use super::ytdlp::{DownloadError, run_yt_dlp_cancellable};
 use super::{
-    AppState, REDIS_KEY_ACTIVE_PLAYLIST, REDIS_KEY_PLAYLISTS, now_f64, playlist_key, since_epoch,
+    AppState, REDIS_KEY_ACTIVE_PLAYLIST, REDIS_KEY_PLAYLISTS, REDIS_KEY_PLAYLISTS_ORDER, now_f64,
+    playlist_key, since_epoch,
 };
 use super::{redis_or, warn_redis};
 use redis::AsyncCommands;
@@ -137,7 +140,11 @@ impl AppState {
 
     /// The oldest playlist with this name. Older data may hold duplicates.
     async fn playlist_named(&self, name: &str) -> Option<Playlist> {
-        self.playlists().await.into_iter().find(|p| p.name == name)
+        self.playlists()
+            .await
+            .into_iter()
+            .filter(|p| p.name == name)
+            .min_by(|a, b| a.created_at.total_cmp(&b.created_at))
     }
 
     /// Callers hold `playlist_name_lock` and have checked the name is free.
@@ -204,28 +211,44 @@ impl AppState {
         )
     }
 
-    /// Return all playlists sorted by creation time.
+    /// Return all playlists in display order.
     pub async fn playlists(&self) -> Vec<Playlist> {
+        redis_or!("listing playlists", self.try_playlists().await, Vec::new())
+    }
+
+    async fn try_playlists(&self) -> redis::RedisResult<Vec<Playlist>> {
+        let mut pipe = redis::pipe();
+        pipe.hgetall(REDIS_KEY_PLAYLISTS)
+            .lrange(REDIS_KEY_PLAYLISTS_ORDER, 0, -1);
         let mut conn = self.redis.clone();
-        let all: HashMap<String, String> = redis_or!(
-            "listing playlists",
-            conn.hgetall(REDIS_KEY_PLAYLISTS).await,
-            HashMap::new()
-        );
-        let mut playlists: Vec<Playlist> = all
+        let (all, order): (HashMap<String, String>, Vec<String>) =
+            pipe.query_async(&mut conn).await?;
+        let playlists = all
             .values()
             .filter_map(|s| serde_json::from_str(s).ok())
             .collect();
-        playlists.sort_by(|a, b| {
-            a.created_at
-                .total_cmp(&b.created_at)
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        playlists
+        Ok(in_display_order(playlists, &order))
+    }
+
+    /// Move a playlist to `new_index` (0-based, clamped) in the display order.
+    pub async fn move_playlist(&self, playlist_id: &str, new_index: usize) -> ReorderOutcome {
+        let _guard = self.order_lock.lock().await;
+        let Ok(playlists) = self.try_playlists().await else {
+            return ReorderOutcome::Failed;
+        };
+        let mut ids: Vec<String> = playlists.into_iter().map(|p| p.id).collect();
+        if !move_id(&mut ids, playlist_id, new_index) {
+            return ReorderOutcome::NotInList;
+        }
+        if self.write_order_list(REDIS_KEY_PLAYLISTS_ORDER, &ids).await {
+            ReorderOutcome::Moved
+        } else {
+            ReorderOutcome::Failed
+        }
     }
 
     /// The playlist a spoken phrase names, or None if none is close enough.
-    /// Ties go to the oldest, which is the order `playlists` already returns.
+    /// Ties go to the first in display order, the order `playlists` returns.
     pub async fn find_playlist(&self, name: &str) -> Option<Playlist> {
         let folded = fold(name);
         best_scored(self.playlists().await, |playlist| {
@@ -256,9 +279,15 @@ impl AppState {
         if removed == 0 {
             return false;
         }
+        // A stale id left in the order is ignored on read.
         warn_redis!(
             "deleting playlist tracks for {playlist_id}",
-            conn.del(&[playlist_key(playlist_id), playlist_seen_key(playlist_id)])
+            redis::pipe()
+                .del(&[playlist_key(playlist_id), playlist_seen_key(playlist_id)])
+                .ignore()
+                .lrem(REDIS_KEY_PLAYLISTS_ORDER, 0, playlist_id)
+                .ignore()
+                .query_async(&mut conn)
                 .await
         );
         // If this was the active playlist, revert to the full library
@@ -401,7 +430,7 @@ impl AppState {
         memberships.into_iter().flatten().collect()
     }
 
-    /// Return all playlists with metadata and track counts in creation order (API/WS wire format).
+    /// Return all playlists with metadata and track counts in display order (API/WS wire format).
     pub async fn playlists_json(&self) -> Value {
         let playlists = self.playlists().await;
         if playlists.is_empty() {
@@ -670,6 +699,24 @@ async fn expand_playlist(
     Ok((title, video_ids))
 }
 
+/// `playlists` in the order `order` lists them, followed by those it does not
+/// list, oldest first. Ids naming no playlist are ignored, and a repeated id
+/// keeps its first position.
+fn in_display_order(mut playlists: Vec<Playlist>, order: &[String]) -> Vec<Playlist> {
+    let mut rank: HashMap<&str, usize> = HashMap::with_capacity(order.len());
+    for (i, id) in order.iter().enumerate() {
+        rank.entry(id.as_str()).or_insert(i);
+    }
+    let rank_of = |p: &Playlist| rank.get(p.id.as_str()).copied().unwrap_or(usize::MAX);
+    playlists.sort_by(|a, b| {
+        rank_of(a)
+            .cmp(&rank_of(b))
+            .then_with(|| a.created_at.total_cmp(&b.created_at))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    playlists
+}
+
 /// The first `limit` ids of `listed` not in `held`, in source order.
 fn unheld_ids(listed: Vec<String>, held: &HashSet<String>, limit: usize) -> Vec<String> {
     listed
@@ -719,6 +766,28 @@ mod tests {
         assert_eq!(unheld_ids(listed.clone(), &held, 10), ["a", "c", "e"]);
         let all: HashSet<String> = listed.iter().cloned().collect();
         assert!(unheld_ids(listed, &all, 10).is_empty());
+    }
+
+    #[test]
+    fn the_stored_order_leads_and_unlisted_playlists_follow_by_age() {
+        let playlist = |id: &str, created_at: f64| Playlist {
+            id: id.to_string(),
+            name: id.to_string(),
+            created_at,
+            source: None,
+        };
+        let playlists = vec![
+            playlist("a", 1.0),
+            playlist("b", 2.0),
+            playlist("c", 3.0),
+            playlist("d", 4.0),
+        ];
+        let order = super::super::ids(&["c", "gone", "a", "c"]);
+        let ids: Vec<String> = in_display_order(playlists, &order)
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(ids, ["c", "a", "b", "d"]);
     }
 
     #[test]

@@ -73,6 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/playlists",
             get(handlers::list_playlists).post(handlers::create_playlist),
         )
+        .route("/api/playlists/reorder", post(handlers::reorder_playlist))
         .route(
             "/api/playlists/{playlist_id}",
             patch(handlers::rename_playlist).delete(handlers::delete_playlist),

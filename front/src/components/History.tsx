@@ -17,7 +17,7 @@ import {
   PER_PAGE,
 } from "../api";
 import { reportErrors, showApiError, withBusy } from "../errors";
-import { useTrackReorder } from "../hooks";
+import { usePlaylistTabReorder, useTrackReorder } from "../hooks";
 import { t, tFmt } from "../i18n";
 import { loadStreamMode } from "../prefs";
 import { TrackRowInfo } from "./TrackRowInfo";
@@ -78,6 +78,10 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
     onUnauthorized,
     onError: (e) => showApiError(showToast, e),
     onSettled: refetch,
+  });
+  const tabReorder = usePlaylistTabReorder(playlists, {
+    onUnauthorized,
+    onError: (e) => showApiError(showToast, e),
   });
 
   useEffect(() => {
@@ -386,22 +390,42 @@ export function History({ active, initialData, refreshKey, currentTrack, playlis
 
   return (
     <div className="history-section">
-      <div className="playlist-bar">
+      <div
+        className="playlist-bar"
+        ref={tabReorder.barRef}
+        onPointerDown={tabReorder.handlePointerDown}
+        onPointerMove={tabReorder.handlePointerMove}
+        onPointerUp={tabReorder.handlePointerUp}
+        onPointerCancel={tabReorder.handlePointerCancel}
+        onClickCapture={tabReorder.handleClickCapture}
+        onContextMenu={tabReorder.handleContextMenu}
+      >
         <button
           className={`playlist-tab${viewPlaylist === null ? " active" : ""}`}
           onClick={() => switchView(null)}
         >
           {t("history.library")}
         </button>
-        {playlists.map((p) => (
-          <button
-            key={p.id}
-            className={`playlist-tab${viewPlaylist === p.id ? " active" : ""}`}
-            onClick={() => switchView(p.id)}
-          >
-            {p.name} <span className="playlist-tab-count">{p.count}</span>
-          </button>
-        ))}
+        {tabReorder.ordered.map((p, i, all) => {
+          const classes = [
+            "playlist-tab",
+            viewPlaylist === p.id && "active",
+            tabReorder.dragId === p.id && "dragging",
+            tabReorder.dropIndex === i && "drop-before",
+            i === all.length - 1 && tabReorder.dropIndex === all.length && "drop-after",
+          ];
+          return (
+            <button
+              key={p.id}
+              data-playlist-id={p.id}
+              className={classes.filter(Boolean).join(" ")}
+              title={all.length > 1 ? t("history.dragToReorder") : undefined}
+              onClick={() => switchView(p.id)}
+            >
+              {p.name} <span className="playlist-tab-count">{p.count}</span>
+            </button>
+          );
+        })}
         {newName === null ? (
           <button
             className="playlist-tab playlist-tab-add"

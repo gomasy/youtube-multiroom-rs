@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import { getToken, reorderTrack, PER_PAGE } from "./api";
+import { getToken, reorderPlaylist, reorderTrack, PER_PAGE } from "./api";
 import type { Device, DownloadProgress, PlaybackMode, Playlist, Track, WSMessage } from "./types";
 
 interface WSCallbacks {
@@ -184,6 +184,15 @@ function previewMove(
   return [...tracks.slice(0, to), moved, ...tracks.slice(to)].slice(0, tracks.length);
 }
 
+/**
+ * The index an item at `from` ends up at when dropped into slot `to` (slots
+ * counted with it still in place), or null when either side of itself.
+ */
+function slotToIndex(from: number, to: number): number | null {
+  if (to === from || to === from + 1) return null;
+  return to > from ? to - 1 : to;
+}
+
 interface ReorderOptions {
   /** The page on screen, and the page the loaded tracks were fetched for (they differ mid-fetch). */
   page: number;
@@ -301,11 +310,8 @@ export function useTrackReorder(opts: ReorderOptions) {
     const from = tracks.findIndex((t) => t.id === id);
     const origGlobal = from !== -1 ? pageStart + from : origin.globalIndex;
     const targetGlobal = pageStart + to;
-    // Dropping onto either side of where the row already sits is not a move.
-    if (targetGlobal === origGlobal || targetGlobal === origGlobal + 1) return;
-    // The drop slot is counted with the row still in place, so a move downwards
-    // shifts by one once it has been lifted out.
-    const newIndex = targetGlobal > origGlobal ? targetGlobal - 1 : targetGlobal;
+    const newIndex = slotToIndex(origGlobal, targetGlobal);
+    if (newIndex === null) return;
 
     setTracks(previewMove(tracks, from, to, origin.track, origGlobal < pageStart));
 
@@ -329,5 +335,161 @@ export function useTrackReorder(opts: ReorderOptions) {
     handleDragMove,
     commit,
     reset,
+  };
+}
+
+// Mouse travel (px) / touch hold (ms) that turns a press into a tab drag.
+const TAB_DRAG_THRESHOLD = 6;
+const TAB_LONG_PRESS_MS = 400;
+
+interface TabReorderOptions {
+  onUnauthorized: () => void;
+  onError: (error: unknown) => void;
+}
+
+/**
+ * Drag-to-reorder for the playlist tabs (`data-playlist-id` buttons inside
+ * `barRef`). The click that ends a drag is swallowed.
+ */
+export function usePlaylistTabReorder(playlists: Playlist[], opts: TabReorderOptions) {
+  // Shown until a broadcast after the move arrives.
+  const [pending, setPending] = useState<string[] | null>(null);
+  const settled = useRef(false);
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [dropIndex, setDropIndex] = useState<number | null>(null);
+  const barRef = useRef<HTMLDivElement>(null);
+  const press = useRef<{
+    id: string;
+    pointerId: number;
+    x: number;
+    y: number;
+    timer?: number;
+    dragging?: boolean;
+  } | null>(null);
+  const swallowClick = useRef(false);
+
+  useEffect(() => {
+    if (settled.current) setPending(null);
+  }, [playlists]);
+
+  const byId = new Map(playlists.map((p) => [p.id, p]));
+  const ordered = pending
+    ? pending.flatMap((id) => byId.get(id) ?? [])
+    : playlists;
+
+  // Non-passive, so a touch drag can block page scroll.
+  useEffect(() => {
+    const bar = barRef.current;
+    if (!bar) return;
+    const onTouchMove = (e: TouchEvent) => {
+      if (press.current?.dragging) e.preventDefault();
+    };
+    bar.addEventListener("touchmove", onTouchMove, { passive: false });
+    return () => bar.removeEventListener("touchmove", onTouchMove);
+  }, []);
+
+  function reset() {
+    clearTimeout(press.current?.timer);
+    press.current = null;
+    setDragId(null);
+    setDropIndex(null);
+  }
+
+  /** Drop slot: after every tab on an earlier row, or left of the pointer on its row. */
+  function updateDropIndex(x: number, y: number) {
+    const tabs = barRef.current?.querySelectorAll<HTMLElement>("[data-playlist-id]");
+    if (!tabs) return;
+    let idx = 0;
+    tabs.forEach((el, i) => {
+      const r = el.getBoundingClientRect();
+      if (y > r.bottom || (y >= r.top && x > r.left + r.width / 2)) idx = i + 1;
+    });
+    setDropIndex(idx);
+  }
+
+  function begin(x: number, y: number) {
+    const p = press.current;
+    if (!p) return;
+    p.dragging = true;
+    try {
+      barRef.current?.setPointerCapture(p.pointerId);
+    } catch {
+      // Pointer already released.
+    }
+    setDragId(p.id);
+    updateDropIndex(x, y);
+  }
+
+  function handlePointerDown(e: React.PointerEvent<HTMLElement>) {
+    swallowClick.current = false;
+    const id = (e.target as Element).closest<HTMLElement>("[data-playlist-id]")?.dataset.playlistId;
+    if (!id || playlists.length < 2 || e.button !== 0) return;
+    reset();
+    const p: NonNullable<typeof press.current> = { id, pointerId: e.pointerId, x: e.clientX, y: e.clientY };
+    press.current = p;
+    if (e.pointerType !== "mouse") {
+      p.timer = window.setTimeout(() => begin(p.x, p.y), TAB_LONG_PRESS_MS);
+    }
+  }
+
+  function handlePointerMove(e: React.PointerEvent<HTMLElement>) {
+    const p = press.current;
+    if (!p || p.pointerId !== e.pointerId) return;
+    // Released outside the bar.
+    if (e.pointerType === "mouse" && e.buttons === 0) return reset();
+    if (p.dragging) return updateDropIndex(e.clientX, e.clientY);
+    if (Math.hypot(e.clientX - p.x, e.clientY - p.y) <= TAB_DRAG_THRESHOLD) return;
+    // A touch that moves before the hold completes is a scroll.
+    if (e.pointerType === "mouse") begin(e.clientX, e.clientY);
+    else reset();
+  }
+
+  async function handlePointerUp(e: React.PointerEvent<HTMLElement>) {
+    const p = press.current;
+    if (!p || p.pointerId !== e.pointerId) return;
+    const to = dropIndex;
+    reset();
+    if (!p.dragging) return;
+    swallowClick.current = true;
+    const ids = ordered.map((pl) => pl.id);
+    const from = ids.indexOf(p.id);
+    const newIndex = to === null || from === -1 ? null : slotToIndex(from, to);
+    if (newIndex === null) return;
+    ids.splice(from, 1);
+    ids.splice(newIndex, 0, p.id);
+    settled.current = false;
+    setPending(ids);
+    try {
+      await reorderPlaylist(p.id, newIndex, opts.onUnauthorized);
+    } catch (err) {
+      setPending(null);
+      opts.onError(err);
+    } finally {
+      settled.current = true;
+    }
+  }
+
+  function handleClickCapture(e: React.MouseEvent) {
+    if (!swallowClick.current) return;
+    swallowClick.current = false;
+    e.preventDefault();
+    e.stopPropagation();
+  }
+
+  function handleContextMenu(e: React.MouseEvent) {
+    if (dragId) e.preventDefault();
+  }
+
+  return {
+    barRef,
+    ordered,
+    dragId,
+    dropIndex,
+    handlePointerDown,
+    handlePointerMove,
+    handlePointerUp,
+    handlePointerCancel: reset,
+    handleClickCapture,
+    handleContextMenu,
   };
 }

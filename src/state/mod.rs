@@ -69,6 +69,8 @@ pub(crate) const REDIS_KEY_ACTIVE_PLAYLIST: &str = "youtube:active_playlist";
 pub(crate) const REDIS_KEY_DEVICES: &str = "youtube:devices";
 pub(crate) const REDIS_KEY_PLAYBACK_MODE: &str = "youtube:playback_mode";
 pub(crate) const REDIS_KEY_PLAYLISTS: &str = "youtube:playlists";
+/// Playlist tab order; see `in_display_order`.
+pub(crate) const REDIS_KEY_PLAYLISTS_ORDER: &str = "youtube:playlists_order";
 pub(crate) const REDIS_KEY_SLEEP_TIMER: &str = "youtube:sleep_timer";
 const REDIS_KEY_STREAM_SECRET: &str = "youtube:stream_secret";
 pub(crate) const REDIS_KEY_TRACKS: &str = "youtube:tracks";
@@ -162,7 +164,8 @@ pub struct AppState {
     pub stream_secret: String,
     /// Track restoration from audio_cache is in progress.
     restoring: AtomicBool,
-    /// Serializes modifications to youtube:tracks_order so reorder's
+    /// Serializes modifications to the order lists (youtube:tracks_order,
+    /// playlist track lists, youtube:playlists_order) so reorder's
     /// read-then-replace and extract/remove's LPUSH/LREM don't interleave.
     order_lock: Mutex<()>,
     /// Serializes playlist name checks with their writes, so two playlists

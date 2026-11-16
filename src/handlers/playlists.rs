@@ -4,7 +4,7 @@ use super::{
     AppError, AppResult, TrackIdsRequest, client_locale, playlist_or_404, track_or_404,
     written_or_err,
 };
-use crate::state::{AppState, FetchMode, PlaylistJson, PlaylistNameError};
+use crate::state::{AppState, FetchMode, PlaylistJson, PlaylistNameError, ReorderOutcome};
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::response::Json;
@@ -56,6 +56,26 @@ fn name_error(e: PlaylistNameError) -> AppError {
         PlaylistNameError::NotFound => AppError::not_found("Playlist not found"),
         PlaylistNameError::Failed => AppError::internal("Failed to save playlist"),
     }
+}
+
+#[derive(Deserialize)]
+pub struct PlaylistReorderRequest {
+    playlist_id: String,
+    new_index: usize,
+}
+
+/// POST /api/playlists/reorder
+pub async fn reorder_playlist(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PlaylistReorderRequest>,
+) -> AppResult<Json<Value>> {
+    match state.move_playlist(&req.playlist_id, req.new_index).await {
+        ReorderOutcome::Moved => {}
+        ReorderOutcome::NotInList => return Err(AppError::not_found("Playlist not found")),
+        ReorderOutcome::Failed => return Err(AppError::internal("Failed to save playlist order")),
+    }
+    state.broadcast_playlists().await;
+    Ok(Json(json!({ "status": "ok" })))
 }
 
 /// DELETE /api/playlists/:id

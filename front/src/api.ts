@@ -191,6 +191,19 @@ export async function createPlaylist(
   return data.playlist;
 }
 
+export async function reorderPlaylist(
+  playlistId: string,
+  newIndex: number,
+  onUnauthorized?: () => void,
+): Promise<void> {
+  await authOk(
+    "/api/playlists/reorder",
+    "api.reorderFailed",
+    json({ playlist_id: playlistId, new_index: newIndex }),
+    onUnauthorized,
+  );
+}
+
 export async function renamePlaylist(
   playlistId: string,
   name: string,
