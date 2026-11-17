@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import {
+  cancelPending,
   clearQueue,
   deleteDevice as apiDeleteDevice,
   playTracks,
@@ -68,6 +69,13 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
       // The effect above drops it from the selection once it leaves `devices`.
       onDeviceDeleted(deviceId);
       showToast(t("devices.deleted"));
+    });
+  }
+
+  function cancelQueued(deviceId: string) {
+    return reportErrors(showToast, async () => {
+      await cancelPending(deviceId, onUnauthorized);
+      showToast(t("devices.queuedCancelled"));
     });
   }
 
@@ -152,6 +160,15 @@ export function DeviceList({ devices, currentTrack, onDeviceDeleted, onUnauthori
                   <div className="device-status">
                     <span className={`status-dot ${dev.status}`} />
                     {STATUS_KEYS[dev.status] ? t(STATUS_KEYS[dev.status]) : dev.status}
+                    {dev.status === "queued" && (
+                      <button
+                        className="text-btn text-btn-danger"
+                        title={t("devices.cancelQueuedHint")}
+                        onClick={(e) => { e.stopPropagation(); void cancelQueued(dev.device_id); }}
+                      >
+                        {t("devices.cancelQueued")}
+                      </button>
+                    )}
                   </div>
                   {dev.current_track && (
                     <ScrollingText

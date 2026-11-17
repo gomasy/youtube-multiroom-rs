@@ -162,6 +162,20 @@ pub async fn clear_queue(
     Ok(Json(json!({ "status": "ok" })))
 }
 
+/// DELETE /api/devices/:id/pending
+pub async fn cancel_pending(
+    State(state): State<Arc<AppState>>,
+    Path(device_id): Path<String>,
+) -> AppResult<Json<Value>> {
+    let cancelled = state.cancel_pending(&device_id).await;
+    // Broadcast even on a miss: the client's view may be the stale one
+    state.broadcast_devices().await;
+    if !cancelled {
+        return Err(AppError::not_found("Nothing queued for this device"));
+    }
+    Ok(Json(json!({ "status": "ok" })))
+}
+
 /// POST /api/devices/:id/seek
 ///
 /// Queue a seek for a device's current track, applied when the Echo next

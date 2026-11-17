@@ -30,8 +30,8 @@ pub use alexa::alexa_webhook;
 pub use audio::{audio_url, live_audio, relay_audio, stream_audio};
 pub use cache::{cache_status, cleanup_cache, repair_cache};
 pub use devices::{
-    clear_queue, delete_device, get_devices, play_on_all, play_on_devices, queue_next,
-    remove_queue_item, seek_device, stop_device, sync_devices,
+    cancel_pending, clear_queue, delete_device, get_devices, play_on_all, play_on_devices,
+    queue_next, remove_queue_item, seek_device, stop_device, sync_devices,
 };
 pub use library::{export_library, import_library};
 pub use playlists::{

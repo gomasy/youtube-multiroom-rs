@@ -369,6 +369,15 @@ export async function deleteDevice(deviceId: string, onUnauthorized?: () => void
   await authOk(devicePath(deviceId), "devices.deleteFailed", { method: "DELETE" }, onUnauthorized);
 }
 
+export async function cancelPending(deviceId: string, onUnauthorized?: () => void): Promise<void> {
+  await authOk(
+    `${devicePath(deviceId)}/pending`,
+    "api.cancelPendingFailed",
+    { method: "DELETE" },
+    onUnauthorized,
+  );
+}
+
 export async function seekDevice(
   deviceId: string,
   positionMs: number,

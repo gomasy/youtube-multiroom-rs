@@ -444,6 +444,7 @@ Broadcast frames:
 | POST | `/api/queue` | Yes | Add a track to selected devices' play-next queue |
 | DELETE | `/api/devices/{id}/queue` | Yes | Clear a device's play-next queue |
 | DELETE | `/api/devices/{id}/queue/{entry}` | Yes | Remove one item from a device's queue |
+| DELETE | `/api/devices/{id}/pending` | Yes | Cancel a play, seek or sync the device has not picked up yet |
 | POST | `/api/devices/{id}/seek` | Yes | Queue playback of the current track from a position |
 | POST | `/api/devices/{id}/sync` | Yes | Line other devices up with this one (see below) |
 | POST | `/api/devices/{id}/stop` | Yes | Stop a device |

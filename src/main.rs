@@ -111,6 +111,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/devices/{device_id}/queue/{entry}",
             delete(handlers::remove_queue_item),
         )
+        .route(
+            "/api/devices/{device_id}/pending",
+            delete(handlers::cancel_pending),
+        )
         .route("/api/devices/{device_id}/seek", post(handlers::seek_device))
         .route(
             "/api/devices/{device_id}/sync",
