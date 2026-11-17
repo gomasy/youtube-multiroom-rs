@@ -270,6 +270,7 @@ impl AppState {
         track: AudioTrack,
         offset_ms: u64,
     ) -> WriteOutcome {
+        let dev = self.get_device(device_id).await;
         let cmd = PendingCommand {
             action: "play".to_string(),
             track,
@@ -305,14 +306,14 @@ impl AppState {
         // An explicit play from the web UI earns the track fresh retries
         self.clear_playback_failures(device_id).await;
         // Aligned to the queued start offset, which Resume and the web UI read
-        self.update_device(
-            device_id,
-            DeviceUpdate::new()
+        if let Some(mut dev) = dev {
+            let upd = DeviceUpdate::new()
                 .status("queued")
                 .track(cmd.track)
-                .position(offset_ms),
-        )
-        .await;
+                .position(offset_ms);
+            dev.apply(upd, now_f64());
+            self.write_device(&dev).await;
+        }
         WriteOutcome::Written
     }
 
