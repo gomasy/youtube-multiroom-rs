@@ -271,18 +271,10 @@ impl AppState {
         offset_ms: u64,
     ) -> WriteOutcome {
         let dev = self.get_device(device_id).await;
-        // Replacing a queued play keeps the state from before it
-        let prior = match &dev {
-            Some(d) if d.status == "queued" => {
-                self.peek_pending(device_id).await.and_then(|cmd| cmd.prior)
-            }
-            d => d.as_ref().map(DeviceState::prior),
-        };
         let cmd = PendingCommand {
             action: "play".to_string(),
             track,
             offset_ms,
-            prior,
         };
         let json_str = match serde_json::to_string(&cmd) {
             Ok(json) => json,
@@ -341,8 +333,8 @@ impl AppState {
         Self::parse_pending(device_id, result)
     }
 
-    /// Cancel a queued web play, restoring the state it replaced. Returns
-    /// false if the device is unknown or not queued.
+    /// Cancel a queued web play, leaving the device idle. Returns false if
+    /// the device is unknown or not queued.
     pub async fn cancel_pending(&self, device_id: &str) -> bool {
         let Some(mut dev) = self.get_device(device_id).await else {
             return false;
@@ -350,19 +342,9 @@ impl AppState {
         if dev.status != "queued" {
             return false;
         }
-        let prior = self.take_pending(device_id).await.and_then(|cmd| cmd.prior);
-        let track = match prior.as_ref().and_then(|p| p.track_id.as_deref()) {
-            Some(id) => self.get_track(id).await,
-            None => None,
-        };
-        let now = now_f64();
-        match prior {
-            // A prior whose track was deleted since has nothing to go back to
-            Some(prior) if track.is_some() || prior.track_id.is_none() => {
-                dev.restore(prior, track, now);
-            }
-            _ => dev.apply(DeviceUpdate::new().status("stopped"), now),
-        }
+        self.take_pending(device_id).await;
+        dev.current_track = None;
+        dev.apply(DeviceUpdate::new().status("idle").position(0), now_f64());
         self.write_device(&dev).await;
         true
     }

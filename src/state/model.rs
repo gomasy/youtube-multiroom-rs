@@ -354,25 +354,6 @@ impl DeviceState {
         self.last_update = now;
     }
 
-    pub(crate) fn prior(&self) -> PriorState {
-        PriorState {
-            status: self.status.clone(),
-            track_id: self.current_track.as_ref().map(|t| t.id.clone()),
-            position_ms: self.position_ms,
-            last_update: self.last_update,
-        }
-    }
-
-    /// Put back `prior` with the current copy of its track, advancing the
-    /// position by the play time since.
-    pub(crate) fn restore(&mut self, prior: PriorState, track: Option<AudioTrack>, now: f64) {
-        self.status = prior.status;
-        self.current_track = track;
-        self.position_ms = prior.position_ms;
-        self.last_update = prior.last_update;
-        self.apply(DeviceUpdate::new(), now);
-    }
-
     /// Playing or paused.
     pub fn playback_in_progress(&self) -> bool {
         matches!(self.status.as_str(), "playing" | "paused")
@@ -491,18 +472,6 @@ pub struct PendingCommand {
     /// Playback start position in milliseconds. Non-zero when seeking from web.
     #[serde(default)]
     pub offset_ms: u64,
-    /// The device state this play replaced; restored on cancel.
-    #[serde(default)]
-    pub prior: Option<PriorState>,
-}
-
-/// Only the track id is kept: the track itself is re-read on restore.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PriorState {
-    pub status: String,
-    pub track_id: Option<String>,
-    pub position_ms: u64,
-    pub last_update: f64,
 }
 
 #[derive(Deserialize)]
@@ -684,25 +653,6 @@ mod tests {
             connected: true,
             last_update: 100.0,
         }
-    }
-
-    #[test]
-    fn restore_folds_in_the_play_time_since_the_snapshot() {
-        let mut dev = playing_device();
-        let track = dev.current_track.clone();
-        let prior = dev.prior();
-        dev.apply(
-            DeviceUpdate::new()
-                .status("queued")
-                .track(AudioTrack::stub("other"))
-                .position(0),
-            101.0,
-        );
-        dev.restore(prior, track.clone(), 103.0);
-        assert_eq!(dev.status, "playing");
-        assert_eq!(dev.current_track.map(|t| t.id), track.map(|t| t.id));
-        assert_eq!(dev.position_ms, 8_000);
-        assert_eq!(dev.last_update, 103.0);
     }
 
     #[test]
